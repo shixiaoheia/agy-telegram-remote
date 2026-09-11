@@ -1,4 +1,4 @@
-> **TG 频道：Xiaohei的秘密基地**
+> **TG 频道：[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**
 >
 > 用于发布版本更新、使用技巧与公告。
 >
