@@ -442,3 +442,11 @@ agy-telegram-remote/
 👉 **[点这里前往搬瓦工，选择适合你的服务器](https://bandwagonhost.com/aff.php?aff=80815)**
 
 > 上方为作者的推广链接。购买前请根据自己的地区、预算和线路需求自行比较。
+
+---
+
+## 致谢
+
+本项目在 [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot) 的基础上进行参考、改造与优化。
+
+感谢原项目作者 [@whypuss](https://github.com/whypuss) 的开源分享与贡献。
