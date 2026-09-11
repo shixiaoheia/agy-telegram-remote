@@ -1,3 +1,5 @@
+> **TG 交流群：欢迎各位大佬进群交流** → [点击加入 Telegram 群](https://t.me/xiaoheidemimi)
+
 # Antigravity Telegram Remote | Antigravity Telegram 远程控制工具
 
 通过 Telegram 私聊，远程使用服务器上的 Google Antigravity CLI（`agy`）。
@@ -450,3 +452,8 @@ agy-telegram-remote/
 本项目在 [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot) 的基础上进行参考、改造与优化。
 
 感谢原项目作者 [@whypuss](https://github.com/whypuss) 的开源分享与贡献。
+
+---
+
+> **TG 交流群：欢迎各位大佬进群交流** → [点击加入 Telegram 群](https://t.me/xiaoheidemimi)
+
