@@ -6,6 +6,24 @@
 
 它不是群组机器人，也不是普通 AI 聊天机器人：默认不监听群聊，只接受白名单用户的私聊消息。
 
+## 在 Telegram 调用 agy 的原理
+
+Telegram 不会直接运行 agy。它只是把你的私聊任务安全地送到服务器；服务器上的程序收到消息后，以受限账户启动 `agy`，并把 agy 的执行进度和最终结果再发送回你的 Telegram。
+
+```text
+你在 Telegram 私聊发送任务
+            ↓
+Telegram Bot 收到消息并检查你的用户 ID
+            ↓
+AGY Telegram Remote 将任务交给服务器上的 agy
+            ↓
+agy 仅在配置的工作目录中分析、读写或执行任务
+            ↓
+程序将进度与最终结果回传到 Telegram 私聊
+```
+
+因此：**Telegram 是远程控制入口，agy 才是在服务器上真正执行任务的 Agent。**
+
 > **推荐服务器（推广链接）**：还没有 Linux 服务器？推荐使用 [搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)。**[点这里前往搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**。
 > 
 > 此链接为作者的推广链接；购买前请按自己的地区、预算和线路需求自行比较。
