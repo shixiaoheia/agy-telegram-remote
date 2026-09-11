@@ -14,6 +14,10 @@
 
 在普通 sudo 用户的 SSH 终端运行（不要用 root）：
 
+
+**Google 授权也在脚本内完成：** 第 5 步会直接在当前 SSH 终端启动 `agy`，由它生成一次性安全授权链接。你只需在自己的浏览器完成登录，再将浏览器给出的授权码粘贴回**当前 SSH 终端**的 agy 提示处；无需另开终端，更不要把授权码交给第三方。
+
+
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh)
 ```
