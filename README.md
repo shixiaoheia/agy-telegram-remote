@@ -48,6 +48,9 @@ Google Antigravity CLI（agy）
 
 本项目使用 Telegram 长轮询，**不需要域名、Nginx、Webhook 或开放新的 HTTP 端口**。
 
+> **服务器推荐（推广链接）**：如果你还没有 Linux 服务器，可以考虑 [搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)。该链接为作者的推广链接；购买前请按自己的地区、预算和线路需求自行比较。
+
+
 ---
 
 ## 1. 创建 Telegram Bot
