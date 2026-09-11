@@ -306,9 +306,36 @@ read_or_cancel READY '检测到输入结束，已停止继续部署；已完成�
 [[ "$READY" == YES ]] || fail '未确认授权完成。请授权后重新运行脚本。'
 
 echo '正在发送一次只读连接测试，用于确认 agy 已能工作……'
-if ! run_as_app_user env HOME="$APP_HOME" "$AGY" --print 'Reply with exactly: AGY ready.' --print-timeout 90s --output-format json >/dev/null; then
+if ! AGY_SMOKE_OUTPUT=$(run_as_app_user env HOME="$APP_HOME" "$AGY" \
+  --print-timeout 90s \
+  --output-format json \
+  --print 'Reply with exactly: AGY ready.'); then
   fail 'agy 连接测试失败。请重新运行授权流程；错误信息已显示在上方。'
 fi
+if ! printf '%s' "$AGY_SMOKE_OUTPUT" | "$APP/venv/bin/python" -c '
+import json
+import sys
+
+try:
+    result = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(1)
+
+if not isinstance(result, dict):
+    raise SystemExit(1)
+response = result.get("response")
+raise SystemExit(
+    0
+    if result.get("status") == "SUCCESS"
+    and isinstance(response, str)
+    and response.strip()
+    else 1
+)
+'; then
+  unset AGY_SMOKE_OUTPUT
+  fail 'agy 连接测试没有返回可读文本。请重新运行授权步骤后再试。'
+fi
+unset AGY_SMOKE_OUTPUT
 
 run_root install -m 0600 -o "$APP_USER" -g "$APP_USER" /dev/null "$APP/.env"
 run_as_app_user tee "$APP/.env" >/dev/null <<EOF
