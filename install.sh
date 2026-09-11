@@ -15,6 +15,22 @@ fail() {
   exit 1
 }
 
+read_or_cancel() {
+  local variable_name="$1" cancel_message="$2" rc
+  shift 2
+  if IFS= read -r "$@" "$variable_name"; then
+    return 0
+  else
+    rc=$?
+  fi
+  if [[ "$rc" -eq 1 ]]; then
+    echo
+    echo "$cancel_message"
+    exit 0
+  fi
+  fail "无法读取终端输入（read 返回 $rc）。"
+}
+
 run_root() {
   if [[ "$EUID" -eq 0 ]]; then
     "$@"
@@ -34,7 +50,6 @@ run_as_app_user() {
 [[ -t 0 ]] || fail '请在可交互的 SSH 终端中运行本脚本。'
 [[ -r /etc/os-release ]] || fail '无法识别系统版本。'
 . /etc/os-release
-[[ "$ID" == debian || "$ID" == ubuntu ]] || fail '仅支持 Debian 12+ 或 Ubuntu 22.04+。'
 MAJOR_VERSION="${VERSION_ID%%.*}"
 [[ "$MAJOR_VERSION" =~ ^[0-9]+$ ]] || fail '无法识别系统主版本号。'
 if [[ "$ID" == debian && "$MAJOR_VERSION" -lt 12 ]]; then
@@ -62,7 +77,7 @@ uninstall() {
   echo "工作目录仍会保留在：$WORK_BASE"
   echo
   printf '确认默认卸载请输入 UNINSTALL，其它输入会取消： '
-  read -r UNINSTALL_CONFIRM
+  read_or_cancel UNINSTALL_CONFIRM '检测到输入结束，已取消卸载，未修改任何内容。'
   [[ "$UNINSTALL_CONFIRM" == UNINSTALL ]] || {
     echo '已取消卸载，未修改任何内容。'
     return 0
@@ -84,7 +99,7 @@ uninstall() {
   echo "  - 工作目录：$WORK_BASE"
   echo "  - 受限账户及其 home（其中可能有 agy / Google 登录状态）：$APP_USER"
   printf '要执行彻底清理请输入 PURGE，其它输入则保留数据： '
-  read -r PURGE_CONFIRM
+  read_or_cancel PURGE_CONFIRM '检测到输入结束，已保留工作目录、agy 与 Google 登录状态。'
   if [[ "$PURGE_CONFIRM" != PURGE ]]; then
     echo '已保留工作目录、agy 与 Google 登录状态。'
     return 0
@@ -117,7 +132,7 @@ echo '  1) 安装或更新'
 echo '  2) 一键卸载'
 echo '  0) 退出'
 printf '> '
-read -r ACTION
+read_or_cancel ACTION '检测到输入结束，已退出，未修改任何内容。'
 case "$ACTION" in
   1|'') ;;
   2)
@@ -149,7 +164,7 @@ echo 'Bot Token 输入时不会显示；请勿将它发给任何人。'
 echo
 echo '步骤 1/6：请输入 Telegram Bot Token（BotFather 返回的 Token）：'
 printf '> '
-read -r -s TOKEN
+read_or_cancel TOKEN '检测到输入结束，安装已取消，尚未开始系统改动。' -s
 echo
 [[ "$TOKEN" == *:* ]] || fail 'Bot Token 格式似乎不正确。'
 
@@ -157,7 +172,7 @@ echo
 echo '步骤 2/6：请输入允许使用此工具的 Telegram 数字 ID：'
 echo '提示：这是你的纯数字 ID，不是 @用户名，也不是手机号。'
 printf '> '
-read -r TG_ID
+read_or_cancel TG_ID '检测到输入结束，安装已取消，尚未开始系统改动。'
 [[ "$TG_ID" =~ ^[0-9]+$ ]] || fail 'Telegram 数字 ID 必须只包含数字。'
 
 echo
@@ -165,7 +180,7 @@ echo '步骤 3/6：设置 agy 专用工作目录。'
 echo "直接回车使用默认目录 [$WORK_BASE]。"
 echo "也可输入 /srv/agy-workspace 下的子目录，或只输入子目录名。"
 printf '> '
-read -r INPUT
+read_or_cancel INPUT '检测到输入结束，安装已取消，尚未开始系统改动。'
 if [[ -n "$INPUT" ]]; then
   if [[ "$INPUT" == /* ]]; then
     WORK=$(realpath -m -- "$INPUT")
@@ -183,7 +198,7 @@ echo '步骤 4/6：选择 agy 的任务权限模式。'
 echo '默认安全模式会保留 agy 的权限策略：读写工作目录通常可用，执行命令可能被拒绝。'
 echo '若输入 YES，白名单用户的 Telegram 任务将自动批准 agy 的所有工具权限（包括命令和写文件）。'
 printf '只有在你完全信任白名单与工作目录时输入 YES，其余情况直接回车： '
-read -r PERMISSION_CONFIRM
+read_or_cancel PERMISSION_CONFIRM '检测到输入结束，安装已取消，尚未开始系统改动。'
 if [[ "$PERMISSION_CONFIRM" == YES ]]; then
   AGY_SKIP_PERMISSIONS=true
 else
@@ -253,7 +268,7 @@ echo
 echo '步骤 5/6：检查 Google Antigravity CLI（agy）。'
 if [[ ! -x "$AGY" ]]; then
   printf '未检测到 agy。现在按 Google 官方方式安装吗？[Y/n] '
-  read -r GO
+  read_or_cancel GO '检测到输入结束，已停止继续部署；已完成的依赖、项目或授权状态会保留，尚未创建或启动服务。'
   if [[ "$GO" =~ ^[Nn]$ ]]; then
     fail '未安装 agy。请完成安装后重新运行本脚本。'
   fi
@@ -272,13 +287,14 @@ echo '请复制链接到自己的电脑或手机浏览器完成登录。'
 echo '浏览器显示的授权码必须粘贴回当前 SSH 终端中 agy 的提示处。'
 echo '不要把授权链接或授权码发给他人，也不要写入 GitHub。'
 printf '准备好后输入 Y 并回车，开始授权： '
-read -r AUTH_START
+read_or_cancel AUTH_START '检测到输入结束，已停止继续部署；已完成的依赖、项目或授权状态会保留，尚未创建或启动服务。'
 [[ "$AUTH_START" =~ ^[Yy]$ ]] || fail '未开始授权。请重新运行脚本。'
 
-set +e
-run_as_app_user env HOME="$APP_HOME" SSH_CONNECTION="$ORIGINAL_SSH_CONNECTION" SSH_TTY="$ORIGINAL_SSH_TTY" bash -c 'cd "$1"; exec "$2"' _ "$WORK" "$AGY"
-AGY_EXIT=$?
-set -e
+if run_as_app_user env HOME="$APP_HOME" SSH_CONNECTION="$ORIGINAL_SSH_CONNECTION" SSH_TTY="$ORIGINAL_SSH_TTY" bash -c 'cd "$1"; exec "$2"' _ "$WORK" "$AGY"; then
+  AGY_EXIT=0
+else
+  AGY_EXIT=$?
+fi
 if [[ "$AGY_EXIT" -ne 0 && "$AGY_EXIT" -ne 130 ]]; then
   fail 'agy 授权进程异常退出。请检查屏幕上的错误信息后重新运行。'
 fi
@@ -286,7 +302,7 @@ fi
 echo
 echo 'agy 已退出。若已完成授权，请继续部署。'
 printf '确认已在 agy 内完成授权并退出后，输入 YES： '
-read -r READY
+read_or_cancel READY '检测到输入结束，已停止继续部署；已完成的依赖、项目或授权状态会保留，尚未创建或启动服务。'
 [[ "$READY" == YES ]] || fail '未确认授权完成。请授权后重新运行脚本。'
 
 echo '正在发送一次只读连接测试，用于确认 agy 已能工作……'
