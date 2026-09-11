@@ -1,4 +1,17 @@
 > **TG 交流群：欢迎各位大佬进群交流** → [点击加入 Telegram 群](https://t.me/xiaoheidemimi)
+## 一键安装（Debian / Ubuntu）
+
+在普通 sudo 用户的 SSH 终端运行（不要用 root）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh)
+```
+
+脚本只会在当前终端询问：Bot Token、自己的 Telegram 数字 ID 与工作目录；它会安装依赖、创建受限账户、配置服务并启动。
+
+首次仍需由你本人完成一次 agy 的 Google 登录/授权；**不需要自行编译**。
+
+
 
 # Antigravity Telegram Remote | Antigravity Telegram 远程控制工具
 
