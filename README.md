@@ -6,6 +6,11 @@
 
 它不是群组机器人，也不是普通 AI 聊天机器人：默认不监听群聊，只接受白名单用户的私聊消息。
 
+> **推荐服务器（推广链接）**：还没有 Linux 服务器？推荐使用 [搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)。**[点这里前往搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**。
+> 
+> 此链接为作者的推广链接；购买前请按自己的地区、预算和线路需求自行比较。
+
+
 ---
 
 ## 功能
@@ -409,3 +414,13 @@ agy-telegram-remote/
 ```
 
 不会包含 Bot Token、Google 或 Gemini Key、服务器 IP、SSH 密码/私钥、聊天记录、现有项目代码、日志、缓存、数据库或 agy 登录凭据。
+
+---
+
+## 推荐服务器（推广链接）
+
+准备部署自己的 AGY Telegram Remote，但还没有 Linux 服务器？推荐使用 [搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)。
+
+👉 **[点这里前往搬瓦工，选择适合你的服务器](https://bandwagonhost.com/aff.php?aff=80815)**
+
+> 上方为作者的推广链接。购买前请根据自己的地区、预算和线路需求自行比较。
