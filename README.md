@@ -1,4 +1,4 @@
-# AGY Telegram Remote
+# Antigravity Telegram Remote | Antigravity Telegram 远程控制工具
 
 通过 Telegram 私聊，远程使用服务器上的 Google Antigravity CLI（`agy`）。
 
