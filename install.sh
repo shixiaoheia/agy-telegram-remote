@@ -1,105 +1,353 @@
 #!/usr/bin/env bash
 # Antigravity Telegram Remote 交互式一键安装器（Debian 12 / Ubuntu 22.04+）
 set -Eeuo pipefail
+
 APP=/opt/agy-telegram-remote
-USER=agy-tg
-WORK=/srv/agy-workspace
+APP_USER=agy-tg
+WORK_BASE=/srv/agy-workspace
+WORK=$WORK_BASE
 REPO=https://github.com/shixiaoheia/agy-telegram-remote.git
-fail(){ echo; echo "安装失败：$*" >&2; exit 1; }
+SERVICE=agy-telegram-remote
+
+fail() {
+  echo
+  echo "操作失败：$*" >&2
+  exit 1
+}
+
+run_root() {
+  if [[ "$EUID" -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+run_as_app_user() {
+  if [[ "$EUID" -eq 0 ]]; then
+    runuser -u "$APP_USER" -- env HOME="$APP_HOME" "$@"
+  else
+    sudo -u "$APP_USER" -- env HOME="$APP_HOME" "$@"
+  fi
+}
+
 [[ -t 0 ]] || fail '请在可交互的 SSH 终端中运行本脚本。'
-[[ ${EUID} -ne 0 ]] || fail '请使用普通 sudo 用户运行，不要直接使用 root。'
+[[ -r /etc/os-release ]] || fail '无法识别系统版本。'
 . /etc/os-release
-[[ "${ID:-}" == debian || "${ID:-}" == ubuntu ]] || fail '仅支持 Debian 或 Ubuntu。'
-sudo -v
+[[ "$ID" == debian || "$ID" == ubuntu ]] || fail '仅支持 Debian 12+ 或 Ubuntu 22.04+。'
+MAJOR_VERSION="${VERSION_ID%%.*}"
+[[ "$MAJOR_VERSION" =~ ^[0-9]+$ ]] || fail '无法识别系统主版本号。'
+if [[ "$ID" == debian && "$MAJOR_VERSION" -lt 12 ]]; then
+  fail '需要 Debian 12 或更高版本。'
+fi
+if [[ "$ID" == ubuntu && "$MAJOR_VERSION" -lt 22 ]]; then
+  fail '需要 Ubuntu 22.04 或更高版本。'
+fi
+
+if [[ "$EUID" -ne 0 ]]; then
+  command -v sudo >/dev/null 2>&1 || fail '请使用 root，或拥有 sudo 权限的普通用户运行。'
+  sudo -v
+fi
+
+uninstall() {
+  [[ "$APP" == "/opt/agy-telegram-remote" ]] || fail '卸载目标异常，已停止。'
+  [[ "$WORK_BASE" == "/srv/agy-workspace" ]] || fail '工作目录目标异常，已停止。'
+
+  echo
+  echo '============================================='
+  echo ' Antigravity Telegram Remote 一键卸载'
+  echo '============================================='
+  echo "默认卸载会停止并删除服务与程序目录：$APP"
+  echo '默认不会删除 Telegram Bot、agy、Google 登录状态、运行账户或工作目录。'
+  echo "工作目录仍会保留在：$WORK_BASE"
+  echo
+  printf '确认默认卸载请输入 UNINSTALL，其它输入会取消： '
+  read -r UNINSTALL_CONFIRM
+  [[ "$UNINSTALL_CONFIRM" == UNINSTALL ]] || {
+    echo '已取消卸载，未修改任何内容。'
+    return 0
+  }
+
+  echo '正在停止并移除 systemd 服务……'
+  run_root systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
+  run_root rm -f -- "/etc/systemd/system/$SERVICE.service"
+  run_root systemctl daemon-reload
+  run_root systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+
+  echo "正在删除程序目录：$APP"
+  run_root rm -rf -- "$APP"
+
+  echo
+  echo '默认卸载完成。工作目录、agy 与 Google 登录状态仍被保留，之后重新安装可继续使用。'
+  echo
+  echo '如确定再也不需要这些数据，可选择彻底清理：'
+  echo "  - 工作目录：$WORK_BASE"
+  echo "  - 受限账户及其 home（其中可能有 agy / Google 登录状态）：$APP_USER"
+  printf '要执行彻底清理请输入 PURGE，其它输入则保留数据： '
+  read -r PURGE_CONFIRM
+  if [[ "$PURGE_CONFIRM" != PURGE ]]; then
+    echo '已保留工作目录、agy 与 Google 登录状态。'
+    return 0
+  fi
+
+  if id "$APP_USER" >/dev/null 2>&1; then
+    command -v pgrep >/dev/null 2>&1 || fail '缺少 pgrep，无法在彻底清理前确认运行账户没有残余进程。'
+    REMAINING_PIDS=$(run_root pgrep -u "$APP_USER" || true)
+    if [[ -n "$REMAINING_PIDS" ]]; then
+      echo "发现运行账户 $APP_USER 仍有进程：$REMAINING_PIDS"
+      echo '为避免误杀手动运行的 agy，已保留工作目录和账户；请结束这些进程后重新运行卸载。'
+      return 0
+    fi
+  fi
+
+  echo '正在彻底清理已明确列出的数据……'
+  run_root rm -rf -- "$WORK_BASE"
+  if id "$APP_USER" >/dev/null 2>&1; then
+    run_root userdel -r "$APP_USER" || fail "无法删除运行账户 $APP_USER；请确认没有该账户的进程后重试。"
+  fi
+  echo '彻底清理完成。Telegram Bot 本身仍由你的 BotFather 账号管理，未被删除。'
+}
+
+echo
+echo '============================================='
+echo ' Antigravity Telegram Remote'
+echo '============================================='
+echo '请选择操作：'
+echo '  1) 安装或更新'
+echo '  2) 一键卸载'
+echo '  0) 退出'
+printf '> '
+read -r ACTION
+case "$ACTION" in
+  1|'') ;;
+  2)
+    uninstall
+    exit 0
+    ;;
+  0)
+    echo '已退出，未修改任何内容。'
+    exit 0
+    ;;
+  *) fail '请输入 0、1 或 2。' ;;
+esac
+
+if [[ "$EUID" -eq 0 ]]; then
+  command -v runuser >/dev/null 2>&1 || fail '系统缺少 runuser，无法创建受限运行账户。'
+fi
+
+ORIGINAL_SSH_CONNECTION="${SSH_CONNECTION-}"
+ORIGINAL_SSH_TTY="${SSH_TTY-}"
+
 echo
 echo '============================================='
 echo ' Antigravity Telegram Remote 一键安装向导'
 echo '============================================='
-echo '接下来会按步骤收集信息，并自动安装依赖、配置服务。'
+echo '可由 root 或普通 sudo 用户启动；Bot 与 agy 始终使用受限账户 agy-tg 运行。'
+echo '接下来会收集必要信息、安装依赖、完成 agy 授权并验证服务。'
 echo 'Bot Token 输入时不会显示；请勿将它发给任何人。'
+
 echo
-echo '步骤 1/5：请输入 Telegram Bot Token（BotFather 返回的 Token）：'
-printf '> '; read -r -s TOKEN; echo
+echo '步骤 1/6：请输入 Telegram Bot Token（BotFather 返回的 Token）：'
+printf '> '
+read -r -s TOKEN
+echo
 [[ "$TOKEN" == *:* ]] || fail 'Bot Token 格式似乎不正确。'
+
 echo
-echo '步骤 2/5：请输入允许使用此工具的 Telegram 数字 ID：'
+echo '步骤 2/6：请输入允许使用此工具的 Telegram 数字 ID：'
 echo '提示：这是你的纯数字 ID，不是 @用户名，也不是手机号。'
-printf '> '; read -r TG_ID
+printf '> '
+read -r TG_ID
 [[ "$TG_ID" =~ ^[0-9]+$ ]] || fail 'Telegram 数字 ID 必须只包含数字。'
+
 echo
-echo '步骤 3/5：请输入 agy 的专用工作目录。'
-echo "直接回车使用默认目录 [$WORK]："
-printf '> '; read -r INPUT
-WORK=${INPUT:-$WORK}
-[[ "$WORK" != / && "$WORK" != /etc && "$WORK" != /home ]] || fail '请使用专用工作目录，不可填写 /、/etc 或 /home。'
+echo '步骤 3/6：设置 agy 专用工作目录。'
+echo "直接回车使用默认目录 [$WORK_BASE]。"
+echo "也可输入 /srv/agy-workspace 下的子目录，或只输入子目录名。"
+printf '> '
+read -r INPUT
+if [[ -n "$INPUT" ]]; then
+  if [[ "$INPUT" == /* ]]; then
+    WORK=$(realpath -m -- "$INPUT")
+  else
+    WORK=$(realpath -m -- "$WORK_BASE/$INPUT")
+  fi
+fi
+case "$WORK" in
+  "$WORK_BASE"|"$WORK_BASE"/*) ;;
+  *) fail "工作目录只能是 $WORK_BASE 或其子目录，不能修改其他系统目录。" ;;
+esac
+
+echo
+echo '步骤 4/6：选择 agy 的任务权限模式。'
+echo '默认安全模式会保留 agy 的权限策略：读写工作目录通常可用，执行命令可能被拒绝。'
+echo '若输入 YES，白名单用户的 Telegram 任务将自动批准 agy 的所有工具权限（包括命令和写文件）。'
+printf '只有在你完全信任白名单与工作目录时输入 YES，其余情况直接回车： '
+read -r PERMISSION_CONFIRM
+if [[ "$PERMISSION_CONFIRM" == YES ]]; then
+  AGY_SKIP_PERMISSIONS=true
+else
+  AGY_SKIP_PERMISSIONS=false
+fi
+
 echo
 echo '正在安装系统依赖、创建受限账户并下载项目，请稍候……'
-sudo apt-get update -y
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 python3-venv curl ca-certificates
-id "$USER" >/dev/null 2>&1 || sudo adduser --disabled-password --gecos '' "$USER"
-sudo install -d -o "$USER" -g "$USER" -m 0750 "$WORK"
+run_root apt-get update -y
+run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y git python3 python3-venv curl ca-certificates procps
+if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+  fail '需要 Python 3.10 或更高版本。请使用受支持的 Debian / Ubuntu 版本。'
+fi
+id "$APP_USER" >/dev/null 2>&1 || run_root adduser --disabled-password --gecos '' "$APP_USER"
+APP_HOME=$(getent passwd "$APP_USER" | cut -d: -f6)
+[[ -n "$APP_HOME" ]] || fail "无法读取 $APP_USER 的主目录。"
+
+if [[ -e "$WORK" && ! -d "$WORK" ]]; then
+  fail "工作目录路径已存在但不是目录：$WORK"
+fi
+if [[ -d "$WORK" ]]; then
+  WORK_OWNER=$(stat -c '%U' "$WORK")
+  [[ "$WORK_OWNER" == "$APP_USER" ]] || fail "工作目录已存在且不属于 $APP_USER；为防止误改权限，已停止。"
+fi
+run_root install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$WORK"
+
 if [[ -d "$APP/.git" ]]; then
-  sudo -u "$USER" git -C "$APP" pull --ff-only
+  if ! run_as_app_user git -C "$APP" pull --ff-only; then
+    fail "项目更新失败。若你手动改过 $APP，请先备份或处理 Git 改动后再运行。"
+  fi
 elif [[ -e "$APP" ]]; then
   fail "$APP 已存在但不是本项目；请先移动该目录后重新运行。"
 else
-  sudo install -d -o "$USER" -g "$USER" "$APP"
-  sudo -u "$USER" git clone "$REPO" "$APP"
+  run_root install -d -o "$APP_USER" -g "$APP_USER" "$APP"
+  run_as_app_user git clone "$REPO" "$APP"
 fi
-sudo -u "$USER" python3 -m venv "$APP/venv"
-sudo -u "$USER" "$APP/venv/bin/pip" install -q --upgrade pip
-sudo -u "$USER" "$APP/venv/bin/pip" install -q -r "$APP/requirements.txt"
-AGY=/home/$USER/.local/bin/agy
+
+run_as_app_user python3 -m venv "$APP/venv"
+run_as_app_user "$APP/venv/bin/pip" install -q --upgrade pip
+run_as_app_user "$APP/venv/bin/pip" install -q -r "$APP/requirements.txt"
+run_as_app_user "$APP/venv/bin/python" -m py_compile "$APP/bot.py" || fail '项目 Python 语法检查失败。'
+
+echo '正在验证 Telegram Bot Token……'
+if ! run_as_app_user env TG_CHECK_TOKEN="$TOKEN" "$APP/venv/bin/python" - <<'PY'
+import json
+import os
+import sys
+from urllib.request import urlopen
+
+try:
+    with urlopen(
+        f"https://api.telegram.org/bot{os.environ['TG_CHECK_TOKEN']}/getMe",
+        timeout=15,
+    ) as response:
+        payload = json.load(response)
+except Exception:
+    sys.exit(1)
+
+sys.exit(0 if payload.get("ok") else 1)
+PY
+then
+  fail 'Telegram Bot Token 验证失败。请确认 Token、服务器网络和 BotFather 配置。'
+fi
+
+AGY="$APP_HOME/.local/bin/agy"
 echo
-echo '步骤 4/5：检查 Google Antigravity CLI（agy）。'
+echo '步骤 5/6：检查 Google Antigravity CLI（agy）。'
 if [[ ! -x "$AGY" ]]; then
-  read -r -p '未检测到 agy。现在按官方方式安装吗？[Y/n] ' GO
-  [[ ! "${GO:-Y}" =~ ^[Nn]$ ]] && sudo -iu "$USER" bash -lc 'curl -fsSL https://antigravity.google/cli/install.sh | bash'
+  printf '未检测到 agy。现在按 Google 官方方式安装吗？[Y/n] '
+  read -r GO
+  if [[ "$GO" =~ ^[Nn]$ ]]; then
+    fail '未安装 agy。请完成安装后重新运行本脚本。'
+  fi
+  if ! run_as_app_user env HOME="$APP_HOME" bash -lc 'set -o pipefail; curl -fsSL https://antigravity.google/cli/install.sh | bash'; then
+    fail 'agy 官方安装器运行失败。请检查服务器网络后重新运行。'
+  fi
 else
   echo '已检测到 agy，跳过安装。'
 fi
-[[ -x "$AGY" ]] || fail '未安装 agy。请完成安装后重新运行本脚本。'
+[[ -x "$AGY" ]] || fail "未在预期位置找到 agy：$AGY"
+
 echo
-echo '步骤 5/5：Google 账号授权（在当前 SSH 终端内完成）。'
-echo '脚本会马上启动 agy；它会打印一次性、安全的 Google 授权链接。'
-echo '请复制该链接到电脑或手机浏览器完成登录。'
+echo '步骤 6/6：Google 账号授权（在当前 SSH 终端内完成）。'
+echo '脚本会启动 agy；它会打印一次性、安全的 Google 授权链接。'
+echo '请复制链接到自己的电脑或手机浏览器完成登录。'
 echo '浏览器显示的授权码必须粘贴回当前 SSH 终端中 agy 的提示处。'
 echo '不要把授权链接或授权码发给他人，也不要写入 GitHub。'
-read -r -p '准备好后输入 Y 并回车，开始授权： ' AUTH_START
-[[ "${AUTH_START:-}" =~ ^[Yy]$ ]] || fail '未开始授权。请重新运行脚本。'
-sudo -u "$USER" -H env SSH_CONNECTION="${SSH_CONNECTION:-}" SSH_TTY="${SSH_TTY:-}" bash -c 'cd "$1"; exec "$2"' _ "$WORK" "$AGY"
+printf '准备好后输入 Y 并回车，开始授权： '
+read -r AUTH_START
+[[ "$AUTH_START" =~ ^[Yy]$ ]] || fail '未开始授权。请重新运行脚本。'
+
+set +e
+run_as_app_user env HOME="$APP_HOME" SSH_CONNECTION="$ORIGINAL_SSH_CONNECTION" SSH_TTY="$ORIGINAL_SSH_TTY" bash -c 'cd "$1"; exec "$2"' _ "$WORK" "$AGY"
+AGY_EXIT=$?
+set -e
+if [[ "$AGY_EXIT" -ne 0 && "$AGY_EXIT" -ne 130 ]]; then
+  fail 'agy 授权进程异常退出。请检查屏幕上的错误信息后重新运行。'
+fi
+
 echo
 echo 'agy 已退出。若已完成授权，请继续部署。'
-read -r -p '确认已在 agy 内完成授权并退出后，输入 YES： ' READY
+printf '确认已在 agy 内完成授权并退出后，输入 YES： '
+read -r READY
 [[ "$READY" == YES ]] || fail '未确认授权完成。请授权后重新运行脚本。'
-sudo install -m 0600 -o "$USER" -g "$USER" /dev/null "$APP/.env"
-sudo -u "$USER" tee "$APP/.env" >/dev/null <<EOF
+
+echo '正在发送一次只读连接测试，用于确认 agy 已能工作……'
+if ! run_as_app_user env HOME="$APP_HOME" "$AGY" --print 'Reply with exactly: AGY ready.' --print-timeout 90s --output-format json >/dev/null; then
+  fail 'agy 连接测试失败。请重新运行授权流程；错误信息已显示在上方。'
+fi
+
+run_root install -m 0600 -o "$APP_USER" -g "$APP_USER" /dev/null "$APP/.env"
+run_as_app_user tee "$APP/.env" >/dev/null <<EOF
 TELEGRAM_BOT_TOKEN=$TOKEN
 ALLOWED_USER_IDS=$TG_ID
 AGY_PATH=$AGY
 AGY_WORKSPACE=$WORK
 AGY_TIMEOUT_SECONDS=900
+MAX_PROMPT_CHARS=12000
+MAX_OUTPUT_BYTES=1048576
+MAX_REPLY_CHARS=30000
+AGY_SKIP_PERMISSIONS=$AGY_SKIP_PERMISSIONS
 EOF
 unset TOKEN
-sudo tee /etc/systemd/system/agy-telegram-remote.service >/dev/null <<EOF
+
+run_root tee "/etc/systemd/system/$SERVICE.service" >/dev/null <<EOF
 [Unit]
 Description=Antigravity Telegram Remote
 After=network-online.target
+
 [Service]
-User=$USER
-Group=$USER
-Environment=HOME=/home/$USER
+Type=simple
+User=$APP_USER
+Group=$APP_USER
+Environment=HOME=$APP_HOME
+Environment=PYTHONUNBUFFERED=1
 WorkingDirectory=$APP
 ExecStart=$APP/venv/bin/python $APP/bot.py
 Restart=on-failure
+RestartSec=5
 NoNewPrivileges=yes
 PrivateTmp=yes
+KillMode=control-group
+TimeoutStopSec=30s
+
 [Install]
 WantedBy=multi-user.target
 EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now agy-telegram-remote
+
+run_root systemctl daemon-reload
+run_root systemctl enable "$SERVICE"
+run_root systemctl restart "$SERVICE"
+if ! run_root systemctl is-active --quiet "$SERVICE"; then
+  echo
+  echo '服务没有成功启动，下面是最近日志：' >&2
+  run_root journalctl -u "$SERVICE" -n 80 --no-pager >&2 || true
+  fail '服务启动验证失败。'
+fi
+
 echo
-echo '安装完成！'
-echo '查看运行状态：sudo systemctl status agy-telegram-remote'
-echo '查看实时日志：sudo journalctl -u agy-telegram-remote -f'
+echo '安装完成，服务已经通过启动检查。'
+if [[ "$EUID" -eq 0 ]]; then
+  PRIV=''
+else
+  PRIV='sudo '
+fi
+echo "查看运行状态：${PRIV}systemctl status $SERVICE"
+echo "查看实时日志：${PRIV}journalctl -u $SERVICE -f"
