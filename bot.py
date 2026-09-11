@@ -76,52 +76,101 @@ def decode_output(raw: bytes | None) -> str:
     return str(raw).strip()
 
 
-def parse_agy_output(raw: bytes | None) -> tuple[str, str]:
-    if not raw:
-        return "", ""
+def parse_agy_output(raw: bytes | None) -> tuple[str, str, bool]:
+    text = decode_output(raw)
+    if not text:
+        return "", "", False
 
-    streamed: list[str] = []
+    def consume_result(result: object) -> tuple[str, str, bool]:
+        if not isinstance(result, dict):
+            return "", "agy 返回格式异常：result 不是对象。", False
+
+        response = result.get("response")
+        answer = response if isinstance(response, str) else ""
+        if response is not None and not isinstance(response, str):
+            return "", "agy 返回格式异常：response 不是文本。", False
+
+        status = result.get("status")
+        if status not in (None, "SUCCESS"):
+            result_error = result.get("error")
+            return (
+                "",
+                str(result_error)
+                if result_error not in (None, "")
+                else f"agy 返回状态：{status or '未知'}",
+                False,
+            )
+        return answer, "", status == "SUCCESS"
+
     answer = ""
     error = ""
+    streamed: list[str] = []
+    saw_structured = False
+    saw_successful_result = False
+    decoder = json.JSONDecoder(strict=False)
+    offset = 0
 
-    for line in decode_output(raw).splitlines():
+    while offset < len(text):
+        while offset < len(text) and text[offset].isspace():
+            offset += 1
+        if offset >= len(text):
+            break
         try:
-            event = json.loads(line)
+            event, offset = decoder.raw_decode(text, offset)
         except json.JSONDecodeError:
-            continue
+            break
         if not isinstance(event, dict):
             continue
 
-        if event.get("event") == "step_update":
+        event_type = event.get("event")
+        if event_type == "step_update":
+            saw_structured = True
             step_update = event.get("step_update")
-            if isinstance(step_update, dict):
+            if isinstance(step_update, dict) and step_update.get(
+                "step_type"
+            ) in (None, "agent_response"):
                 delta = step_update.get("text_delta")
                 if isinstance(delta, str):
                     streamed.append(delta)
+        elif event_type == "result":
+            saw_structured = True
+            result_answer, result_error, successful_result = consume_result(
+                event.get("result")
+            )
+            if result_answer:
+                answer = result_answer
+            if result_error:
+                error = result_error
+            saw_successful_result = saw_successful_result or successful_result
+        elif "result" in event:
+            saw_structured = True
+            result_answer, result_error, successful_result = consume_result(
+                event.get("result")
+            )
+            if result_answer:
+                answer = result_answer
+            if result_error:
+                error = result_error
+            saw_successful_result = saw_successful_result or successful_result
+        elif "response" in event or "status" in event:
+            saw_structured = True
+            result_answer, result_error, successful_result = consume_result(event)
+            if result_answer:
+                answer = result_answer
+            if result_error:
+                error = result_error
+            saw_successful_result = saw_successful_result or successful_result
 
-        if event.get("event") == "result":
-            result = event.get("result")
-            if not isinstance(result, dict):
-                error = "agy 返回格式异常：result 不是对象。"
-                continue
-
-            response = result.get("response")
-            if isinstance(response, str):
-                answer = response
-            elif response is not None:
-                error = "agy 返回格式异常：response 不是文本。"
-
-            status = result.get("status")
-            if status != "SUCCESS":
-                result_error = result.get("error")
-                error = (
-                    str(result_error)
-                    if result_error not in (None, "")
-                    else f"agy 返回状态：{status or '未知'}"
-                )
-
-    return answer or "".join(streamed), error
-
+    final_answer = answer.strip() or "".join(streamed).strip()
+    if final_answer:
+        return final_answer, error, False
+    if error:
+        return "", error, False
+    if saw_successful_result:
+        return "", "", True
+    if saw_structured:
+        return "", "agy 返回了不完整的结构化输出。请重新运行安装脚本后再试。", False
+    return text, "", False
 
 async def read_output_tail(
     stream: asyncio.StreamReader | None, limit: int
@@ -335,8 +384,6 @@ async def run_job(
 
             command = [
                 AGY,
-                "--print",
-                prompt,
                 "--print-timeout",
                 f"{TIMEOUT}s",
                 "--output-format",
@@ -344,6 +391,7 @@ async def run_job(
             ]
             if SKIP_PERMISSIONS:
                 command.append("--dangerously-skip-permissions")
+            command.extend(("--print", prompt))
 
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -398,7 +446,7 @@ async def run_job(
                 await note.edit_text("任务已取消，子进程已回收。")
                 return
 
-            answer, error = parse_agy_output(stdout)
+            answer, error, completed_without_text = parse_agy_output(stdout)
             stderr_text = decode_output(stderr)
             if stdout_truncated:
                 output_note = (
@@ -429,11 +477,19 @@ async def run_job(
                 await note.edit_text(f"执行失败：{str(error)[:3500]}")
                 return
             if not answer:
+                if completed_without_text:
+                    successful = True
+                    job.state = "完成"
+                    await note.edit_text(
+                        "任务已完成，但 agy 没有生成可转发的文本。"
+                        "为避免重复执行任务，机器人没有自动重试；请再发送一次任务。"
+                    )
+                    return
                 job.state = "失败"
                 await finish_reaper(
                     application, update, job, process, communicate_task
                 )
-                await note.edit_text("agy 没有返回内容。")
+                await note.edit_text("agy 没有返回内容。请重新运行安装脚本后再试。")
                 return
 
             successful = True
