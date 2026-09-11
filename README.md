@@ -203,7 +203,7 @@ agy
 
 ```bash
 cd /home/agy-tg
-git clone https://github.com/你的用户名/agy-telegram-remote.git
+git clone https://github.com/telegram的用户名/agy-telegram-remote.git
 cd agy-telegram-remote
 
 python3 -m venv venv
