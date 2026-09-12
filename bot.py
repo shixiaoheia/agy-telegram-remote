@@ -55,7 +55,9 @@ def describe(record: dict) -> str:
     outcome = str(record.get("outcome", "error"))
     title = LABELS.get(outcome, "结果需核对")
     model_tag = f"｜{record['model']}" if record.get("model") else ""
-    parts = [f"{title}｜任务 {record.get('job_id', '-') }{model_tag}"]
+    duration = record.get("duration_seconds")
+    duration_tag = f"｜⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
+    parts = [f"{title}｜任务 {record.get('job_id', '-') }{model_tag}{duration_tag}"]
     if record.get("detail"):
         parts.append(str(record["detail"]))
     help_text = CATEGORY_HELP.get(record.get("category"))
@@ -85,8 +87,11 @@ class Bridge:
 
     async def send_text(self, chat: int, text: str) -> bool:
         try:
-            for chunk in chunks_utf16(self.store.redact(text)):
-                await self.api.send(chat, chunk)
+            chunks = chunks_utf16(self.store.redact(text))
+            total = len(chunks)
+            for i, chunk in enumerate(chunks):
+                suffix = f"\n\n📄 [第 {i+1}/{total} 页]" if total > 1 else ""
+                await self.api.send(chat, chunk + suffix)
             return True
         except TelegramError as error:
             LOG.warning("telegram_delivery_failed code=%s", error.code)
@@ -214,6 +219,14 @@ class Bridge:
         if command == "/status":
             current_model = self.store.get_model(user) or self.settings.model
             model_info = f" [模型：{current_model}]" if current_model else ""
+            disk_info = ""
+            try:
+                import shutil
+                usage = shutil.disk_usage(self.settings.workspace)
+                free_gb = usage.free / (1024 ** 3)
+                disk_info = f"\n💾 工作空间可用磁盘：{free_gb:.1f} GB"
+            except Exception:
+                pass
             if self.slot and self.slot.user == user:
                 job_model = f"[{self.slot.model}] " if self.slot.model else ""
                 text = f"⏳ 任务 {self.slot.job_id}：{job_model}" + (
@@ -223,6 +236,7 @@ class Bridge:
                 text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
                 text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
+            text += disk_info
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
@@ -236,18 +250,19 @@ class Bridge:
         if command == "/last":
             try:
                 record = self.store.load(user)
-                text = describe(record) if record else "没有可取回的结果，或结果已过保留期。"
+                text = describe(record) if record else "ℹ️ 没有可取回的结果，或记录已过保留期。"
             except (OSError, ValueError):
-                text = "无法读取最近结果，请检查服务器状态。"
+                text = "⚠️ 无法读取最近结果，请检查服务器状态。"
             self.queue_reply(chat_id, text)
             return
         if command == "/model":
             parts = text.split(maxsplit=1)
             target = parts[1].strip() if len(parts) > 1 else ""
             if not target or target.lower() in {"show", "current", "status", "list", "help"}:
-                current = self.store.get_model(user) or self.settings.model or "默认（由 agy 决定）"
+                current_raw = self.store.get_model(user) or self.settings.model or ""
+                current_display = current_raw or "默认（由 agy 决定）"
                 lines = [
-                    f"当前生效模型：{current}\n",
+                    f"当前生效模型：{current_display}\n",
                     "切换指令：/model <模型名或别名>",
                     "恢复默认：/model default\n",
                     "官方支持的模型全列表（共 14 种）：",
@@ -257,37 +272,40 @@ class Bridge:
                     if family != current_family:
                         lines.append(f"\n【{family}】")
                         current_family = family
-                    lines.append(f"• {mid} ({desc})")
+                    if current_raw == mid:
+                        lines.append(f"👉 [当前使用] {mid} ({desc})")
+                    else:
+                        lines.append(f"• {mid} ({desc})")
                 lines.append("\n快捷别名：3.8, 3.7, 3.6, pro, sonnet, opus, 120b 等")
                 lines.append("💡 也支持直接输入任何未来或自定义的有效模型名称。")
                 self.queue_reply(chat_id, "\n".join(lines))
                 return
             if target.lower() in {"default", "reset", "auto", "clear"}:
                 self.store.set_model(user, None)
-                self.queue_reply(chat_id, "已恢复为默认模型（由 agy 决定）。")
+                self.queue_reply(chat_id, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model <模型名或别名>")
                 return
             resolved = resolve_model(target)
             if not MODEL_RE.fullmatch(resolved):
                 self.queue_reply(
                     chat_id,
-                    "模型名称格式不正确。仅支持 2..64 个字母、数字、点、下划线与连字符。",
+                    "⚠️ 模型名称格式不正确。仅支持 2..64 个字母、数字、点、下划线与连字符。",
                 )
                 return
             self.store.set_model(user, resolved)
             alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
-            self.queue_reply(chat_id, f"已切换模型为：{resolved}{alias_note}\n后续任务将使用此模型。")
+            self.queue_reply(chat_id, f"🎯 已切换模型为：{resolved}{alias_note}\n🚀 后续任务将使用此模型。")
             return
         if command:
-            self.queue_reply(chat_id, "不支持这个控制命令。发送 /help 查看用法。")
+            self.queue_reply(chat_id, "⚠️ 不支持这个控制命令。发送 /help 查看可用指令。")
             return
         if len(text) > self.settings.max_prompt or "\x00" in text:
-            self.queue_reply(chat_id, f"任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+            self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
             return
         if self.runner.blocked:
-            self.queue_reply(chat_id, "新任务已暂停，请检查服务器并重启服务。")
+            self.queue_reply(chat_id, "⚠️ 新任务已暂停，请检查服务器并重启服务。")
             return
         if self.slot is not None:
-            self.queue_reply(chat_id, "工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
+            self.queue_reply(chat_id, "⚠️ 工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
             return
 
         user_model = self.store.get_model(user) or self.settings.model or ""

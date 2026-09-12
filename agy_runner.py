@@ -30,6 +30,7 @@ class Result:
     stderr_bytes: int = 0
     cleanup_ok: bool = True
     model: str = ""
+    duration_seconds: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -237,6 +238,7 @@ class Runner:
     async def run(self, prompt: str, cancel: asyncio.Event,
                   model: str | None = None) -> Result:
         selected_model = model or self.settings.model or ""
+        start_time = asyncio.get_running_loop().time()
         if self.blocked:
             return Result("cleanup_failed", detail="上次进程清理未确认完成；请重启服务后检查。",
                           cleanup_ok=False, model=selected_model)
@@ -359,4 +361,5 @@ class Runner:
             result.exit_code = process.returncode
         if task_cancelled and result.outcome == "success":
             result = Result("cancelled", detail="任务已取消，请核对已有修改。", model=selected_model)
+        result.duration_seconds = round(asyncio.get_running_loop().time() - start_time, 1)
         return result

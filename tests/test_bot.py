@@ -11,7 +11,7 @@ try:
 except ImportError:
     from common import settings_at
 from agy_runner import Result
-from bot import Bridge
+from bot import Bridge, describe
 from state_store import Store
 from telegram_api import TelegramError
 
@@ -384,6 +384,40 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gemini-3.1-pro-high", self.api.messages[-1][1])
         record = self.store.load(12345)
         self.assertEqual(record.get("model"), "gemini-3.1-pro-high")
+
+    async def test_result_includes_duration_tag(self):
+        record = {
+            "job_id": "job123",
+            "outcome": "success",
+            "model": "gemini-3.8-flash-high",
+            "duration_seconds": 12.4,
+            "text": "done",
+        }
+        text = describe(record)
+        self.assertIn("⏱️ 12.4s", text)
+        self.assertIn("gemini-3.8-flash-high", text)
+
+    async def test_model_command_highlights_current_model(self):
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        await self.handle(update("/model"))
+        msg = self.api.messages[-1][1]
+        self.assertIn("👉 [当前使用] claude-sonnet-4-6", msg)
+        self.assertIn("• gemini-3.8-flash-high", msg)
+
+    async def test_status_includes_workspace_disk_space(self):
+        await self.handle(update("/status"))
+        msg = self.api.messages[-1][1]
+        self.assertIn("工作空间可用磁盘", msg)
+        self.assertIn("GB", msg)
+
+    async def test_long_reply_has_page_indicators(self):
+        long_text = "line\n" * 1500
+        delivered = await self.bridge.send_text(12345, long_text)
+        self.assertTrue(delivered)
+        self.assertGreater(len(self.api.messages), 1)
+        total = len(self.api.messages)
+        self.assertIn(f"[第 1/{total} 页]", self.api.messages[0][1])
+        self.assertIn(f"[第 {total}/{total} 页]", self.api.messages[-1][1])
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):
