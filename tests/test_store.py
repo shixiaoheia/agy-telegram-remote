@@ -81,5 +81,6 @@ class StoreTests(unittest.TestCase):
     def test_public_state_directory_rejected(self):
         public = Path(self.temp.name) / "public"
         public.mkdir(mode=0o755)
+        public.chmod(0o755)
         with self.assertRaises(PermissionError):
             Store(public, self.store.allowed, 1000, 7)
