@@ -79,6 +79,52 @@ class StoreTests(unittest.TestCase):
         reduced.maintain()
         self.assertFalse(path.exists())
 
+    def test_user_effort_persistence_and_pruning(self):
+        self.assertIsNone(self.store.get_effort(12345))
+        self.store.set_effort(12345, "high")
+        self.assertEqual(self.store.get_effort(12345), "high")
+        path = self.directory / "effort-12345.json"
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(ValueError):
+            self.store.set_effort(12345, "invalid")
+        self.store.set_effort(12345, None)
+        self.assertIsNone(self.store.get_effort(12345))
+        self.assertFalse(path.exists())
+        self.store.set_effort(12345, "low")
+        reduced = Store(self.directory, frozenset({67890}), 1000, 7)
+        reduced.maintain()
+        self.assertFalse(path.exists())
+
+    def test_user_mode_persistence_and_pruning(self):
+        self.assertIsNone(self.store.get_mode(12345))
+        self.store.set_mode(12345, "plan")
+        self.assertEqual(self.store.get_mode(12345), "plan")
+        path = self.directory / "mode-12345.json"
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(ValueError):
+            self.store.set_mode(12345, "invalid")
+        self.store.set_mode(12345, None)
+        self.assertIsNone(self.store.get_mode(12345))
+        self.assertFalse(path.exists())
+        self.store.set_mode(12345, "accept-edits")
+        reduced = Store(self.directory, frozenset({67890}), 1000, 7)
+        reduced.maintain()
+        self.assertFalse(path.exists())
+
+    def test_dynamic_whitelist_management(self):
+        self.assertEqual(self.store.get_extra_whitelist(), [])
+        self.assertFalse(self.store.add_whitelist(12345))
+        self.assertTrue(self.store.add_whitelist(99999))
+        self.assertEqual(self.store.get_extra_whitelist(), [99999])
+        self.assertIn(99999, self.store.allowed)
+        self.assertFalse(self.store.add_whitelist(99999))
+        self.assertTrue(self.store.remove_whitelist(99999))
+        self.assertEqual(self.store.get_extra_whitelist(), [])
+        self.assertNotIn(99999, self.store.allowed)
+        self.assertFalse(self.store.remove_whitelist(99999))
+
     def test_duplicate_instance_lock(self):
         self.store.lock()
         second = Store(self.directory, self.store.allowed, 1000, 7)

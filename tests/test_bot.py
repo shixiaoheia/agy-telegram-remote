@@ -679,3 +679,109 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.stop.set()
         await self.bridge.run()
         self.assertTrue(self.bridge.reply_worker.done())
+
+    async def test_sys_command_replies_with_system_info(self):
+        await self.bridge.handle(update("/sys"))
+        await self.bridge.reply_worker
+        self.assertEqual(len(self.api.messages), 1)
+        text = self.api.messages[0][1]
+        self.assertIn("系统运行状态", text)
+        self.assertIn("CPU 负载", text)
+        self.assertIn("Python 版本", text)
+
+    async def test_effort_command_and_callback(self):
+        # 1. View effort menu
+        await self.bridge.handle(update("/effort"))
+        await self.bridge.reply_worker
+        self.assertEqual(len(self.api.messages), 1)
+        self.assertIn("思考强度调节", self.api.messages[0][1])
+        self.assertIsNotNone(self.api.messages[0][2])
+
+        # 2. Change effort via command
+        await self.bridge.handle(update("/effort high"))
+        await self.bridge.reply_worker
+        self.assertEqual(self.store.get_effort(12345), "high")
+        self.assertIn("已成功设置思考强度为：`High`", self.api.messages[-1][1])
+
+        # 3. Change effort via callback query
+        await self.bridge.handle(callback_update("effort:low", user=12345))
+        await self.bridge.reply_worker
+        self.assertEqual(self.store.get_effort(12345), "low")
+        self.assertIn("已切换思考强度为：`Low`", self.api.messages[-1][1])
+
+    async def test_mode_command_and_callback(self):
+        # 1. View mode menu
+        await self.bridge.handle(update("/mode"))
+        await self.bridge.reply_worker
+        self.assertIn("执行模式设置", self.api.messages[-1][1])
+        self.assertIsNotNone(self.api.messages[-1][2])
+
+        # 2. Change mode via command
+        await self.bridge.handle(update("/mode plan"))
+        await self.bridge.reply_worker
+        self.assertEqual(self.store.get_mode(12345), "plan")
+        self.assertIn("推演规划模式", self.api.messages[-1][1])
+
+        # 3. Change mode via callback
+        await self.bridge.handle(callback_update("mode:accept-edits", user=12345))
+        await self.bridge.reply_worker
+        self.assertEqual(self.store.get_mode(12345), "accept-edits")
+        self.assertIn("落地编辑模式", self.api.messages[-1][1])
+
+    async def test_whitelist_management(self):
+        # Non-admin user (67890) tries to add user -> rejected
+        await self.bridge.handle(update("/whitelist add 88888", user=67890))
+        await self.bridge.reply_worker
+        self.assertIn("仅主管理员", self.api.messages[-1][1])
+
+        # Admin user (12345) lists whitelist
+        await self.bridge.handle(update("/whitelist", user=12345))
+        await self.bridge.reply_worker
+        self.assertIn("白名单管理", self.api.messages[-1][1])
+
+        # Admin user adds 88888
+        await self.bridge.handle(update("/whitelist add 88888", user=12345))
+        await self.bridge.reply_worker
+        self.assertIn("已成功添加用户 `88888`", self.api.messages[-1][1])
+        self.assertTrue(self.bridge._is_allowed(88888))
+
+        # Dynamically added user can interact with bot
+        await self.bridge.handle(update("/id", user=88888))
+        await self.bridge.reply_worker
+        self.assertIn("你的 Telegram 数字 ID：88888", self.api.messages[-1][1])
+
+        # Admin removes 88888
+        await self.bridge.handle(update("/whitelist remove 88888", user=12345))
+        await self.bridge.reply_worker
+        self.assertIn("已成功从动态白名单中移除", self.api.messages[-1][1])
+        self.assertFalse(self.bridge._is_allowed(88888))
+
+    async def test_ls_command_lists_files(self):
+        test_file = self.settings.workspace / "sample_code.py"
+        test_file.write_text("print('hello')")
+        await self.bridge.handle(update("/ls"))
+        await self.bridge.reply_worker
+        self.assertIn("工作空间文件速览", self.api.messages[-1][1])
+        self.assertIn("sample_code.py", self.api.messages[-1][1])
+
+    async def test_restart_command_permissions_and_slot(self):
+        # Non-admin rejected
+        await self.bridge.handle(update("/restart", user=67890))
+        await self.bridge.reply_worker
+        self.assertIn("仅主管理员", self.api.messages[-1][1])
+
+        # Slot running rejected
+        from bot import Job
+        self.bridge.slot = Job(12345, 12345)
+        await self.bridge.handle(update("/restart", user=12345))
+        await self.bridge.reply_worker
+        self.assertIn("当前有正在执行的任务", self.api.messages[-1][1])
+        self.bridge.slot = None
+
+        # Idle admin triggers restart
+        with patch("bot.os.execv") as mock_execv:
+            await self.bridge.handle(update("/restart", user=12345))
+            await self.bridge.reply_worker
+            self.assertIn("守护进程正在重新载入并启动", self.api.messages[-1][1])
+            await asyncio.sleep(1.0)
+            mock_execv.assert_called_once()

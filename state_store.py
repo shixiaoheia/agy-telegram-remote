@@ -60,11 +60,14 @@ class Store:
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise PermissionError("State directory must be owned by this user and private (0700)")
         self.directory = directory
-        self.allowed = allowed
+        self.base_allowed = frozenset(allowed)
+        self.allowed = set(allowed)
         self.max_reply = max_reply
         self.retention = retention_days * 86400
         self.token = token
         self.lock_fd: int | None = None
+        for uid in self.get_extra_whitelist():
+            self.allowed.add(uid)
 
     def lock(self) -> None:
         fd = os.open(self.directory / "service.lock",
@@ -140,6 +143,93 @@ class Store:
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
             raise ValueError("Invalid model name")
         atomic_json(path, {"user_id": user, "model": model, "updated_at": time.time()})
+
+    def _effort_path(self, user: int) -> Path:
+        if type(user) is not int or user not in self.allowed:
+            raise ValueError("User is not allowed")
+        return self.directory / f"effort-{user}.json"
+
+    def get_effort(self, user: int) -> str | None:
+        path = self._effort_path(user)
+        try:
+            value = read_json(path, 1024)
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            return None
+        effort = value.get("effort")
+        if isinstance(effort, str) and effort in ("low", "medium", "high"):
+            return effort
+        return None
+
+    def set_effort(self, user: int, effort: str | None) -> None:
+        path = self._effort_path(user)
+        if effort is None:
+            path.unlink(missing_ok=True)
+            return
+        if effort not in ("low", "medium", "high"):
+            raise ValueError("Invalid effort setting")
+        atomic_json(path, {"user_id": user, "effort": effort, "updated_at": time.time()})
+
+    def _mode_path(self, user: int) -> Path:
+        if type(user) is not int or user not in self.allowed:
+            raise ValueError("User is not allowed")
+        return self.directory / f"mode-{user}.json"
+
+    def get_mode(self, user: int) -> str | None:
+        path = self._mode_path(user)
+        try:
+            value = read_json(path, 1024)
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            return None
+        mode = value.get("mode")
+        if isinstance(mode, str) and mode in ("plan", "accept-edits"):
+            return mode
+        return None
+
+    def set_mode(self, user: int, mode: str | None) -> None:
+        path = self._mode_path(user)
+        if mode is None:
+            path.unlink(missing_ok=True)
+            return
+        if mode not in ("plan", "accept-edits"):
+            raise ValueError("Invalid mode setting")
+        atomic_json(path, {"user_id": user, "mode": mode, "updated_at": time.time()})
+
+    def get_extra_whitelist(self) -> list[int]:
+        path = self.directory / "whitelist.json"
+        try:
+            value = read_json(path, 8192)
+        except FileNotFoundError:
+            return []
+        if isinstance(value, list) and all(isinstance(x, int) and x > 0 for x in value):
+            return value
+        return []
+
+    def add_whitelist(self, user: int) -> bool:
+        if not isinstance(user, int) or user <= 0:
+            raise ValueError("Invalid user ID")
+        current = self.get_extra_whitelist()
+        if user in current or user in self.base_allowed:
+            return False
+        current.append(user)
+        atomic_json(self.directory / "whitelist.json", current)
+        self.allowed.add(user)
+        return True
+
+    def remove_whitelist(self, user: int) -> bool:
+        if not isinstance(user, int) or user <= 0:
+            raise ValueError("Invalid user ID")
+        current = self.get_extra_whitelist()
+        if user not in current:
+            return False
+        current.remove(user)
+        atomic_json(self.directory / "whitelist.json", current)
+        if user not in self.base_allowed:
+            self.allowed.discard(user)
+        return True
 
     def _conv_path(self, user: int) -> Path:
         if type(user) is not int or user not in self.allowed:
@@ -259,6 +349,22 @@ class Store:
             match_usage = re.fullmatch(r"usage-([0-9]+)\.json", path.name)
             if match_usage:
                 user = int(match_usage[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                continue
+            match_effort = re.fullmatch(r"effort-([0-9]+)\.json", path.name)
+            if match_effort:
+                user = int(match_effort[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                continue
+            match_mode = re.fullmatch(r"mode-([0-9]+)\.json", path.name)
+            if match_mode:
+                user = int(match_mode[1])
                 if path.is_symlink():
                     raise ValueError("Linked state record")
                 if user not in self.allowed:

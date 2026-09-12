@@ -50,6 +50,8 @@ class Job:
     worker: asyncio.Task | None = None
     model: str = ""
     conversation_id: str = ""
+    effort: str = ""
+    mode: str = ""
 
 
 def describe(record: dict) -> str:
@@ -76,6 +78,13 @@ def describe(record: dict) -> str:
         stats.append(f"• ⏱️ 执行耗时：{duration}s")
     if model:
         stats.append(f"• 🏷️ 选用模型：{model}")
+    effort = record.get("effort")
+    if effort:
+        stats.append(f"• ⚡ 思考强度：{effort.capitalize()}")
+    mode = record.get("mode")
+    if mode:
+        mode_name = "推演规划 (Plan)" if mode == "plan" else "落地编辑 (Accept-Edits)"
+        stats.append(f"• 📋 执行模式：{mode_name}")
     input_tok = record.get("input_tokens", 0)
     output_tok = record.get("output_tokens", 0)
     total_tok = record.get("total_tokens", 0)
@@ -98,6 +107,99 @@ def describe(record: dict) -> str:
     return "\n\n".join(parts)
 
 
+def system_status(workspace: Path, start_time: float) -> str:
+    import platform
+    import shutil
+    import socket
+
+    hostname = socket.gethostname()
+    sys_name = platform.system()
+    release = platform.release()
+    machine = platform.machine()
+    python_ver = platform.python_version()
+
+    uptime_str = "未知"
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as f:
+            total_seconds = float(f.read().split()[0])
+            days = int(total_seconds // 86400)
+            hours = int((total_seconds % 86400) // 3600)
+            mins = int((total_seconds % 3600) // 60)
+            uptime_str = f"{days} 天 {hours} 小时 {mins} 分钟" if days > 0 else f"{hours} 小时 {mins} 分钟"
+    except Exception:
+        pass
+
+    cores = os.cpu_count() or 1
+    load_str = "未知"
+    try:
+        l1, l5, l15 = os.getloadavg()
+        load_str = f"{l1:.2f}, {l5:.2f}, {l15:.2f} ({cores} 核)"
+    except Exception:
+        pass
+
+    mem_str = "未知"
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            meminfo = {}
+            for line in f:
+                parts = line.split(":")
+                if len(parts) == 2:
+                    meminfo[parts[0].strip()] = int(parts[1].strip().split()[0])
+            total_kb = meminfo.get("MemTotal", 0)
+            avail_kb = meminfo.get("MemAvailable", meminfo.get("MemFree", 0) + meminfo.get("Buffers", 0) + meminfo.get("Cached", 0))
+            if total_kb > 0:
+                used_kb = total_kb - avail_kb
+                total_gb = total_kb / (1024 * 1024)
+                used_gb = used_kb / (1024 * 1024)
+                pct = (used_kb / total_kb) * 100
+                mem_str = f"{used_gb:.2f} GB / {total_gb:.2f} GB ({pct:.1f}%)"
+    except Exception:
+        pass
+
+    disk_str = "未知"
+    try:
+        usage = shutil.disk_usage(workspace)
+        free_gb = usage.free / (1024 ** 3)
+        total_gb = usage.total / (1024 ** 3)
+        used_gb = usage.used / (1024 ** 3)
+        pct = (usage.used / usage.total) * 100
+        disk_str = f"剩余 {free_gb:.1f} GB / 总计 {total_gb:.1f} GB ({pct:.1f}% 已用)"
+    except Exception:
+        pass
+
+    pid = os.getpid()
+    bot_uptime_sec = int(time.time() - start_time)
+    b_hours = bot_uptime_sec // 3600
+    b_mins = (bot_uptime_sec % 3600) // 60
+    b_secs = bot_uptime_sec % 60
+    bot_up_str = f"{b_hours}h {b_mins}m {b_secs}s" if b_hours > 0 else f"{b_mins}m {b_secs}s"
+
+    rss_str = ""
+    try:
+        pagesize = os.sysconf("SC_PAGE_SIZE")
+        with open(f"/proc/{pid}/statm", "r", encoding="utf-8") as f:
+            rss_pages = int(f.read().split()[1])
+            rss_mb = (rss_pages * pagesize) / (1024 * 1024)
+            rss_str = f" ｜ 常驻内存 {rss_mb:.1f} MB"
+    except Exception:
+        pass
+
+    lines = [
+        f"🖥️ 系统运行状态 ｜ 主机：{hostname}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"• 🐧 操作系统：{sys_name} {release} ({machine})",
+        f"• ⏱️ 系统运行：{uptime_str}",
+        f"• ⚡ CPU 负载：{load_str}",
+        f"• 💾 物理内存：{mem_str}",
+        f"• 💽 工作区磁盘：{disk_str}",
+        f"• 🤖 守护进程：PID {pid}{rss_str} ｜ 已运行 {bot_up_str}",
+        f"• 🐍 Python 版本：{python_ver}",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "💡 实时读取服务器 /proc 与底层系统信息，零外部依赖。",
+    ]
+    return "\n".join(lines)
+
+
 class Bridge:
     def __init__(self, settings: Settings, api: TelegramAPI, store: Store,
                  runner: Runner, ready_file: Path | None = None):
@@ -112,6 +214,9 @@ class Bridge:
         self.replies: asyncio.Queue[tuple] = asyncio.Queue(maxsize=32)
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
+
+    def _is_allowed(self, user: int) -> bool:
+        return user in self.settings.allowed or user in self.store.allowed
 
     async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
         try:
@@ -156,6 +261,9 @@ class Bridge:
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
         try:
             model_info = f"（模型：{job.model}）" if job.model else ""
+            effort_info = f"\n⚡ 思考强度：{job.effort.capitalize()}" if job.effort else ""
+            mode_name = "推演规划 (Plan)" if job.mode == "plan" else ("落地编辑 (Accept-Edits)" if job.mode == "accept-edits" else job.mode)
+            mode_info = f"\n📋 执行模式：{mode_name}" if job.mode else ""
             conv = self.store.get_conversation(job.user)
             conv_tag = ""
             if conv and conv.get("conversation_id"):
@@ -166,7 +274,7 @@ class Bridge:
 
             accept_msg = (
                 f"🚀 任务 {job.job_id} 已接收{model_info}，准备调用 agy。\n"
-                f"━━━━━━━━━━━━━━━━━━━━{conv_tag}\n"
+                f"━━━━━━━━━━━━━━━━━━━━{conv_tag}{effort_info}{mode_info}\n"
                 f"⏳ 正在调用 Antigravity 执行任务，请稍候..."
             )
             accepted = await self.send_text(job.chat, accept_msg)
@@ -176,6 +284,8 @@ class Bridge:
                     "detail": "确认消息未成功投递、任务已取消或服务正在停止；没有启动 agy。",
                     "delivery": "sent" if accepted else "failed",
                     "model": job.model,
+                    "effort": job.effort,
+                    "mode": job.mode,
                 })
                 return
             await self._work(job, prompt)
@@ -194,12 +304,19 @@ class Bridge:
                 result = await self.runner.run(
                     prompt, job.cancel, model=job.model or None,
                     conversation_id=job.conversation_id or None,
+                    effort=job.effort or None, mode=job.mode or None,
                 )
             except TypeError:
                 try:
-                    result = await self.runner.run(prompt, job.cancel, model=job.model or None)
+                    result = await self.runner.run(
+                        prompt, job.cancel, model=job.model or None,
+                        conversation_id=job.conversation_id or None,
+                    )
                 except TypeError:
-                    result = await self.runner.run(prompt, job.cancel)
+                    try:
+                        result = await self.runner.run(prompt, job.cancel, model=job.model or None)
+                    except TypeError:
+                        result = await self.runner.run(prompt, job.cancel)
 
             if result.outcome == "success" and getattr(result, "conversation_id", None):
                 self.store.set_conversation(job.user, result.conversation_id, getattr(result, "num_turns", 1))
@@ -215,6 +332,8 @@ class Bridge:
                 job.user, result.to_dict() | {
                     "job_id": job.job_id, "delivery": "pending",
                     "model": job.model or getattr(result, "model", ""),
+                    "effort": job.effort or getattr(result, "effort", ""),
+                    "mode": job.mode or getattr(result, "mode", ""),
                 }
             )
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
@@ -249,7 +368,7 @@ class Bridge:
         chat_id = chat.get("id") or user
         data = str(cq.get("data") or "")
 
-        if type(user) is not int or user not in self.settings.allowed or sender.get("is_bot") is True:
+        if type(user) is not int or not self._is_allowed(user) or sender.get("is_bot") is True:
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="⚠️ 无操作权限", show_alert=True)
             return
@@ -273,6 +392,37 @@ class Bridge:
                 await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {resolved}")
             self.queue_reply(chat_id, f"🎯 已切换模型为：`{resolved}`{alias_note}\n🚀 后续任务将使用此模型。")
             return
+
+        if data.startswith("effort:"):
+            target = data[7:].strip().lower()
+            if target in {"default", "reset", "clear"}:
+                self.store.set_effort(user, None)
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="🔄 已恢复默认思考强度")
+                self.queue_reply(chat_id, "🔄 已恢复为默认思考强度。")
+                return
+            if target in {"low", "medium", "high"}:
+                self.store.set_effort(user, target)
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text=f"🎯 已设置思考强度为: {target.capitalize()}")
+                self.queue_reply(chat_id, f"🎯 已切换思考强度为：`{target.capitalize()}`\n🚀 后续任务将以此强度调用 agy。")
+                return
+
+        if data.startswith("mode:"):
+            target = data[5:].strip().lower()
+            if target in {"default", "reset", "clear"}:
+                self.store.set_mode(user, None)
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="🔄 已恢复默认执行模式")
+                self.queue_reply(chat_id, "🔄 已恢复为默认执行模式。")
+                return
+            if target in {"plan", "accept-edits"}:
+                self.store.set_mode(user, target)
+                name = "推演规划模式 (Plan)" if target == "plan" else "落地编辑模式 (Accept-Edits)"
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text=f"🎯 已切换为: {name}")
+                self.queue_reply(chat_id, f"🎯 已切换模式为：`{name}`\n🚀 后续任务将使用此模式。")
+                return
 
     async def handle(self, update: dict) -> None:
         if self.stop.is_set():
@@ -305,17 +455,27 @@ class Bridge:
             self._next_id_reply = now + 2.0
             self.queue_reply(chat_id, f"🆔 你的 Telegram 数字 ID：{user}")
             return
-        if user not in self.settings.allowed or sender.get("is_bot") is True:
+        if not self._is_allowed(user) or sender.get("is_bot") is True:
             return
         if command in {"/start", "/help"}:
             self.queue_reply(
                 chat_id,
                 "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
-                "💬 直接发送文字：向 AI 助手提问或分派任务\n"
-                "🧠 /model - 切换 AI 模型（支持点击按钮与 14 种模型速查）\n"
+                "💬 直接发送文字：向 AI 助手提问或分派任务\n\n"
+                "【模型与推理配置】\n"
+                "🧠 /model - 切换 AI 模型（支持 14 种模型与点击直切）\n"
+                "⚡ /effort - 调整思考强度（Low 极速 / Medium 均衡 / High 深度）\n"
+                "📋 /mode - 切换执行模式（Accept-Edits 落地 / Plan 推演规划）\n\n"
+                "【会话与用量管理】\n"
                 "🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
-                "📊 /usage - 查看 Token 消耗统计与对话轮数\n"
-                "📈 /status - 查看当前任务执行状态、记忆与磁盘空间\n"
+                "📊 /usage - 查看 Token 消耗明细与对话轮数\n"
+                "📈 /status - 查看任务执行状态、记忆与磁盘空间\n\n"
+                "【工作空间与系统】\n"
+                "📁 /ls - 速览工作空间最近修改的文件列表\n"
+                "🖥️ /sys - 查看服务器硬件负载、CPU、内存与运行时间\n"
+                "👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
+                "🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
+                "【控制与基础】\n"
                 "🛑 /cancel - 立即取消正在执行的任务\n"
                 "📜 /last - 查看最近一条任务的执行结果\n"
                 "🆔 /id - 查看你的 Telegram 数字 ID\n"
@@ -356,6 +516,10 @@ class Bridge:
         if command == "/status":
             current_model = self.store.get_model(user) or self.settings.model
             model_info = f" [模型：{current_model}]" if current_model else ""
+            effort = self.store.get_effort(user)
+            effort_info = f"\n⚡ 思考强度：{effort.capitalize()}" if effort else ""
+            mode = self.store.get_mode(user)
+            mode_info = f"\n📋 执行模式：{mode}" if mode else ""
             conv = self.store.get_conversation(user)
             conv_info = ""
             if conv and conv.get("conversation_id"):
@@ -380,7 +544,7 @@ class Bridge:
                 text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
                 text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
-            text += conv_info + disk_info
+            text += conv_info + effort_info + mode_info + disk_info
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
@@ -460,6 +624,231 @@ class Bridge:
             alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
             self.queue_reply(chat_id, f"🎯 已切换模型为：{resolved}{alias_note}\n🚀 后续任务将使用此模型。")
             return
+        if command in {"/sys", "/system"}:
+            self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at))
+            return
+        if command == "/restart":
+            admin_id = sorted(self.settings.allowed)[0] if self.settings.allowed else 0
+            if user != admin_id:
+                self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。")
+                return
+            if self.slot is not None and not self.slot.cancel.is_set():
+                self.queue_reply(
+                    chat_id,
+                    f"⚠️ 当前有正在执行的任务（任务 {self.slot.job_id}），请等待其完成或先发送 /cancel 后再重启。"
+                )
+                return
+            self.queue_reply(chat_id, "🔄 守护进程正在重新载入并启动，请稍候约 3-5 秒后发送 /status 验证……")
+
+            async def _do_restart():
+                await asyncio.sleep(0.8)
+                try:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                except Exception as err:
+                    LOG.error("restart_execv_failed: %s", err)
+
+            asyncio.create_task(_do_restart())
+            return
+        if command == "/whitelist":
+            admin_id = sorted(self.settings.allowed)[0] if self.settings.allowed else 0
+            parts = text.split(maxsplit=2)
+            subcmd = parts[1].lower() if len(parts) > 1 else ""
+            target_str = parts[2].strip() if len(parts) > 2 else ""
+
+            if not subcmd or subcmd in {"list", "show", "help"}:
+                base_users = sorted(self.settings.allowed)
+                extra_users = self.store.get_extra_whitelist()
+                lines = [
+                    "👥 白名单管理 ｜ 授权用户列表",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "【基础配置白名单 (config.env)】",
+                ]
+                for uid in base_users:
+                    tag = " 👑 (主管理员)" if uid == admin_id else ""
+                    lines.append(f"• ID: `{uid}`{tag}")
+                lines.append("\n【动态授权白名单】")
+                if extra_users:
+                    for uid in extra_users:
+                        lines.append(f"• ID: `{uid}`")
+                else:
+                    lines.append("• 暂无动态添加的用户")
+                lines.extend([
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "💡 管理指令（仅主管理员可用）：",
+                    "• 添加用户：/whitelist add <数字ID>",
+                    "• 移除用户：/whitelist remove <数字ID>",
+                ])
+                self.queue_reply(chat_id, "\n".join(lines))
+                return
+
+            if user != admin_id:
+                self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可管理动态白名单。")
+                return
+
+            if subcmd == "add":
+                if not target_str.isdigit() or not (5 <= len(target_str) <= 16):
+                    self.queue_reply(chat_id, "⚠️ 请输入合法的 Telegram 数字用户 ID（5-16 位正整数）。\n例如：/whitelist add 123456789")
+                    return
+                target_id = int(target_str)
+                if target_id in self.settings.allowed:
+                    self.queue_reply(chat_id, f"ℹ️ 用户 `{target_id}` 已在 config.env 基础配置中，无需重复添加。")
+                    return
+                ok = self.store.add_whitelist(target_id)
+                if ok:
+                    self.queue_reply(chat_id, f"✅ 已成功添加用户 `{target_id}` 到授权白名单！该用户现在可以私聊使用此 Bot。")
+                else:
+                    self.queue_reply(chat_id, f"ℹ️ 用户 `{target_id}` 已经在动态白名单中了。")
+                return
+
+            if subcmd in {"remove", "del", "delete", "rm"}:
+                if not target_str.isdigit():
+                    self.queue_reply(chat_id, "⚠️ 请指定要移除的 Telegram 数字用户 ID。\n例如：/whitelist remove 123456789")
+                    return
+                target_id = int(target_str)
+                if target_id in self.settings.allowed:
+                    self.queue_reply(chat_id, f"⚠️ 用户 `{target_id}` 属于 config.env 基础配置白名单，无法通过指令移除。")
+                    return
+                ok = self.store.remove_whitelist(target_id)
+                if ok:
+                    self.queue_reply(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`。")
+                else:
+                    self.queue_reply(chat_id, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。")
+                return
+
+            self.queue_reply(chat_id, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>")
+            return
+        if command == "/effort":
+            parts = text.split(maxsplit=1)
+            target = parts[1].strip().lower() if len(parts) > 1 else ""
+            if not target or target in {"show", "current", "list", "help"}:
+                curr = self.store.get_effort(user)
+                curr_display = f"{curr.capitalize()} 思考" if curr else "默认（跟随模型原生强度）"
+                lines = [
+                    f"⚡ 思考强度调节 ｜ 当前：{curr_display}",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "• ⚡ 极速 (Low)：低思考强度，响应迅速，适合简单问答与代码补全",
+                    "• ⚖️ 均衡 (Medium)：中等思考强度，平衡响应耗时与推理深度",
+                    "• 🧠 深度 (High)：高思考深度，最强复杂逻辑分析与大型重构",
+                    "• 🔄 默认 (Default)：恢复默认强度配置",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "💡 你可以点击下方按钮一键切换，或输入：/effort <low|medium|high|default>",
+                ]
+                keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {"text": f"{'🔘' if curr == 'low' else '⚪'} ⚡ 极速 (Low)", "callback_data": "effort:low"},
+                            {"text": f"{'🔘' if curr == 'medium' else '⚪'} ⚖️ 均衡 (Med)", "callback_data": "effort:medium"},
+                        ],
+                        [
+                            {"text": f"{'🔘' if curr == 'high' else '⚪'} 🧠 深度 (High)", "callback_data": "effort:high"},
+                            {"text": f"{'🔘' if not curr else '⚪'} 🔄 恢复默认", "callback_data": "effort:default"},
+                        ],
+                    ]
+                }
+                self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
+                return
+
+            alias_map = {"低": "low", "中": "medium", "高": "high", "med": "medium"}
+            val = alias_map.get(target, target)
+            if val in {"default", "reset", "clear", "auto"}:
+                self.store.set_effort(user, None)
+                self.queue_reply(chat_id, "🔄 已恢复为默认思考强度配置（由模型或系统决定）。")
+                return
+            if val not in {"low", "medium", "high"}:
+                self.queue_reply(chat_id, "⚠️ 不支持的思考强度。可选值：`low` (极速), `medium` (均衡), `high` (深度), `default` (恢复默认)")
+                return
+            self.store.set_effort(user, val)
+            self.queue_reply(chat_id, f"🎯 已成功设置思考强度为：`{val.capitalize()}`\n🚀 后续任务将以此强度调用 agy。")
+            return
+        if command == "/mode":
+            parts = text.split(maxsplit=1)
+            target = parts[1].strip().lower() if len(parts) > 1 else ""
+            if not target or target in {"show", "current", "list", "help"}:
+                curr = self.store.get_mode(user)
+                curr_display = "推演规划模式 (Plan)" if curr == "plan" else ("落地编辑模式 (Accept-Edits)" if curr == "accept-edits" else "默认（标准落地编辑）")
+                lines = [
+                    f"📋 执行模式设置 ｜ 当前：{curr_display}",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "• 🛠️ 落地编辑模式 (accept-edits)：\n  AI 将实际在工作目录中创建、修改和执行代码文件。",
+                    "• 📋 推演规划模式 (plan)：\n  AI 仅进行推演架构方案与执行步骤规划，不修改任何文件。",
+                    "• 🔄 默认模式 (default)：\n  恢复为标准落地模式。",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "💡 你可以点击下方按钮切换，或输入：/mode <plan|code|default>",
+                ]
+                keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {"text": f"{'🔘' if curr == 'accept-edits' else '⚪'} 🛠️ 落地编辑", "callback_data": "mode:accept-edits"},
+                            {"text": f"{'🔘' if curr == 'plan' else '⚪'} 📋 推演规划", "callback_data": "mode:plan"},
+                        ],
+                        [
+                            {"text": f"{'🔘' if not curr else '⚪'} 🔄 恢复默认模式", "callback_data": "mode:default"},
+                        ],
+                    ]
+                }
+                self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
+                return
+
+            if target in {"default", "reset", "clear", "auto"}:
+                self.store.set_mode(user, None)
+                self.queue_reply(chat_id, "🔄 已恢复为默认执行模式。")
+                return
+            if target in {"plan", "planning", "规划"}:
+                self.store.set_mode(user, "plan")
+                self.queue_reply(chat_id, "📋 已切换为【推演规划模式 (plan)】！\n💡 在此模式下，AI 将仅推演方案与计划，不会实际修改任何文件。")
+                return
+            if target in {"code", "edit", "edits", "accept-edits", "落地", "编辑"}:
+                self.store.set_mode(user, "accept-edits")
+                self.queue_reply(chat_id, "🛠️ 已切换为【落地编辑模式 (accept-edits)】！\n💡 在此模式下，AI 将直接在工作目录中修改并应用代码。")
+                return
+            self.queue_reply(chat_id, "⚠️ 不支持的执行模式。可选：`/mode plan` (推演规划), `/mode code` (落地编辑), `/mode default` (默认)")
+            return
+        if command in {"/ls", "/files"}:
+            workspace = self.settings.workspace
+            try:
+                entries = []
+                for p in workspace.iterdir():
+                    try:
+                        st = p.stat()
+                        entries.append((st.st_mtime, p.is_dir(), st.st_size, p.name))
+                    except (OSError, PermissionError):
+                        continue
+                entries.sort(key=lambda x: x[0], reverse=True)
+                total_count = len(entries)
+                display_items = entries[:15]
+
+                lines = [
+                    f"📁 工作空间文件速览 ｜ `{workspace}`",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                ]
+                if not display_items:
+                    lines.append("（工作空间当前为空）")
+                else:
+                    for mtime, is_dir, size, name in display_items:
+                        import datetime
+                        dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
+                        if is_dir:
+                            lines.append(f"📁 `{name}/` ｜ {dt_str}")
+                        else:
+                            if size < 1024:
+                                size_str = f"{size} B"
+                            elif size < 1024 * 1024:
+                                size_str = f"{size / 1024:.1f} KB"
+                            else:
+                                size_str = f"{size / (1024 * 1024):.1f} MB"
+                            lines.append(f"📄 `{name}` ({size_str}) ｜ {dt_str}")
+
+                lines.append("━━━━━━━━━━━━━━━━━━━━")
+                import shutil
+                try:
+                    free_gb = shutil.disk_usage(workspace).free / (1024 ** 3)
+                    lines.append(f"📊 目录总计 {total_count} 个项目 ｜ 剩余可用磁盘：{free_gb:.1f} GB")
+                except Exception:
+                    lines.append(f"📊 目录总计 {total_count} 个项目")
+                self.queue_reply(chat_id, "\n".join(lines))
+            except Exception:
+                self.queue_reply(chat_id, "⚠️ 无法读取工作空间目录，请检查服务器权限。")
+            return
         if command:
             self.queue_reply(chat_id, "⚠️ 不支持这个控制命令。发送 /help 查看可用指令。")
             return
@@ -476,7 +865,9 @@ class Bridge:
         user_model = self.store.get_model(user) or self.settings.model or ""
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
-        job = Job(user, chat_id, model=user_model, conversation_id=conv_id)
+        effort = self.store.get_effort(user) or ""
+        mode = self.store.get_mode(user) or ""
+        job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort, mode=mode)
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
@@ -484,6 +875,8 @@ class Bridge:
                 "job_id": job.job_id, "outcome": "running", "delivery": "pending",
                 "detail": "任务准备或执行中；服务中断时不会自动重试。",
                 "model": job.model,
+                "effort": job.effort,
+                "mode": job.mode,
             })
             job.worker = asyncio.create_task(self._accept_and_work(job, text))
         except Exception:

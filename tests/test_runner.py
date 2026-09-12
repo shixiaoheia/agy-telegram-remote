@@ -161,6 +161,13 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
         idx = cmd_model.index("--model")
         self.assertEqual(cmd_model[idx + 1], "claude-sonnet-4-6")
 
+    def test_build_command_effort_and_mode_options(self):
+        cmd = build_command(self.settings, "prompt", effort="high", mode="plan")
+        self.assertIn("--effort", cmd)
+        self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
+        self.assertIn("--mode", cmd)
+        self.assertEqual(cmd[cmd.index("--mode") + 1], "plan")
+
     async def test_no_shell_interpolation(self):
         marker = self.directory / "must-not-exist"
         self.executable("import json,sys\nprint(json.dumps({'status':'SUCCESS','response':sys.argv[-1]}))\n")

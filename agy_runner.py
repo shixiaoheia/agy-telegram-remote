@@ -37,6 +37,8 @@ class Result:
     total_tokens: int = 0
     conversation_id: str = ""
     num_turns: int = 0
+    effort: str = ""
+    mode: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -164,7 +166,9 @@ def child_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
 
 
 def build_command(settings: Settings, prompt: str, model: str | None = None,
-                  conversation_id: str | None = None) -> list[str]:
+                  conversation_id: str | None = None,
+                  effort: str | None = None,
+                  mode: str | None = None) -> list[str]:
     command = [
         str(settings.agy), "--print-timeout", f"{math.ceil(settings.timeout)}s",
         "--output-format", "json",
@@ -175,6 +179,10 @@ def build_command(settings: Settings, prompt: str, model: str | None = None,
         command.extend(["--conversation", conversation_id])
     if model:
         command.extend(["--model", model])
+    if effort:
+        command.extend(["--effort", effort])
+    if mode:
+        command.extend(["--mode", mode])
     return command + ["--print", prompt]
 
 
@@ -269,29 +277,32 @@ class Runner:
         self.blocked = False
 
     async def run(self, prompt: str, cancel: asyncio.Event,
-                  model: str | None = None, conversation_id: str | None = None) -> Result:
+                  model: str | None = None, conversation_id: str | None = None,
+                  effort: str | None = None, mode: str | None = None) -> Result:
         selected_model = model or self.settings.model or ""
         start_time = asyncio.get_running_loop().time()
         if self.blocked:
             return Result("cleanup_failed", detail="上次进程清理未确认完成；请重启服务后检查。",
-                          cleanup_ok=False, model=selected_model)
+                          cleanup_ok=False, model=selected_model, effort=effort or "", mode=mode or "")
         if cancel.is_set():
-            return Result("cancelled", detail="任务在启动前已取消。", model=selected_model)
+            return Result("cancelled", detail="任务在启动前已取消。", model=selected_model,
+                          effort=effort or "", mode=mode or "")
         if not prompt.strip() or "\x00" in prompt or len(prompt) > self.settings.max_prompt:
             return Result("error", detail="任务为空、过长或含非法字符。", category="input",
-                          model=selected_model)
+                          model=selected_model, effort=effort or "", mode=mode or "")
         process = None
         readers: list[asyncio.Task] = []
         watchers: list[asyncio.Task] = []
         result = Result("error", detail="agy 启动或执行异常。", category="process",
-                        model=selected_model)
+                        model=selected_model, effort=effort or "", mode=mode or "")
         task_cancelled = False
         captured = [Capture(), Capture()]
         cleanup_ok = True
         try:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
                 *build_command(self.settings, prompt, model=selected_model or None,
-                               conversation_id=conversation_id or None),
+                               conversation_id=conversation_id or None,
+                               effort=effort or None, mode=mode or None),
                 cwd=self.settings.workspace,
                 env=child_environment(self.settings.home),
                 stdin=asyncio.subprocess.DEVNULL,
@@ -391,6 +402,10 @@ class Runner:
         result.stderr_bytes = captured[1].total
         if selected_model:
             result.model = selected_model
+        if effort:
+            result.effort = effort
+        if mode:
+            result.mode = mode
         if process is not None:
             result.exit_code = process.returncode
         if task_cancelled and result.outcome == "success":

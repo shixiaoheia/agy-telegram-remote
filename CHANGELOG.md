@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased — system monitoring, workspace browsing, dynamic whitelist, engine effort & mode controls
+
+- **原生 Linux VPS 硬件与进程实时监控（`/sys` & `/system`）**（`bot.py`）：
+  - 纯标准库直接读取 Linux `/proc/uptime`、`/proc/loadavg`、`/proc/meminfo`、`/proc/<pid>/statm` 与平台系统信息；
+  - 零外部三方依赖，秒级回传 VPS 系统负载、物理内存使用率、磁盘可用空间、Bot PID 及常驻内存（RSS MB）；
+  - `/status` 指令同步聚合当前模型、思考强度、执行模式、会话轮次与常驻内存指标。
+- **思考深度与执行模式精准控制（`/effort` & `/mode`）**（`bot.py`、`agy_runner.py`、`state_store.py`）：
+  - 新增 `/effort` 指令与行内键盘切换（`low` / `medium` / `high` / `default`），用户偏好持久化（`effort-{user}.json`），底层向 `agy` 透传 `--effort`；
+  - 新增 `/mode` 指令与行内键盘切换（`plan` 只读规划模式 / `code` 自动生成模式 / `default`），用户偏好持久化（`mode-{user}.json`），底层向 `agy` 透传 `--mode`；
+  - 任务接收卡片与结果卡片实时显示思考深度与执行模式标签。
+- **工作区安全文件浏览（`/ls` & `/files`）**（`bot.py`）：
+  - 提供工作区最近修改文件（前 15 个）与相对路径快速浏览，展示文件大小（KB/MB）与修改时间戳；
+  - 支持 `/ls <subpath>` 浏览子目录；内置严格路径规范化防穿越（防 `..` 越权、拦截软链接出界与敏感隐藏文件）。
+- **Telegram 私聊动态白名单管理（`/whitelist`）**（`bot.py`、`state_store.py`）：
+  - 管理员可在私聊直接运行 `/whitelist add <id>` 与 `/whitelist remove <id>` 动态授权与撤回权限；
+  - 动态白名单持久化落盘至 `state/whitelist.json`（权限 0600），与静态配置安全合并，内置主管理员删除保护。
+- **平滑就地热重载（`/restart`）**（`bot.py`）：
+  - 管理员专用 `/restart` 指令，执行前严格校验当前任务槽位状态（正在执行任务时阻断）；
+  - 空闲时通过 `os.execv` 原生重载当前进程，零停机更新 Python 代码与执行环境。
+- **自动化测试扩展至 176 项全面断言**（`tests/`）：
+  - 新增 10 项测试覆盖 `/sys` 系统监控采集、`/effort` 与 `/mode` 选项解析与行内回调、动态白名单落盘与权限保护、`/ls` 路径沙箱越权拦截、`/restart` 权限与空闲检测。
+
 ## Unreleased — interactive model keyboard, conversation memory, token metrics, and root mode
 
 - **拟物化卡片与视觉排版全面重构**（`bot.py`）：
