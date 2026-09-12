@@ -21,7 +21,7 @@
 - **Telegram update_id 边界与防重放核验**（Task 3）：
   - 调研 Telegram 官方规范关于空闲 7 天以上可能随机重置 `update_id` 的行为；由于盲目接受小 ID 会破坏针对网络重传与代理乱序的防重放保护，将其记录为**待验证项（Pending Verification）**，完整保留原有的 `uid < self.offset` 防重放机制并补充回归测试，不盲目修改核心 offset 逻辑。
 - **测试覆盖扩展**：
-  - 单元测试增至 110 项，新增用例覆盖就绪标记递延/撤销、部署排他锁、测试脚本防误用门禁及 `update_id` 防重放逻辑。
+  - 单元测试增至 111 项，新增用例覆盖就绪标记递延/撤销、部署排他锁、测试脚本防误用门禁及 `update_id` 防重放逻辑。
 
 ## Unreleased — dedicated service account without default user groups
 

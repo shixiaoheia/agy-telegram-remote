@@ -264,19 +264,20 @@ ensure_service_account
 
     def test_account_script_refuses_without_explicit_isolation(self):
         script = str(ROOT / "scripts/test_account_debian12.sh")
+        base_env = {k: v for k, v in os.environ.items() if k != "AGY_TEST_ISOLATED_CONTAINER"}
         # Without flag and without env var
-        r1 = subprocess.run(["bash", script], capture_output=True, text=True)
+        r1 = subprocess.run(["bash", script], env=base_env, capture_output=True, text=True)
         self.assertEqual(r1.returncode, 2)
         self.assertIn("--confirm-isolated-environment", r1.stderr)
 
         # With flag but without env var
         r2 = subprocess.run(["bash", script, "--confirm-isolated-environment"],
-                            capture_output=True, text=True)
+                            env=base_env, capture_output=True, text=True)
         self.assertEqual(r2.returncode, 2)
         self.assertIn("AGY_TEST_ISOLATED_CONTAINER=1", r2.stderr)
 
         # With env var but without flag
-        r3 = subprocess.run(["bash", script], env=os.environ | {"AGY_TEST_ISOLATED_CONTAINER": "1"},
+        r3 = subprocess.run(["bash", script], env=base_env | {"AGY_TEST_ISOLATED_CONTAINER": "1"},
                             capture_output=True, text=True)
         self.assertEqual(r3.returncode, 2)
         self.assertIn("--confirm-isolated-environment", r3.stderr)
@@ -292,6 +293,13 @@ ensure_service_account
         with tempfile.TemporaryDirectory() as temp:
             lock_path = Path(temp) / "deploy.lock"
             code = r'''
+stat() {
+    if [[ "$1" == "-c" && "$2" == "%u" ]]; then
+        echo "0"
+        return 0
+    fi
+    command stat "$@"
+}
 source "$1"
 DEPLOY_LOCK_FILE="$2"
 exec 8>>"$DEPLOY_LOCK_FILE"
@@ -302,6 +310,27 @@ acquire_deploy_lock
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("已有安装、更新或卸载进程正在运行", result.stderr)
+
+    def test_deploy_lock_rejects_non_root_dir_when_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_path = Path(temp) / "deploy.lock"
+            code = r'''
+stat() {
+    if [[ "$1" == "-c" && "$2" == "%u" ]]; then
+        echo "1001"
+        return 0
+    fi
+    command stat "$@"
+}
+source "$1"
+DEPLOY_LOCK_FILE="$2"
+acquire_deploy_lock
+'''
+            result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(lock_path)],
+                                    capture_output=True, text=True)
+            if os.geteuid() == 0:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("锁定目录不受 root 管理", result.stderr)
 
     def test_help_does_not_acquire_lock(self):
         with tempfile.TemporaryDirectory() as temp:

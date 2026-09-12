@@ -128,7 +128,9 @@ acquire_deploy_lock() {
   local lock_dir
   lock_dir="$(dirname -- "$DEPLOY_LOCK_FILE")"
   [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || fail "锁定目录异常：$lock_dir"
-  [[ "$(stat -c %u "$lock_dir")" == 0 ]] || fail "锁定目录不受 root 管理：$lock_dir"
+  if [[ "$EUID" -eq 0 ]]; then
+    [[ "$(stat -c %u "$lock_dir")" == 0 ]] || fail "锁定目录不受 root 管理：$lock_dir"
+  fi
   [[ ! -L "$DEPLOY_LOCK_FILE" ]] || fail "锁定文件是符号链接：$DEPLOY_LOCK_FILE"
   exec 9>>"$DEPLOY_LOCK_FILE"
   chmod 0600 "$DEPLOY_LOCK_FILE" 2>/dev/null || true
