@@ -107,6 +107,45 @@ def describe(record: dict) -> str:
     return "\n\n".join(parts)
 
 
+def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
+    import datetime
+    dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
+    if is_dir:
+        return f"📁 `{name}/` ｜ {dt_str}"
+
+    lower = name.lower()
+    if lower.endswith(".py"):
+        icon = "🐍"
+    elif lower.endswith((".sh", ".bash", ".zsh")):
+        icon = "🐚"
+    elif lower.endswith((".md", ".markdown", ".rst")):
+        icon = "📝"
+    elif lower.endswith((".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg", ".env")):
+        icon = "⚙️"
+    elif lower.endswith((".log", ".out", ".err")):
+        icon = "📋"
+    elif lower.endswith((".txt", ".csv", ".tsv")):
+        icon = "📄"
+    elif lower.endswith((".tar", ".gz", ".zip", ".7z", ".bz2", ".xz")):
+        icon = "📦"
+    elif lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+        icon = "🖼️"
+    elif lower.endswith((".db", ".sqlite", ".sqlite3", ".sql")):
+        icon = "🗄️"
+    elif lower.startswith(".") or "lock" in lower:
+        icon = "🔒"
+    else:
+        icon = "📄"
+
+    if size < 1024:
+        size_str = f"{size} B"
+    elif size < 1024 * 1024:
+        size_str = f"{size / 1024:.1f} KB"
+    else:
+        size_str = f"{size / (1024 * 1024):.1f} MB"
+    return f"{icon} `{name}` ({size_str}) ｜ {dt_str}"
+
+
 def system_status(workspace: Path, start_time: float) -> str:
     import platform
     import shutil
@@ -117,6 +156,17 @@ def system_status(workspace: Path, start_time: float) -> str:
     release = platform.release()
     machine = platform.machine()
     python_ver = platform.python_version()
+
+    distro_name = f"{sys_name} {release}"
+    try:
+        if os.path.exists("/etc/os-release"):
+            with open("/etc/os-release", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("PRETTY_NAME="):
+                        distro_name = line.split("=", 1)[1].strip().strip('"')
+                        break
+    except Exception:
+        pass
 
     uptime_str = "未知"
     try:
@@ -187,15 +237,15 @@ def system_status(workspace: Path, start_time: float) -> str:
     lines = [
         f"🖥️ 系统运行状态 ｜ 主机：{hostname}",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"• 🐧 操作系统：{sys_name} {release} ({machine})",
+        f"• 🐧 操作系统：{distro_name} ({machine})",
         f"• ⏱️ 系统运行：{uptime_str}",
         f"• ⚡ CPU 负载：{load_str}",
         f"• 💾 物理内存：{mem_str}",
         f"• 💽 工作区磁盘：{disk_str}",
         f"• 🤖 守护进程：PID {pid}{rss_str} ｜ 已运行 {bot_up_str}",
-        f"• 🐍 Python 版本：{python_ver}",
+        f"• 🐍 Python 版本：v{python_ver}",
         "━━━━━━━━━━━━━━━━━━━━",
-        "💡 实时读取服务器 /proc 与底层系统信息，零外部依赖。",
+        "💡 实时读取 Linux /proc 与底层系统信息，零外部依赖。",
     ]
     return "\n".join(lines)
 
@@ -462,25 +512,25 @@ class Bridge:
                 chat_id,
                 "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
                 "💬 直接发送文字：向 AI 助手提问或分派任务\n\n"
-                "【模型与推理配置】\n"
-                "🧠 /model - 切换 AI 模型（支持 14 种模型与点击直切）\n"
-                "⚡ /effort - 调整思考强度（Low 极速 / Medium 均衡 / High 深度）\n"
-                "📋 /mode - 切换执行模式（Accept-Edits 落地 / Plan 推演规划）\n\n"
-                "【会话与用量管理】\n"
-                "🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
-                "📊 /usage - 查看 Token 消耗明细与对话轮数\n"
-                "📈 /status - 查看任务执行状态、记忆与磁盘空间\n\n"
-                "【工作空间与系统】\n"
-                "📁 /ls - 速览工作空间最近修改的文件列表\n"
-                "🖥️ /sys - 查看服务器硬件负载、CPU、内存与运行时间\n"
-                "👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
-                "🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
-                "【控制与基础】\n"
-                "🛑 /cancel - 立即取消正在执行的任务\n"
-                "📜 /last - 查看最近一条任务的执行结果\n"
-                "🆔 /id - 查看你的 Telegram 数字 ID\n"
-                "❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
-                "✨ 支持原生上下文连续对话与自动记忆！",
+                "【🧠 模型与推理配置】\n"
+                "• 🧠 /model - 切换 AI 模型（支持 14 种模型与点击直切）\n"
+                "• ⚡ /effort - 调整思考强度（Low 极速 / Medium 均衡 / High 深度）\n"
+                "• 📋 /mode - 切换执行模式（Accept-Edits 落地 / Plan 推演规划）\n\n"
+                "【💬 会话与用量管理】\n"
+                "• 🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
+                "• 📊 /usage - 查看 Token 消耗明细与对话轮数\n"
+                "• 📈 /status - 查看任务执行状态、记忆与工作空间可用磁盘\n\n"
+                "【🖥️ 系统与运维管理】\n"
+                "• 📁 /ls 或 /files - 速览工作空间最近修改的文件列表\n"
+                "• 🖥️ /sys 或 /system - 实时查看 VPS 硬件负载、CPU、内存与运行时间\n"
+                "• 👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
+                "• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
+                "【🛑 任务控制与基础】\n"
+                "• 🛑 /cancel - 立即取消正在执行的任务\n"
+                "• 📜 /last - 查看最近一条任务的执行结果\n"
+                "• 🆔 /id - 查看你的 Telegram 数字 ID\n"
+                "• ❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
+                "✨ 零依赖纯 Python 构建 ｜ 原生支持多轮上下文对话记忆！",
             )
             return
         if command in {"/new", "/reset"}:
@@ -503,12 +553,12 @@ class Bridge:
                 chat_id,
                 f"📊 Token 用量统计报告\n━━━━━━━━━━━━━━━━━━━━\n"
                 f"💬 当前会话：{conv_info}\n\n"
-                f"📈 累计总用量统计：\n"
-                f"• 累计对话轮次：{usage.get('total_turns', 0)} 轮\n"
-                f"• 输入 Token：{usage.get('total_input_tokens', 0):,}\n"
-                f"• 输出 Token：{usage.get('total_output_tokens', 0):,}\n"
-                f"• 思考 Token：{usage.get('total_thinking_tokens', 0):,}\n"
-                f"• 总计 Token：{(usage.get('total_input_tokens', 0) + usage.get('total_output_tokens', 0)):,}\n"
+                f"📈 历史累计资源消耗：\n"
+                f"• 💬 累计对话轮次：{usage.get('total_turns', 0)} 轮\n"
+                f"• 📥 输入 Token：{usage.get('total_input_tokens', 0):,}\n"
+                f"• 📤 输出 Token：{usage.get('total_output_tokens', 0):,}\n"
+                f"• 🧠 思考 Token：{usage.get('total_thinking_tokens', 0):,}\n"
+                f"• 📊 总计 Token：{(usage.get('total_input_tokens', 0) + usage.get('total_output_tokens', 0)):,}\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"💡 发送 /new 或 /reset 可重置当前会话上下文。",
             )
@@ -519,7 +569,8 @@ class Bridge:
             effort = self.store.get_effort(user)
             effort_info = f"\n⚡ 思考强度：{effort.capitalize()}" if effort else ""
             mode = self.store.get_mode(user)
-            mode_info = f"\n📋 执行模式：{mode}" if mode else ""
+            mode_name = "推演规划 (Plan)" if mode == "plan" else ("落地编辑 (Accept-Edits)" if mode == "accept-edits" else mode)
+            mode_info = f"\n📋 执行模式：{mode_name}" if mode else ""
             conv = self.store.get_conversation(user)
             conv_info = ""
             if conv and conv.get("conversation_id"):
@@ -570,40 +621,43 @@ class Bridge:
                 current_raw = self.store.get_model(user) or self.settings.model or ""
                 current_display = current_raw or "默认（由 agy 决定）"
                 lines = [
-                    f"当前生效模型：{current_display}\n",
-                    "切换指令：/model <模型名或别名>",
-                    "恢复默认：/model default\n",
-                    "官方支持的模型全列表（共 14 种）：",
+                    f"🧠 AI 模型管理 ｜ 当前生效模型：{current_display}",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "• 切换指令：/model <模型名或别名>",
+                    "• 恢复默认：/model default",
+                    "━━━━━━━━━━━━━━━━━━━━",
+                    "【官方支持的模型全列表（共 14 种）】",
                 ]
                 current_family = None
                 for family, mid, desc in OFFICIAL_MODELS:
                     if family != current_family:
-                        lines.append(f"\n【{family}】")
+                        lines.append(f"\n📂 【{family}】")
                         current_family = family
                     if current_raw == mid:
                         lines.append(f"👉 [当前使用] {mid} ({desc})")
                     else:
                         lines.append(f"• {mid} ({desc})")
-                lines.append("\n快捷别名：3.8, 3.7, 3.6, pro, sonnet, opus, 120b 等")
+                lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+                lines.append("⚡ 快捷别名：3.8, 3.7, 3.6, pro, sonnet, opus, 120b 等")
                 lines.append("💡 也支持直接输入任何未来或自定义的有效模型名称。")
                 lines.append("\n👇 点击下方按钮可直接一键切换模型：")
                 keyboard = {
                     "inline_keyboard": [
                         [
-                            {"text": "✨ 3.8 Flash (推荐)", "callback_data": "model:gemini-3.8-flash-high"},
-                            {"text": "⚡ 3.7 Flash", "callback_data": "model:gemini-3.7-flash-high"},
+                            {"text": f"{'🔘' if current_raw == 'gemini-3.8-flash-high' else '⚪'} ✨ 3.8 Flash (推荐)", "callback_data": "model:gemini-3.8-flash-high"},
+                            {"text": f"{'🔘' if current_raw == 'gemini-3.7-flash-high' else '⚪'} ⚡ 3.7 Flash", "callback_data": "model:gemini-3.7-flash-high"},
                         ],
                         [
-                            {"text": "🧠 3.1 Pro (旗舰)", "callback_data": "model:gemini-3.1-pro-high"},
-                            {"text": "💡 3.6 Flash", "callback_data": "model:gemini-3.6-flash-high"},
+                            {"text": f"{'🔘' if current_raw == 'gemini-3.1-pro-high' else '⚪'} 🧠 3.1 Pro (旗舰)", "callback_data": "model:gemini-3.1-pro-high"},
+                            {"text": f"{'🔘' if current_raw == 'gemini-3.6-flash-high' else '⚪'} 💡 3.6 Flash", "callback_data": "model:gemini-3.6-flash-high"},
                         ],
                         [
-                            {"text": "🚀 Claude Sonnet 4.6", "callback_data": "model:claude-sonnet-4-6"},
-                            {"text": "🏆 Claude Opus 4.6", "callback_data": "model:claude-opus-4-6-thinking"},
+                            {"text": f"{'🔘' if current_raw == 'claude-sonnet-4-6' else '⚪'} 🚀 Claude Sonnet", "callback_data": "model:claude-sonnet-4-6"},
+                            {"text": f"{'🔘' if current_raw == 'claude-opus-4-6-thinking' else '⚪'} 🏆 Claude Opus", "callback_data": "model:claude-opus-4-6-thinking"},
                         ],
                         [
-                            {"text": "🌐 GPT-OSS 120B", "callback_data": "model:gpt-oss-120b-medium"},
-                            {"text": "🔄 恢复系统默认", "callback_data": "model:default"},
+                            {"text": f"{'🔘' if current_raw == 'gpt-oss-120b-medium' else '⚪'} 🌐 GPT-OSS 120B", "callback_data": "model:gpt-oss-120b-medium"},
+                            {"text": f"{'🔘' if not current_raw else '⚪'} 🔄 恢复系统默认", "callback_data": "model:default"},
                         ],
                     ]
                 }
@@ -661,12 +715,12 @@ class Bridge:
                 lines = [
                     "👥 白名单管理 ｜ 授权用户列表",
                     "━━━━━━━━━━━━━━━━━━━━",
-                    "【基础配置白名单 (config.env)】",
+                    "【🔒 基础配置白名单 (config.env)】",
                 ]
                 for uid in base_users:
                     tag = " 👑 (主管理员)" if uid == admin_id else ""
                     lines.append(f"• ID: `{uid}`{tag}")
-                lines.append("\n【动态授权白名单】")
+                lines.append("\n【➕ 动态授权白名单 (whitelist.json)】")
                 if extra_users:
                     for uid in extra_users:
                         lines.append(f"• ID: `{uid}`")
@@ -674,9 +728,9 @@ class Bridge:
                     lines.append("• 暂无动态添加的用户")
                 lines.extend([
                     "━━━━━━━━━━━━━━━━━━━━",
-                    "💡 管理指令（仅主管理员可用）：",
-                    "• 添加用户：/whitelist add <数字ID>",
-                    "• 移除用户：/whitelist remove <数字ID>",
+                    "💡 权限管理指令（仅主管理员可用）：",
+                    "• ➕ 添加用户：/whitelist add <数字ID>",
+                    "• 🗑️ 移除用户：/whitelist remove <数字ID>",
                 ])
                 self.queue_reply(chat_id, "\n".join(lines))
                 return
@@ -805,46 +859,54 @@ class Bridge:
             return
         if command in {"/ls", "/files"}:
             workspace = self.settings.workspace
+            parts = text.split(maxsplit=1)
+            subpath = parts[1].strip() if len(parts) > 1 else ""
+            target_dir = workspace
+            if subpath:
+                clean_sub = subpath.lstrip("/\\")
+                candidate = (workspace / clean_sub).resolve()
+                try:
+                    candidate.relative_to(workspace.resolve())
+                except ValueError:
+                    self.queue_reply(chat_id, "⚠️ 路径不合法：严禁越权访问工作空间以外的目录。")
+                    return
+                if not candidate.exists() or not candidate.is_dir():
+                    self.queue_reply(chat_id, f"⚠️ 子目录 `{subpath}` 不存在或并非目录。")
+                    return
+                target_dir = candidate
+
             try:
                 entries = []
-                for p in workspace.iterdir():
+                for p in target_dir.iterdir():
                     try:
                         st = p.stat()
                         entries.append((st.st_mtime, p.is_dir(), st.st_size, p.name))
                     except (OSError, PermissionError):
                         continue
-                entries.sort(key=lambda x: x[0], reverse=True)
+                entries.sort(key=lambda x: (not x[1], -x[0]))
                 total_count = len(entries)
                 display_items = entries[:15]
 
+                sub_tag = f" ｜ `{target_dir.relative_to(workspace)}/`" if target_dir != workspace else ""
                 lines = [
-                    f"📁 工作空间文件速览 ｜ `{workspace}`",
+                    f"📁 工作空间文件速览 ｜ `{workspace}`{sub_tag}",
                     "━━━━━━━━━━━━━━━━━━━━",
                 ]
                 if not display_items:
-                    lines.append("（工作空间当前为空）")
+                    lines.append("（当前目录为空）")
                 else:
                     for mtime, is_dir, size, name in display_items:
-                        import datetime
-                        dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
-                        if is_dir:
-                            lines.append(f"📁 `{name}/` ｜ {dt_str}")
-                        else:
-                            if size < 1024:
-                                size_str = f"{size} B"
-                            elif size < 1024 * 1024:
-                                size_str = f"{size / 1024:.1f} KB"
-                            else:
-                                size_str = f"{size / (1024 * 1024):.1f} MB"
-                            lines.append(f"📄 `{name}` ({size_str}) ｜ {dt_str}")
+                        lines.append(format_file_entry(is_dir, name, size, mtime))
 
                 lines.append("━━━━━━━━━━━━━━━━━━━━")
                 import shutil
                 try:
                     free_gb = shutil.disk_usage(workspace).free / (1024 ** 3)
-                    lines.append(f"📊 目录总计 {total_count} 个项目 ｜ 剩余可用磁盘：{free_gb:.1f} GB")
+                    lines.append(f"📊 目录总计 {total_count} 个项目 ｜ 💾 剩余可用磁盘：{free_gb:.1f} GB")
                 except Exception:
                     lines.append(f"📊 目录总计 {total_count} 个项目")
+                if target_dir == workspace and any(e[1] for e in entries):
+                    lines.append("💡 发送 /ls <子目录> 可展开查看指定子目录。")
                 self.queue_reply(chat_id, "\n".join(lines))
             except Exception:
                 self.queue_reply(chat_id, "⚠️ 无法读取工作空间目录，请检查服务器权限。")

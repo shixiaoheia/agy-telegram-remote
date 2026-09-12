@@ -764,6 +764,19 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("工作空间文件速览", self.api.messages[-1][1])
         self.assertIn("sample_code.py", self.api.messages[-1][1])
 
+        # Test subpath listing
+        sub_dir = self.settings.workspace / "sub"
+        sub_dir.mkdir()
+        (sub_dir / "child.txt").write_text("child")
+        await self.bridge.handle(update("/ls sub"))
+        await self.bridge.reply_worker
+        self.assertIn("child.txt", self.api.messages[-1][1])
+
+        # Test traversal rejection
+        await self.bridge.handle(update("/ls ../../etc"))
+        await self.bridge.reply_worker
+        self.assertIn("严禁越权访问", self.api.messages[-1][1])
+
     async def test_restart_command_permissions_and_slot(self):
         # Non-admin rejected
         await self.bridge.handle(update("/restart", user=67890))

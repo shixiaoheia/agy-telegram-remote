@@ -19,8 +19,13 @@
 - **平滑就地热重载（`/restart`）**（`bot.py`）：
   - 管理员专用 `/restart` 指令，执行前严格校验当前任务槽位状态（正在执行任务时阻断）；
   - 空闲时通过 `os.execv` 原生重载当前进程，零停机更新 Python 代码与执行环境。
+- **全面视觉图标与排版细节精细化打磨（UI & Icons Polish）**（`bot.py`）：
+  - `/ls` 命令加入智能文件类型图标映射（Python `🐍`、Shell `🐚`、Markdown `📝`、配置 `⚙️`、日志 `📋`、数据库 `🗄️`、压缩包 `📦`、图片 `🖼️`、目录 `📁`、文件 `📄`），支持 `/ls <subpath>` 安全子目录浏览；
+  - `/sys` 自动解析 `/etc/os-release` 获取人性化发行版全称（如 `Debian GNU/Linux 12 (bookworm)`）；
+  - `/model` 行内按钮面板动态显示当前激活高亮图标（`🔘` / `⚪`）；
+  - 全量控制指令菜单（`/help`、`/status`、`/usage`、`/whitelist`）全面规范化表情图标排版与状态卡片分割线。
 - **自动化测试扩展至 176 项全面断言**（`tests/`）：
-  - 新增 10 项测试覆盖 `/sys` 系统监控采集、`/effort` 与 `/mode` 选项解析与行内回调、动态白名单落盘与权限保护、`/ls` 路径沙箱越权拦截、`/restart` 权限与空闲检测。
+  - 新增 10 项测试覆盖 `/sys` 系统监控采集、`/effort` 与 `/mode` 选项解析与行内回调、动态白名单落盘与权限保护、`/ls` 路径沙箱越权拦截与子目录浏览、`/restart` 权限与空闲检测。
 
 ## Unreleased — interactive model keyboard, conversation memory, token metrics, and root mode
 
