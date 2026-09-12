@@ -6,7 +6,7 @@ umask 077
 
 APP=/opt/agy-telegram-remote
 RELEASES=/opt/agy-telegram-remote-releases
-APP_USER=agy-tg
+APP_USER='agy-tg'
 APP_HOME=/home/agy-tg
 WORK_BASE=/srv/agy-workspace
 CONFIG_DIR=/etc/agy-telegram-remote
@@ -14,7 +14,7 @@ CONFIG=$CONFIG_DIR/config.env
 STATE_BASE=/var/lib/agy-telegram-remote
 BACKUPS=/var/backups/agy-telegram-remote
 UNIT=/etc/systemd/system/agy-telegram-remote.service
-SERVICE=agy-telegram-remote
+SERVICE='agy-telegram-remote'
 REPO=https://github.com/shixiaoheia/agy-telegram-remote.git
 
 REF=main
@@ -388,7 +388,7 @@ main() {
 
   echo '正在验证机器人初始化和长轮询就绪……'
   local ready=0 pid attempt
-  for attempt in {1..180}; do
+  for _ in {1..180}; do
     pid="$(systemctl show "$SERVICE" -p MainPID --value)"
     if systemctl is-active --quiet "$SERVICE" \
       && /usr/bin/python3 -E -s -B "$release/manage.py" check-ready \
