@@ -1,16 +1,11 @@
 # 📋 管理菜单与向导交互说明
 
-## 🚀 快速一键执行命令
+## 🚀 快速一键直装命令
 
-在 VPS 终端中直接复制运行：
-- **👑 个人 VPS 极简 Root 模式直装（推荐）**：
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
-  ```
-- **🛡️ 生产最小权限沙箱模式**：
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
-  ```
+在 VPS 终端中直接复制粘贴运行：
+```bash
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
+```
 
 ## 🎮 普通使用与菜单交互
 

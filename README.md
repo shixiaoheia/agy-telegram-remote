@@ -200,20 +200,12 @@ flowchart LR
 
 ## ⚡ 极简三步安装
 
-### 🚀 一键安装命令（在 VPS 的 SSH 终端复制执行）
+### 🚀 一键直装命令（在 VPS 的 SSH 终端复制执行）
 
-根据你的使用场景，任选以下**一行命令**直接复制粘贴运行：
+在你的 VPS 终端直接复制并粘贴运行以下一行命令即可完成部署：
 
-#### 👑 方式一：个人独享 VPS 极简 Root 模式（🔥 强烈推荐 · 省心免折腾）
-> **适用**：个人专用的独立 VPS，直接以 root 账户运行管理，免除多系统用户权限切换、附加组冲突与环境隔离烦恼！
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
-```
-
-#### 🛡️ 方式二：生产级最小权限沙箱模式（多用户 / 严格隔离）
-> **适用**：共享服务器或对权限有严苛要求的生产环境，系统将创建独立受限账户 `agy-tg` 并限制在 `/srv/agy-workspace` 沙箱中运行。
-```bash
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
 ```
 
 > [!TIP]
