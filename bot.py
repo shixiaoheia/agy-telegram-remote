@@ -20,18 +20,18 @@ from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 
 LOG = logging.getLogger("agy_remote")
 LABELS = {
-    "success": "agy 返回结果",
-    "no_text": "缺少最终文字回复",
-    "permission": "存在权限拒绝，需要核对",
-    "invalid": "结果无法完整解析",
-    "error": "执行异常",
-    "timed_out": "执行超时",
-    "cancelled": "任务已取消",
-    "interrupted": "上次任务被中断",
-    "output_limit": "输出超过上限",
-    "cleanup_failed": "进程清理未确认完成",
-    "not_started": "任务没有启动",
-    "running": "任务执行中",
+    "success": "✅ 任务完成",
+    "no_text": "⚠️ 缺少最终文字回复",
+    "permission": "🚫 存在权限拒绝，需要核对",
+    "invalid": "⚠️ 结果无法完整解析",
+    "error": "❌ 执行异常",
+    "timed_out": "⏱️ 执行超时",
+    "cancelled": "🛑 任务已取消",
+    "interrupted": "⚠️ 上次任务被中断",
+    "output_limit": "📏 输出超过上限",
+    "cleanup_failed": "⚠️ 进程清理未确认完成",
+    "not_started": "⏹️ 任务没有启动",
+    "running": "⏳ 任务执行中",
 }
 CATEGORY_HELP = {
     "auth": "诊断信息疑似要求登录，请在服务器重新授权。",
@@ -114,7 +114,7 @@ class Bridge:
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
         try:
             model_info = f"（模型：{job.model}）" if job.model else ""
-            accepted = await self.send_text(job.chat, f"任务 {job.job_id} 已接收{model_info}，准备调用 agy。")
+            accepted = await self.send_text(job.chat, f"⏳ 任务 {job.job_id} 已接收{model_info}，准备调用 agy。")
             if not accepted or self.stop.is_set() or job.cancel.is_set():
                 self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
@@ -193,38 +193,45 @@ class Bridge:
             if now < self._next_id_reply:
                 return
             self._next_id_reply = now + 2.0
-            self.queue_reply(chat_id, f"你的 Telegram 数字 ID：{user}")
+            self.queue_reply(chat_id, f"🆔 你的 Telegram 数字 ID：{user}")
             return
         if user not in self.settings.allowed or sender.get("is_bot") is True:
             return
         if command in {"/start", "/help"}:
             self.queue_reply(
-                chat_id, "直接发送任务给 agy。\n/status 查看状态\n/cancel 请求取消"
-                "\n/last 取回本人最近结果（不会重新执行）\n/model 查看或切换模型"
-                "\n/id 查看数字 ID\n每条普通消息独立执行，不保留对话上下文。",
+                chat_id,
+                "🤖 Antigravity Telegram Remote\n\n"
+                "💬 直接发送文本：发送新任务给 agy 执行\n"
+                "🧠 /model - 查看或切换模型（支持 14 种官方模型与快捷别名）\n"
+                "📊 /status - 查看当前任务执行状态与生效模型\n"
+                "🛑 /cancel - 立即取消任务并清理进程\n"
+                "📜 /last - 取回本人最近结果（不重新执行）\n"
+                "🆔 /id - 查看你的 Telegram 数字 ID\n"
+                "❓ /help - 显示命令帮助说明\n\n"
+                "💡 提示：每条普通消息独立执行，不保留历史上下文。",
             )
             return
         if command == "/status":
             current_model = self.store.get_model(user) or self.settings.model
-            model_info = f"（模型：{current_model}）" if current_model else ""
+            model_info = f" [模型：{current_model}]" if current_model else ""
             if self.slot and self.slot.user == user:
                 job_model = f"[{self.slot.model}] " if self.slot.model else ""
-                text = f"任务 {self.slot.job_id}：{job_model}" + (
+                text = f"⏳ 任务 {self.slot.job_id}：{job_model}" + (
                     "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
                 )
             elif self.runner.blocked:
-                text = "已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
+                text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
-                text = f"你当前没有任务{model_info}。" + ("工作目录正被其他任务占用。" if self.slot else "")
+                text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
             job = self.slot
             if job is not None and job.user == user:
                 job.cancel.set()
-                self.queue_reply(chat_id, "已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
+                self.queue_reply(chat_id, "🛑 已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
             else:
-                self.queue_reply(chat_id, "你当前没有可取消的任务。")
+                self.queue_reply(chat_id, "ℹ️ 你当前没有可取消的任务。")
             return
         if command == "/last":
             try:
