@@ -1,0 +1,24 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  offline-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4 ref
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # verified v5 ref
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install shell checker
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Verify source and offline tests
+        run: bash scripts/verify.sh
