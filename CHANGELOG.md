@@ -2,6 +2,14 @@
 
 ## Unreleased — pure Root mode architecture consolidation and installer fix
 
+- **Telegram Bot Token 输入交互优化与可见性支持（Token Input UX Polish）**（`manage.py`、`tests/`、`README.md`、`docs/INSTALL_MENU.md`）：
+  - 将安装向导步骤 1/3 的 Bot Token 输入改为标准可见输入，解决终端粘贴时不显示字符让用户误以为未录入或卡死的问题；
+  - 增强已有 Token 提示（直接回车即可保留原 Token，粘贴新 Token 即时更新）；
+  - 同步更新测试用例 `test_installer.py` 与 `test_install_menu.py`。
+- **Google OAuth 授权指引与 agy 服务条款自动确认（Google Auth & TOS UX）**（`install.sh`）：
+  - 优化步骤 3/3 授权引导文本与排版，清晰提示浏览器授权链接、复制粘贴授权码与 `/exit` 退出机制；
+  - 自动预设 `onboarding.json` 标记完成 agy 服务条款确认，避免安装过程中弹出额外的交互式 TOS 确认界面打断流程。
+
 - **全面精简为纯 Root 模式架构（Pure Root Architecture）**（`install.sh`、`settings.py`、`manage.py`、`.env.example`）：
   - 响应单机个人 VPS 用户极简部署诉求，彻底移除历史多用户非特权账户（`agy-tg`）及其配置逻辑；
   - 默认运行账户固定为 `root:root`，主目录 `HOME=/root`，默认工作区 `AGY_WORKSPACE=/root`；

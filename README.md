@@ -221,7 +221,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 > [!TIP]
 > **💡 为什么使用 `curl ... -o install.sh && bash install.sh`？**
-> 本项目的安装向导需要在交互式终端中安全接收**密码模式隐藏输入的 Bot Token**、数字 ID，并完成 Google 账号的 OAuth 浏览器授权跳转。若直接使用 `curl ... | bash` 管道会抢占终端标准输入（stdin），导致交互卡死。使用 `-o install.sh && bash` 可以在一条命令中静默下载并立即启动交互，既安全顺畅，又无需多步敲击！
+> 本项目的安装向导需要在交互式终端中接收 Bot Token、数字 ID，并完成 Google 账号的 OAuth 浏览器授权跳转。若直接使用 `curl ... | bash` 管道会抢占终端标准输入（stdin），导致交互卡死。使用 `-o install.sh && bash` 可以在一条命令中静默下载并立即启动交互，既顺畅又无需多步敲击！
 
 ---
 
@@ -238,7 +238,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 📦 正在准备系统依赖与核心运行环境……
 
 步骤 1/3：请输入 Telegram Bot Token：
-> （输入时界面自动隐藏密码字符，直接回车确认）
+> 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ （直接粘贴回车；更新时直接回车保留原 Token）
 
 步骤 2/3：请输入 Telegram 数字 ID（主管理员）：
 > 123456789

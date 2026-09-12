@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import getpass
 import os
 import sys
 import time
@@ -67,14 +66,16 @@ def prepare_config(args: argparse.Namespace) -> int:
         unknown = set(old) - KEYS
         if unknown:
             raise ConfigError("旧配置包含不支持的项目，请先备份并人工核对：" + ", ".join(sorted(unknown)))
-    print("\n步骤 1/3：请输入 Telegram Bot Token（输入隐藏；更新时直接回车保留）：")
-    token = getpass.getpass("> ")
+    print("\n步骤 1/3：请输入 Telegram Bot Token（更新时直接回车保留原 Token）：")
+    if old.get("BOT_TOKEN"):
+        print("（已有 Token，直接回车保留。粘贴新 Token 后按回车可更新。）")
+    token = input("> ").strip()
     print("\n步骤 2/3：请输入 Telegram 数字 ID（多个 ID 用逗号分隔）：")
     if old.get("ALLOWED_USER_IDS"):
         print("直接回车保留已有白名单。")
     ids = input("> ").strip()
     home = getattr(args, "home", "/root") or "/root"
-    values = merged_config(old, token.strip(), ids, home, args.enable_auto)
+    values = merged_config(old, token, ids, home, args.enable_auto)
     settings = Settings.from_mapping(values)
     for path in (settings.workspace, settings.home, settings.state_dir):
         check_no_symlink(path)

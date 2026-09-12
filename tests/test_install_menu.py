@@ -216,22 +216,20 @@ class WizardOrderTests(unittest.TestCase):
             completed = []
             fixture_token = "123456:" + "x" * 32
 
-            def first(_):
-                self.assertIn("1/3", output.getvalue())
-                self.assertNotIn("2/3", output.getvalue())
-                self.assertNotIn("3/3", output.getvalue())
-                completed.append(1)
-                return fixture_token
-
-            def second(_):
+            def prompt_side_effect(_=None):
+                if not completed:
+                    self.assertIn("1/3", output.getvalue())
+                    self.assertNotIn("2/3", output.getvalue())
+                    self.assertNotIn("3/3", output.getvalue())
+                    completed.append(1)
+                    return fixture_token
                 self.assertEqual(completed, [1])
                 self.assertIn("2/3", output.getvalue())
                 self.assertNotIn("3/3", output.getvalue())
                 completed.append(2)
                 return "12345"
 
-            with contextlib.redirect_stdout(output), patch("getpass.getpass", side_effect=first), \
-                    patch("builtins.input", side_effect=second):
+            with contextlib.redirect_stdout(output), patch("builtins.input", side_effect=prompt_side_effect):
                 self.assertEqual(manage.prepare_config(args), 0)
             self.assertEqual(completed, [1, 2])
             self.assertEqual(Settings.load(dest).allowed, frozenset({12345}))
@@ -243,11 +241,17 @@ class WizardOrderTests(unittest.TestCase):
             dest.touch()
             argv = ["manage.py", "prepare-config", "--output", str(dest), "--home", "/root"]
             output = io.StringIO()
-            with patch("sys.argv", argv), patch("getpass.getpass", side_effect=EOFError), \
-                    patch("builtins.input") as second, contextlib.redirect_stdout(output), \
+            call_count = []
+
+            def cancel_first(_=None):
+                call_count.append(1)
+                raise EOFError
+
+            with patch("sys.argv", argv), patch("builtins.input", side_effect=cancel_first), \
+                    contextlib.redirect_stdout(output), \
                     contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(manage.main(), 20)
-            second.assert_not_called()
+            self.assertEqual(len(call_count), 1)
             self.assertNotIn("2/3", output.getvalue())
             self.assertEqual(dest.read_text(), "")
 

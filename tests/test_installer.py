@@ -91,12 +91,11 @@ class InstallerTests(unittest.TestCase):
             dest.touch()
             argv = ["manage.py", "prepare-config", "--output", str(dest),
                     "--home", "/root"]
-            with patch("sys.argv", argv), patch("getpass.getpass", return_value=config_values()["TELEGRAM_BOT_TOKEN"]) as gp, \
-                 patch("builtins.input", return_value="12345") as inp, \
+            inputs = iter([config_values()["TELEGRAM_BOT_TOKEN"], "12345"])
+            with patch("sys.argv", argv), patch("builtins.input", side_effect=inputs) as inp, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
-            gp.assert_called_once()
-            inp.assert_called_once()
+            self.assertEqual(inp.call_count, 2)
             self.assertTrue(Settings.load(dest).skip_permissions)
 
     def test_prepare_config_preserves_old_settings(self):
@@ -109,7 +108,7 @@ class InstallerTests(unittest.TestCase):
             dest.touch()
             argv = ["manage.py", "prepare-config", "--old", str(old),
                     "--output", str(dest), "--home", "/root"]
-            with patch("sys.argv", argv), patch("getpass.getpass", return_value=""), \
+            with patch("sys.argv", argv), \
                  patch("builtins.input", return_value=""), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
             value = Settings.load(dest)

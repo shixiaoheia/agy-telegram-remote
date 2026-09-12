@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 → 配置、目录、离线测试与 Token 检查 → 准备 agy → 显示步骤 3 → Google 授权/复用检查
 → 验证服务 → 成功提示。**
 
-前两步由 `manage.py` 的 `getpass()` 与 `input()` 顺序执行；本次没有复制这段逻辑到 shell，
+前两步由 `manage.py` 的标准输入顺序执行；本次没有复制这段逻辑到 shell，
 也没有通过 shell 变量或命令行参数传递真实 Token。第一步取消时不会显示第二步。
 用户仍需通过原有配置验证；本次没有新增“每一步即时校验并重试”。
 
