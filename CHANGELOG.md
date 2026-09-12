@@ -6,6 +6,9 @@
   - 将安装向导步骤 1/3 的 Bot Token 输入改为标准可见输入，解决终端粘贴时不显示字符让用户误以为未录入或卡死的问题；
   - 增强已有 Token 提示（直接回车即可保留原 Token，粘贴新 Token 即时更新）；
   - 同步更新测试用例 `test_installer.py` 与 `test_install_menu.py`。
+- **消除全新安装时 systemd 单元状态报错提示（Systemd Unit State Warning Fix）**（`install.sh`）：
+  - 修复全新安装或未安装服务时，执行 `systemctl is-enabled` 泄漏 `Failed to get unit file state for agy-telegram-remote.service: No such file or directory` 报错信息干扰终端输出的问题；
+  - 优化为仅在服务单元文件存在时检测自启状态，并对 `systemctl` 状态查询与自启设置重定向屏蔽标准错误，确保全新部署流程清爽无误导提示。
 - **Google OAuth 授权指引与 agy 服务条款自动确认（Google Auth & TOS UX）**（`install.sh`）：
   - 优化步骤 3/3 授权引导文本与排版，清晰提示浏览器授权链接、复制粘贴授权码与 `/exit` 退出机制；
   - 自动预设 `onboarding.json` 标记完成 agy 服务条款确认，避免安装过程中弹出额外的交互式 TOS 确认界面打断流程。

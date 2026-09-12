@@ -216,7 +216,7 @@ uninstall() {
   [[ "$answer" == UNINSTALL ]] || exit 0
   [[ ! -L "$UNIT" ]] || fail "服务文件是链接，请人工检查。"
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
-  if systemctl is-active --quiet "$SERVICE"; then
+  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     fail '服务未能停止；未移除服务文件。'
   fi
   rm -f -- "$UNIT"
@@ -363,15 +363,23 @@ main() {
   BACKUP="$(mktemp -d "$BACKUPS/deploy-XXXXXXXX")"
   [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/config.env"
   [[ ! -f "$UNIT" ]] || cp -p -- "$UNIT" "$BACKUP/service"
-  systemctl is-active --quiet "$SERVICE" && OLD_ACTIVE=1
-  systemctl is-enabled --quiet "$SERVICE" && OLD_ENABLED=1
-  TRANSACTION=1
-  echo '正在停止旧服务；未完成任务不会自动重跑。'
-  systemctl stop "$SERVICE" >/dev/null 2>&1 || true
-  if systemctl is-active --quiet "$SERVICE"; then
-    fail '旧服务没有停止，不能继续部署。'
+  OLD_ACTIVE=0
+  OLD_ENABLED=0
+  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    OLD_ACTIVE=1
   fi
-  if pgrep -f '/opt/agy-telegram-remote/bot.py' >/dev/null; then
+  if [[ -f "$UNIT" ]] && systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+    OLD_ENABLED=1
+  fi
+  TRANSACTION=1
+  if [[ "$OLD_ACTIVE" == 1 ]]; then
+    echo '正在停止旧服务；未完成任务不会自动重跑。'
+    systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      fail '旧服务没有停止，不能继续部署。'
+    fi
+  fi
+  if pgrep -f '/opt/agy-telegram-remote/bot.py' >/dev/null 2>&1; then
     fail '检测到旧版本 bot.py 进程仍在运行，请先手动结束该进程。'
   fi
 
@@ -459,15 +467,15 @@ _ONBOARDING_EOF
   UNIT_CHANGED=1
   install -o root -g root -m 0644 "$BACKUP/new.service" "$UNIT"
   systemctl daemon-reload
-  systemctl enable "$SERVICE" >/dev/null
+  systemctl enable "$SERVICE" >/dev/null 2>&1 || true
   systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
   systemctl restart "$SERVICE"
 
   echo '正在验证机器人初始化和长轮询就绪……'
   local ready=0 pid
   for _ in {1..180}; do
-    pid="$(systemctl show "$SERVICE" -p MainPID --value)"
-    if systemctl is-active --quiet "$SERVICE" \
+    pid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null \
       && /usr/bin/python3 -E -s -B "$release/manage.py" check-ready \
         --file /run/agy-telegram-remote/ready.json --pid "${pid:-0}" 2>/dev/null; then
       ready=1
