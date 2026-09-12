@@ -391,9 +391,32 @@ main() {
   fi
 
   echo
-  echo '步骤 3/3：Google 账号授权'
-  echo '已有有效授权会自动复用。新授权请打开链接登录，再粘贴授权码。'
-  echo '进入 agy 主界面后输入 /exit 返回安装器；不需要额外输入 YES。'
+  echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  echo ' 步骤 3/3：Google 账号授权'
+  echo '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'
+  echo ''
+  echo '📌 授权说明：'
+  echo '  · 已有有效的 Google 授权将自动复用，无需重新登录。'
+  echo '  · 首次授权或重新授权时，终端会显示一个链接。'
+  echo '  · 请复制该链接在浏览器中打开，用你的 Google 账号登录并授权。'
+  echo '  · 获取授权码后，粘贴回此终端并按回车。'
+  echo '  · 进入 agy 主界面后，请输入 /exit 返回安装器（不需要输入 YES）。'
+  echo ''
+
+  # 自动预接受 agy 首次使用服务条款，避免交互式 TOS 弹窗打断授权流程
+  local _onboarding_dir="$APP_HOME/.gemini/antigravity-cli/cache"
+  if [[ ! -f "$_onboarding_dir/onboarding.json" ]]; then
+    mkdir -p "$_onboarding_dir"
+    cat > "$_onboarding_dir/onboarding.json" <<'_ONBOARDING_EOF'
+{
+  "consumerOnboardingComplete": true,
+  "enterpriseOnboardingComplete": true,
+  "onboardingComplete": true
+}
+_ONBOARDING_EOF
+    echo '✅ 已自动接受 agy 服务条款，授权过程中不会再弹出条款确认界面。'
+  fi
+
   local smoke_rc=10
   if [[ "$installed_now" == 0 && "$REAUTH" == 0 ]]; then
     if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
@@ -404,6 +427,7 @@ main() {
   fi
   if [[ "$smoke_rc" == 10 || "$REAUTH" == 1 ]]; then
     local auth_rc=0
+    echo '🔑 正在启动 Google 授权流程……'
     as_user env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
       /bin/bash -c 'cd -- "$1"; exec "$2"' _ "$work" "$agy" || auth_rc=$?
     [[ "$auth_rc" == 0 || "$auth_rc" == 130 ]] || fail 'agy 交互授权异常退出。'
