@@ -336,8 +336,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_command_show_current_and_examples(self):
         await self.handle(update("/model"))
-        self.assertIn("当前模型：默认（由 agy 决定）", self.api.messages[-1][1])
-        self.assertIn("gemini-3.8-flash-high", self.api.messages[-1][1])
+        msg = self.api.messages[-1][1]
+        self.assertIn("当前生效模型：默认（由 agy 决定）", msg)
+        self.assertIn("gemini-3.8-flash-high", msg)
+        self.assertIn("claude-opus-4-6-thinking", msg)
+        self.assertIn("gpt-oss-120b-medium", msg)
+        self.assertIn("官方支持的模型全列表", msg)
 
     async def test_model_command_switch_and_reset(self):
         await self.handle(update("/model claude-sonnet-4-6"))
@@ -346,12 +350,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         # Check /model reflects the new choice
         await self.handle(update("/model"))
-        self.assertIn("当前模型：claude-sonnet-4-6", self.api.messages[-1][1])
+        self.assertIn("当前生效模型：claude-sonnet-4-6", self.api.messages[-1][1])
 
         # Reset model
         await self.handle(update("/model default"))
         self.assertIn("已恢复为默认模型", self.api.messages[-1][1])
         self.assertIsNone(self.store.get_model(12345))
+
+    async def test_model_command_alias_resolution(self):
+        await self.handle(update("/model 3.8"))
+        self.assertIn("已切换模型为：gemini-3.8-flash-high", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
+
+        await self.handle(update("/model opus"))
+        self.assertIn("已切换模型为：claude-opus-4-6-thinking", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
+
+        await self.handle(update("/model pro"))
+        self.assertIn("已切换模型为：gemini-3.1-pro-high", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-high")
 
     async def test_model_command_invalid_rejected(self):
         await self.handle(update("/model bad;char"))

@@ -12,6 +12,56 @@ from typing import Mapping
 TOKEN_RE = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,200}\Z")
 PATH_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
 MODEL_RE = re.compile(r"[A-Za-z0-9._-]{2,64}\Z")
+
+# Canonical catalog of all official models supported by agy CLI (from `agy models`)
+OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
+    ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-high", "High 思考 (推荐)"),
+    ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-medium", "Medium 思考"),
+    ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-low", "Low 思考"),
+    ("Gemini 3.7 Flash", "gemini-3.7-flash-high", "High 思考"),
+    ("Gemini 3.7 Flash", "gemini-3.7-flash-medium", "Medium 思考"),
+    ("Gemini 3.7 Flash", "gemini-3.7-flash-low", "Low 思考"),
+    ("Gemini 3.6 Flash", "gemini-3.6-flash-high", "High 思考"),
+    ("Gemini 3.6 Flash", "gemini-3.6-flash-medium", "Medium 思考"),
+    ("Gemini 3.6 Flash", "gemini-3.6-flash-low", "Low 思考"),
+    ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-high", "High 深度推理 (推荐)"),
+    ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-low", "Low 推理"),
+    ("Anthropic Claude", "claude-sonnet-4-6", "Sonnet 4.6 (Thinking)"),
+    ("Anthropic Claude", "claude-opus-4-6-thinking", "Opus 4.6 (Thinking)"),
+    ("开源模型", "gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
+)
+
+MODEL_ALIASES: dict[str, str] = {
+    "3.8": "gemini-3.8-flash-high",
+    "3.8-high": "gemini-3.8-flash-high",
+    "3.8-med": "gemini-3.8-flash-medium",
+    "3.8-low": "gemini-3.8-flash-low",
+    "flash": "gemini-3.8-flash-high",
+    "3.7": "gemini-3.7-flash-high",
+    "3.7-high": "gemini-3.7-flash-high",
+    "3.7-med": "gemini-3.7-flash-medium",
+    "3.7-low": "gemini-3.7-flash-low",
+    "3.6": "gemini-3.6-flash-high",
+    "3.6-high": "gemini-3.6-flash-high",
+    "3.6-med": "gemini-3.6-flash-medium",
+    "3.6-low": "gemini-3.6-flash-low",
+    "3.1": "gemini-3.1-pro-high",
+    "pro": "gemini-3.1-pro-high",
+    "pro-high": "gemini-3.1-pro-high",
+    "pro-low": "gemini-3.1-pro-low",
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6-thinking",
+    "gpt": "gpt-oss-120b-medium",
+    "120b": "gpt-oss-120b-medium",
+}
+
+
+def resolve_model(name: str) -> str:
+    """Resolve model aliases case-insensitively or return original name."""
+    clean = name.strip()
+    return MODEL_ALIASES.get(clean.lower(), clean)
+
+
 DEFAULTS = {
     "AGY_PATH": "/home/agy-tg/.local/bin/agy",
     "AGY_HOME": "/home/agy-tg",
@@ -142,7 +192,7 @@ class Settings:
         state_base = Path("/var/lib/agy-telegram-remote")
         if state != state_base and state_base not in state.parents:
             raise ConfigError("STATE_DIR 必须在 /var/lib/agy-telegram-remote 内。")
-        model = values.get("AGY_MODEL", "").strip()
+        model = resolve_model(values.get("AGY_MODEL", ""))
         if model and not MODEL_RE.fullmatch(model):
             raise ConfigError("AGY_MODEL 格式不正确，仅支持字母、数字、点、下划线与连字符。")
         return cls(

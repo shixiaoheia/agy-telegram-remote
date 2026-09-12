@@ -1,14 +1,14 @@
 # Changelog
 
-## Unreleased — model switching command (/model) and model configuration
+## Unreleased — model switching command (/model), full model catalog, and aliases
 
 基线提交：`57423ed304df4675375818936f4cdb697bbf0957`。
 
-- **动态模型切换指令**（`bot.py`）：
+- **动态模型切换指令与官方 14 种全量模型支持**（`bot.py`、`settings.py`）：
   - 新增 `/model` 控制命令：
-    - `/model`：查看当前配置模型、常用可用模型列表及用法示例；
-    - `/model <模型名>`：为当前用户切换首选模型（严格进行正则白名单校验 `[A-Za-z0-9._-]{2,64}`）；
-    - `/model default`（或 `reset`/`auto`）：恢复为默认模型（由 agy 决定）；
+    - `/model`：查看当前生效模型、全量官方 14 种模型列表（Gemini 3.8/3.7/3.6 Flash、3.1 Pro、Claude Sonnet 4.6/Opus 4.6、GPT-OSS 120B）与快捷别名；
+    - `/model <模型名或别名>`：为当前用户切换首选模型，支持快捷别名（如 `3.8`、`pro`、`sonnet`、`opus`）与任意合法模型名称（通过安全正则校验 `[A-Za-z0-9._-]{2,64}`）；
+    - `/model default`（或 `reset`/`auto`/`clear`）：恢复为系统默认配置；
   - `/status` 指令与任务接收确认消息同步显示当前选中的模型标识；
   - 任务执行结果标题附带模型标识（如 `任务 xxx｜gemini-3.1-pro-high`）；
   - `/start` 与 `/help` 补充 `/model` 使用提示。
@@ -18,10 +18,10 @@
 - **底层 agy 命令行透传**（`agy_runner.py`）：
   - `build_command` 与 `Runner.run` 支持透传 `--model <name>` 参数；
   - `Result` 数据结构新增 `model` 字段记录实际调用的模型名称。
-- **全局可选模型默认配置**（`settings.py`）：
-  - `DEFAULTS` 新增可选配置 `AGY_MODEL`，允许在 `config.env` 中配置全局默认模型并校验格式。
+- **全局可选模型默认配置与别名解析**（`settings.py`）：
+  - `DEFAULTS` 新增可选配置 `AGY_MODEL`，允许在 `config.env` 中配置全局默认模型（支持别名自动映射与严格格式校验）。
 - **测试覆盖**：
-  - 新增 8 项单元测试，全套离线测试覆盖增至 152 项。
+  - 新增 9 项单元测试（含别名映射、全量展示及安全校验），全套离线测试覆盖增至 153 项。
 
 ## Unreleased — config validation, startup retries, and responsive controls
 

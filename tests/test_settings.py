@@ -28,6 +28,10 @@ class ConfigurationTests(unittest.TestCase):
     def test_valid_and_invalid_model_setting(self):
         s = Settings.from_mapping(config_values() | {"AGY_MODEL": "gemini-3.1-pro-high"})
         self.assertEqual(s.model, "gemini-3.1-pro-high")
+        s2 = Settings.from_mapping(config_values() | {"AGY_MODEL": "3.8"})
+        self.assertEqual(s2.model, "gemini-3.8-flash-high")
+        s3 = Settings.from_mapping(config_values() | {"AGY_MODEL": "opus"})
+        self.assertEqual(s3.model, "claude-opus-4-6-thinking")
         with self.assertRaises(ConfigError):
             Settings.from_mapping(config_values() | {"AGY_MODEL": "bad;injection"})
 

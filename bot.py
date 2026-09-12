@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agy_runner import Result, Runner
-from settings import ConfigError, MODEL_RE, Settings
+from settings import ConfigError, MODEL_RE, OFFICIAL_MODELS, resolve_model, Settings
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 
@@ -237,34 +237,38 @@ class Bridge:
         if command == "/model":
             parts = text.split(maxsplit=1)
             target = parts[1].strip() if len(parts) > 1 else ""
-            if not target or target.lower() in {"show", "current", "status"}:
+            if not target or target.lower() in {"show", "current", "status", "list", "help"}:
                 current = self.store.get_model(user) or self.settings.model or "默认（由 agy 决定）"
-                self.queue_reply(
-                    chat_id,
-                    f"当前模型：{current}\n\n"
-                    "切换模型：/model <模型名>\n"
-                    "恢复默认：/model default\n\n"
-                    "常用可用模型示例：\n"
-                    "• gemini-3.8-flash-high (极速推荐)\n"
-                    "• gemini-3.7-flash-high\n"
-                    "• gemini-3.1-pro-high (复杂推理)\n"
-                    "• claude-sonnet-4-6 (Sonnet 思考)\n"
-                    "• claude-opus-4-6-thinking (Opus 思考)\n"
-                    "• gpt-oss-120b-medium",
-                )
+                lines = [
+                    f"当前生效模型：{current}\n",
+                    "切换指令：/model <模型名或别名>",
+                    "恢复默认：/model default\n",
+                    "官方支持的模型全列表（共 14 种）：",
+                ]
+                current_family = None
+                for family, mid, desc in OFFICIAL_MODELS:
+                    if family != current_family:
+                        lines.append(f"\n【{family}】")
+                        current_family = family
+                    lines.append(f"• {mid} ({desc})")
+                lines.append("\n快捷别名：3.8, 3.7, 3.6, pro, sonnet, opus, 120b 等")
+                lines.append("💡 也支持直接输入任何未来或自定义的有效模型名称。")
+                self.queue_reply(chat_id, "\n".join(lines))
                 return
             if target.lower() in {"default", "reset", "auto", "clear"}:
                 self.store.set_model(user, None)
                 self.queue_reply(chat_id, "已恢复为默认模型（由 agy 决定）。")
                 return
-            if not MODEL_RE.fullmatch(target):
+            resolved = resolve_model(target)
+            if not MODEL_RE.fullmatch(resolved):
                 self.queue_reply(
                     chat_id,
                     "模型名称格式不正确。仅支持 2..64 个字母、数字、点、下划线与连字符。",
                 )
                 return
-            self.store.set_model(user, target)
-            self.queue_reply(chat_id, f"已切换模型为：{target}\n后续任务将使用此模型。")
+            self.store.set_model(user, resolved)
+            alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
+            self.queue_reply(chat_id, f"已切换模型为：{resolved}{alias_note}\n后续任务将使用此模型。")
             return
         if command:
             self.queue_reply(chat_id, "不支持这个控制命令。发送 /help 查看用法。")

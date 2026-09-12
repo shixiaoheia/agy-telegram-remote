@@ -102,9 +102,35 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 | `/status` | 查看自己的任务与工作目录占用情况（显示当前选定模型） |
 | `/cancel` | 请求取消自己的任务并回收该任务的进程组 |
 | `/last` | 取回本人最近的结果，不执行 agy |
-| `/model` | 查看当前模型及可用列表；`/model <模型名>` 切换模型；`/model default` 恢复默认 |
+| `/model` | 查看当前模型及全部 14 种官方模型；`/model <模型名或别名>` 切换模型；`/model default` 恢复默认 |
 | `/id` | 在私聊显示自己的数字 ID（每 2 秒限频一次） |
 | `/start`、`/help` | 显示帮助 |
+
+### 模型切换能力（`/model`）
+
+机器人内置对 Google Antigravity 官方支持的全部 14 种模型的快捷切换，并支持快捷别名：
+
+| 模型家族 | 官方模型标识 | 快捷别名 | 描述 |
+|---|---|---|---|
+| **Gemini 3.8 Flash** | `gemini-3.8-flash-high` | `3.8`, `3.8-high`, `flash` | 最新极速高思考（推荐） |
+| | `gemini-3.8-flash-medium` | `3.8-med` | 中度思考 |
+| | `gemini-3.8-flash-low` | `3.8-low` | 轻度思考 |
+| **Gemini 3.7 Flash** | `gemini-3.7-flash-high` | `3.7`, `3.7-high` | 高思考 |
+| | `gemini-3.7-flash-medium` | `3.7-med` | 中度思考 |
+| | `gemini-3.7-flash-low` | `3.7-low` | 轻度思考 |
+| **Gemini 3.6 Flash** | `gemini-3.6-flash-high` | `3.6`, `3.6-high` | 高思考 |
+| | `gemini-3.6-flash-medium` | `3.6-med` | 中度思考 |
+| | `gemini-3.6-flash-low` | `3.6-low` | 轻度思考 |
+| **Gemini 3.1 Pro** | `gemini-3.1-pro-high` | `pro`, `3.1`, `pro-high` | 深度推理（推荐） |
+| | `gemini-3.1-pro-low` | `pro-low` | 基础推理 |
+| **Anthropic Claude** | `claude-sonnet-4-6` | `sonnet` | Claude 思考模型 |
+| | `claude-opus-4-6-thinking` | `opus` | Claude Opus 旗舰思考模型 |
+| **开源模型** | `gpt-oss-120b-medium` | `gpt`, `120b` | GPT-OSS 120B 开源模型 |
+
+- 发送 `/model`：查看当前生效模型与全部 14 种模型列表；
+- 发送 `/model 3.8` 或 `/model sonnet`：使用快捷别名快速切换；
+- 发送 `/model default`：重置为系统默认配置；
+- 开放扩展：支持输入任何未来或自定义的合法模型名称。
 
 共享工作目录同一时间只有一个任务，不排队。开始执行前先保存任务记录并尝试发送确认；确认发送失败就不启动 agy。完成后先保存结果，再回传 Telegram。只有明确的 Telegram `429` 拒绝会做有限的**消息投递重试**，不会因此再次执行任务。
 
