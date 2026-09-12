@@ -142,6 +142,25 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcome, "success")
         self.assertEqual(result.text, "ok")
 
+    async def test_real_success_with_model(self):
+        self.executable(
+            "import json,sys\n"
+            "assert sys.argv[sys.argv.index('--model')+1] == 'gemini-3.1-pro-high'\n"
+            "print(json.dumps({'status':'SUCCESS','response':'ok-model'}))\n"
+        )
+        result = await self.runner().run("hello", asyncio.Event(), model="gemini-3.1-pro-high")
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(result.text, "ok-model")
+        self.assertEqual(result.model, "gemini-3.1-pro-high")
+
+    def test_build_command_model_option(self):
+        cmd_default = build_command(self.settings, "prompt")
+        self.assertNotIn("--model", cmd_default)
+        cmd_model = build_command(self.settings, "prompt", model="claude-sonnet-4-6")
+        self.assertIn("--model", cmd_model)
+        idx = cmd_model.index("--model")
+        self.assertEqual(cmd_model[idx + 1], "claude-sonnet-4-6")
+
     async def test_no_shell_interpolation(self):
         marker = self.directory / "must-not-exist"
         self.executable("import json,sys\nprint(json.dumps({'status':'SUCCESS','response':sys.argv[-1]}))\n")

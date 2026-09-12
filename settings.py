@@ -11,6 +11,7 @@ from typing import Mapping
 
 TOKEN_RE = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,200}\Z")
 PATH_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
+MODEL_RE = re.compile(r"[A-Za-z0-9._-]{2,64}\Z")
 DEFAULTS = {
     "AGY_PATH": "/home/agy-tg/.local/bin/agy",
     "AGY_HOME": "/home/agy-tg",
@@ -22,6 +23,7 @@ DEFAULTS = {
     "AGY_SKIP_PERMISSIONS": "true",
     "STATE_DIR": "/var/lib/agy-telegram-remote",
     "RESULT_RETENTION_DAYS": "7",
+    "AGY_MODEL": "",
 }
 KEYS = frozenset(DEFAULTS) | {"TELEGRAM_BOT_TOKEN", "ALLOWED_USER_IDS"}
 
@@ -113,6 +115,7 @@ class Settings:
     skip_permissions: bool = True
     state_dir: Path = Path("/var/lib/agy-telegram-remote")
     retention_days: int = 7
+    model: str = ""
 
     @classmethod
     def from_mapping(cls, original: Mapping[str, str]) -> "Settings":
@@ -139,6 +142,9 @@ class Settings:
         state_base = Path("/var/lib/agy-telegram-remote")
         if state != state_base and state_base not in state.parents:
             raise ConfigError("STATE_DIR 必须在 /var/lib/agy-telegram-remote 内。")
+        model = values.get("AGY_MODEL", "").strip()
+        if model and not MODEL_RE.fullmatch(model):
+            raise ConfigError("AGY_MODEL 格式不正确，仅支持字母、数字、点、下划线与连字符。")
         return cls(
             token=token, allowed=allowed,
             agy=absolute_path(values["AGY_PATH"], "AGY_PATH"),
@@ -151,6 +157,7 @@ class Settings:
             skip_permissions=permission in {"true", "1", "yes", "on"},
             state_dir=state,
             retention_days=integer(values, "RESULT_RETENTION_DAYS", 1, 30),
+            model=model,
         )
 
     @classmethod

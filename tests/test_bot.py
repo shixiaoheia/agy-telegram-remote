@@ -60,11 +60,13 @@ class FakeRunner:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
         self.result = Result("success", text="the result")
+        self.last_model = None
 
-    async def run(self, prompt, cancel):
+    async def run(self, prompt, cancel, model=None):
+        self.last_model = model
         self.calls += 1
         if cancel.is_set():
-            return Result("cancelled", detail="cancelled before launch")
+            return Result("cancelled", detail="cancelled before launch", model=model or "")
         self.launched += 1
         self.started.set()
         if self.hold:
@@ -74,7 +76,10 @@ class FakeRunner:
             for task in (cancelled, finished):
                 task.cancel()
             await asyncio.gather(cancelled, finished, return_exceptions=True)
-        return Result("cancelled") if cancel.is_set() else self.result
+        res = Result("cancelled", model=model or "") if cancel.is_set() else self.result
+        if model and not res.model:
+            res.model = model
+        return res
 
 class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -328,6 +333,40 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.reply_worker
         self.assertEqual(len(self.api.messages), 2)
         self.assertEqual(self.runner.calls, 0)
+
+    async def test_model_command_show_current_and_examples(self):
+        await self.handle(update("/model"))
+        self.assertIn("当前模型：默认（由 agy 决定）", self.api.messages[-1][1])
+        self.assertIn("gemini-3.8-flash-high", self.api.messages[-1][1])
+
+    async def test_model_command_switch_and_reset(self):
+        await self.handle(update("/model claude-sonnet-4-6"))
+        self.assertIn("已切换模型为：claude-sonnet-4-6", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+
+        # Check /model reflects the new choice
+        await self.handle(update("/model"))
+        self.assertIn("当前模型：claude-sonnet-4-6", self.api.messages[-1][1])
+
+        # Reset model
+        await self.handle(update("/model default"))
+        self.assertIn("已恢复为默认模型", self.api.messages[-1][1])
+        self.assertIsNone(self.store.get_model(12345))
+
+    async def test_model_command_invalid_rejected(self):
+        await self.handle(update("/model bad;char"))
+        self.assertIn("模型名称格式不正确", self.api.messages[-1][1])
+        self.assertIsNone(self.store.get_model(12345))
+
+    async def test_job_uses_selected_model(self):
+        await self.handle(update("/model gemini-3.1-pro-high"))
+        await self.handle(update("write a script"))
+        await self.finish_job()
+        self.assertEqual(self.runner.calls, 1)
+        self.assertEqual(self.runner.last_model, "gemini-3.1-pro-high")
+        self.assertIn("gemini-3.1-pro-high", self.api.messages[-1][1])
+        record = self.store.load(12345)
+        self.assertEqual(record.get("model"), "gemini-3.1-pro-high")
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):

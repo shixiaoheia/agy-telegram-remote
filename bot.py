@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agy_runner import Result, Runner
-from settings import ConfigError, Settings
+from settings import ConfigError, MODEL_RE, Settings
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 
@@ -48,12 +48,14 @@ class Job:
     job_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     worker: asyncio.Task | None = None
+    model: str = ""
 
 
 def describe(record: dict) -> str:
     outcome = str(record.get("outcome", "error"))
     title = LABELS.get(outcome, "结果需核对")
-    parts = [f"{title}｜任务 {record.get('job_id', '-') }"]
+    model_tag = f"｜{record['model']}" if record.get("model") else ""
+    parts = [f"{title}｜任务 {record.get('job_id', '-') }{model_tag}"]
     if record.get("detail"):
         parts.append(str(record["detail"]))
     help_text = CATEGORY_HELP.get(record.get("category"))
@@ -111,12 +113,14 @@ class Bridge:
 
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
         try:
-            accepted = await self.send_text(job.chat, f"任务 {job.job_id} 已接收，准备调用 agy。")
+            model_info = f"（模型：{job.model}）" if job.model else ""
+            accepted = await self.send_text(job.chat, f"任务 {job.job_id} 已接收{model_info}，准备调用 agy。")
             if not accepted or self.stop.is_set() or job.cancel.is_set():
                 self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
                     "detail": "确认消息未成功投递、任务已取消或服务正在停止；没有启动 agy。",
                     "delivery": "sent" if accepted else "failed",
+                    "model": job.model,
                 })
                 return
             await self._work(job, prompt)
@@ -131,9 +135,15 @@ class Bridge:
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
-            result = await self.runner.run(prompt, job.cancel)
+            try:
+                result = await self.runner.run(prompt, job.cancel, model=job.model or None)
+            except TypeError:
+                result = await self.runner.run(prompt, job.cancel)
             record = self.store.save(
-                job.user, result.to_dict() | {"job_id": job.job_id, "delivery": "pending"}
+                job.user, result.to_dict() | {
+                    "job_id": job.job_id, "delivery": "pending",
+                    "model": job.model or getattr(result, "model", ""),
+                }
             )
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
             delivered = await self.send_text(job.chat, describe(record))
@@ -190,19 +200,22 @@ class Bridge:
         if command in {"/start", "/help"}:
             self.queue_reply(
                 chat_id, "直接发送任务给 agy。\n/status 查看状态\n/cancel 请求取消"
-                "\n/last 取回本人最近结果（不会重新执行）\n/id 查看数字 ID"
-                "\n每条普通消息独立执行，不保留对话上下文。",
+                "\n/last 取回本人最近结果（不会重新执行）\n/model 查看或切换模型"
+                "\n/id 查看数字 ID\n每条普通消息独立执行，不保留对话上下文。",
             )
             return
         if command == "/status":
+            current_model = self.store.get_model(user) or self.settings.model
+            model_info = f"（模型：{current_model}）" if current_model else ""
             if self.slot and self.slot.user == user:
-                text = f"任务 {self.slot.job_id}：" + (
+                job_model = f"[{self.slot.model}] " if self.slot.model else ""
+                text = f"任务 {self.slot.job_id}：{job_model}" + (
                     "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
                 )
             elif self.runner.blocked:
                 text = "已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
-                text = "你当前没有任务。" + ("工作目录正被其他任务占用。" if self.slot else "")
+                text = f"你当前没有任务{model_info}。" + ("工作目录正被其他任务占用。" if self.slot else "")
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
@@ -221,6 +234,38 @@ class Bridge:
                 text = "无法读取最近结果，请检查服务器状态。"
             self.queue_reply(chat_id, text)
             return
+        if command == "/model":
+            parts = text.split(maxsplit=1)
+            target = parts[1].strip() if len(parts) > 1 else ""
+            if not target or target.lower() in {"show", "current", "status"}:
+                current = self.store.get_model(user) or self.settings.model or "默认（由 agy 决定）"
+                self.queue_reply(
+                    chat_id,
+                    f"当前模型：{current}\n\n"
+                    "切换模型：/model <模型名>\n"
+                    "恢复默认：/model default\n\n"
+                    "常用可用模型示例：\n"
+                    "• gemini-3.8-flash-high (极速推荐)\n"
+                    "• gemini-3.7-flash-high\n"
+                    "• gemini-3.1-pro-high (复杂推理)\n"
+                    "• claude-sonnet-4-6 (Sonnet 思考)\n"
+                    "• claude-opus-4-6-thinking (Opus 思考)\n"
+                    "• gpt-oss-120b-medium",
+                )
+                return
+            if target.lower() in {"default", "reset", "auto", "clear"}:
+                self.store.set_model(user, None)
+                self.queue_reply(chat_id, "已恢复为默认模型（由 agy 决定）。")
+                return
+            if not MODEL_RE.fullmatch(target):
+                self.queue_reply(
+                    chat_id,
+                    "模型名称格式不正确。仅支持 2..64 个字母、数字、点、下划线与连字符。",
+                )
+                return
+            self.store.set_model(user, target)
+            self.queue_reply(chat_id, f"已切换模型为：{target}\n后续任务将使用此模型。")
+            return
         if command:
             self.queue_reply(chat_id, "不支持这个控制命令。发送 /help 查看用法。")
             return
@@ -234,13 +279,15 @@ class Bridge:
             self.queue_reply(chat_id, "工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
             return
 
-        job = Job(user, chat_id)
+        user_model = self.store.get_model(user) or self.settings.model or ""
+        job = Job(user, chat_id, model=user_model)
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
             self.store.save(user, {
                 "job_id": job.job_id, "outcome": "running", "delivery": "pending",
                 "detail": "任务准备或执行中；服务中断时不会自动重试。",
+                "model": job.model,
             })
             job.worker = asyncio.create_task(self._accept_and_work(job, text))
         except Exception:

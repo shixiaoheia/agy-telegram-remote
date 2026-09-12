@@ -60,6 +60,25 @@ class StoreTests(unittest.TestCase):
         reduced.maintain()
         self.assertFalse((self.directory / "last-12345.json").exists())
 
+    def test_user_model_persistence_and_pruning(self):
+        self.assertIsNone(self.store.get_model(12345))
+        self.store.set_model(12345, "gemini-3.1-pro-high")
+        self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-high")
+        self.assertIsNone(self.store.get_model(67890))
+        path = self.directory / "model-12345.json"
+        self.assertTrue(path.exists())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(ValueError):
+            self.store.set_model(12345, "bad model name")
+        self.store.set_model(12345, None)
+        self.assertIsNone(self.store.get_model(12345))
+        self.assertFalse(path.exists())
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.assertTrue(path.exists())
+        reduced = Store(self.directory, frozenset({67890}), 1000, 7)
+        reduced.maintain()
+        self.assertFalse(path.exists())
+
     def test_duplicate_instance_lock(self):
         self.store.lock()
         second = Store(self.directory, self.store.allowed, 1000, 7)

@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — model switching command (/model) and model configuration
+
+基线提交：`57423ed304df4675375818936f4cdb697bbf0957`。
+
+- **动态模型切换指令**（`bot.py`）：
+  - 新增 `/model` 控制命令：
+    - `/model`：查看当前配置模型、常用可用模型列表及用法示例；
+    - `/model <模型名>`：为当前用户切换首选模型（严格进行正则白名单校验 `[A-Za-z0-9._-]{2,64}`）；
+    - `/model default`（或 `reset`/`auto`）：恢复为默认模型（由 agy 决定）；
+  - `/status` 指令与任务接收确认消息同步显示当前选中的模型标识；
+  - 任务执行结果标题附带模型标识（如 `任务 xxx｜gemini-3.1-pro-high`）；
+  - `/start` 与 `/help` 补充 `/model` 使用提示。
+- **每用户模型偏好持久化与清理**（`state_store.py`）：
+  - 增加 `get_model(user)` 与 `set_model(user, model)`，以 `0600` 私有权限原子落盘至 `model-{user}.json`；
+  - `maintain()` 周期性维护与启停阶段自动清理不在白名单内的用户模型偏好文件。
+- **底层 agy 命令行透传**（`agy_runner.py`）：
+  - `build_command` 与 `Runner.run` 支持透传 `--model <name>` 参数；
+  - `Result` 数据结构新增 `model` 字段记录实际调用的模型名称。
+- **全局可选模型默认配置**（`settings.py`）：
+  - `DEFAULTS` 新增可选配置 `AGY_MODEL`，允许在 `config.env` 中配置全局默认模型并校验格式。
+- **测试覆盖**：
+  - 新增 8 项单元测试，全套离线测试覆盖增至 152 项。
+
 ## Unreleased — config validation, startup retries, and responsive controls
 
 基线提交：`cdb6b5b8ad6f359391c90e922f8fd305dbbc37cc`。

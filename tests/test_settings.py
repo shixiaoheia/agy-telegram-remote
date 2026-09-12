@@ -25,6 +25,12 @@ class ConfigurationTests(unittest.TestCase):
                 Settings.load(path)
             self.assertNotIn("private-value", str(caught.exception))
 
+    def test_valid_and_invalid_model_setting(self):
+        s = Settings.from_mapping(config_values() | {"AGY_MODEL": "gemini-3.1-pro-high"})
+        self.assertEqual(s.model, "gemini-3.1-pro-high")
+        with self.assertRaises(ConfigError):
+            Settings.from_mapping(config_values() | {"AGY_MODEL": "bad;injection"})
+
     def test_defaults_auto_approve(self):
         self.assertTrue(Settings.from_mapping(config_values()).skip_permissions)
 

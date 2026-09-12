@@ -29,6 +29,7 @@ class Result:
     stdout_bytes: int = 0
     stderr_bytes: int = 0
     cleanup_ok: bool = True
+    model: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -131,13 +132,15 @@ def child_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
     return env
 
 
-def build_command(settings: Settings, prompt: str) -> list[str]:
+def build_command(settings: Settings, prompt: str, model: str | None = None) -> list[str]:
     command = [
         str(settings.agy), "--print-timeout", f"{math.ceil(settings.timeout)}s",
         "--output-format", "json",
     ]
     if settings.skip_permissions:
         command.append("--dangerously-skip-permissions")
+    if model:
+        command.extend(["--model", model])
     return command + ["--print", prompt]
 
 
@@ -231,24 +234,28 @@ class Runner:
         self.terminate_grace = terminate_grace
         self.blocked = False
 
-    async def run(self, prompt: str, cancel: asyncio.Event) -> Result:
+    async def run(self, prompt: str, cancel: asyncio.Event,
+                  model: str | None = None) -> Result:
+        selected_model = model or self.settings.model or ""
         if self.blocked:
             return Result("cleanup_failed", detail="上次进程清理未确认完成；请重启服务后检查。",
-                          cleanup_ok=False)
+                          cleanup_ok=False, model=selected_model)
         if cancel.is_set():
-            return Result("cancelled", detail="任务在启动前已取消。")
+            return Result("cancelled", detail="任务在启动前已取消。", model=selected_model)
         if not prompt.strip() or "\x00" in prompt or len(prompt) > self.settings.max_prompt:
-            return Result("error", detail="任务为空、过长或含非法字符。", category="input")
+            return Result("error", detail="任务为空、过长或含非法字符。", category="input",
+                          model=selected_model)
         process = None
         readers: list[asyncio.Task] = []
         watchers: list[asyncio.Task] = []
-        result = Result("error", detail="agy 启动或执行异常。", category="process")
+        result = Result("error", detail="agy 启动或执行异常。", category="process",
+                        model=selected_model)
         task_cancelled = False
         captured = [Capture(), Capture()]
         cleanup_ok = True
         try:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                *build_command(self.settings, prompt),
+                *build_command(self.settings, prompt, model=selected_model or None),
                 cwd=self.settings.workspace,
                 env=child_environment(self.settings.home),
                 stdin=asyncio.subprocess.DEVNULL,
@@ -346,8 +353,10 @@ class Runner:
                 result = parse_result(captured[0].data, captured[1].data, process.returncode or 0)
         result.stdout_bytes = captured[0].total
         result.stderr_bytes = captured[1].total
+        if selected_model:
+            result.model = selected_model
         if process is not None:
             result.exit_code = process.returncode
         if task_cancelled and result.outcome == "success":
-            result = Result("cancelled", detail="任务已取消，请核对已有修改。")
+            result = Result("cancelled", detail="任务已取消，请核对已有修改。", model=selected_model)
         return result

@@ -107,10 +107,37 @@ class Store:
         record = {key: record[key] for key in (
             "user_id", "updated_at", "job_id", "outcome", "text", "detail",
             "category", "agy_status", "exit_code", "stdout_bytes", "stderr_bytes",
-            "cleanup_ok", "delivery",
+            "cleanup_ok", "delivery", "model",
         ) if key in record}
         atomic_json(self._path(user), record)
         return record
+
+    def _model_path(self, user: int) -> Path:
+        if type(user) is not int or user not in self.allowed:
+            raise ValueError("User is not allowed")
+        return self.directory / f"model-{user}.json"
+
+    def get_model(self, user: int) -> str | None:
+        path = self._model_path(user)
+        try:
+            value = read_json(path, 1024)
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            return None
+        model = value.get("model")
+        if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
+            return model
+        return None
+
+    def set_model(self, user: int, model: str | None) -> None:
+        path = self._model_path(user)
+        if model is None:
+            path.unlink(missing_ok=True)
+            return
+        if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
+            raise ValueError("Invalid model name")
+        atomic_json(path, {"user_id": user, "model": model, "updated_at": time.time()})
 
     def load(self, user: int) -> dict | None:
         path = self._path(user)
@@ -131,16 +158,23 @@ class Store:
     def maintain(self) -> None:
         """Runs at startup and periodically: expire or remove non-allowed records."""
         for path in self.directory.iterdir():
-            match = re.fullmatch(r"last-([0-9]+)\.json", path.name)
-            if not match:
+            match_last = re.fullmatch(r"last-([0-9]+)\.json", path.name)
+            if match_last:
+                user = int(match_last[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                    continue
+                self.load(user)
                 continue
-            user = int(match[1])
-            if path.is_symlink():
-                raise ValueError("Linked state record")
-            if user not in self.allowed:
-                path.unlink()
-                continue
-            self.load(user)
+            match_model = re.fullmatch(r"model-([0-9]+)\.json", path.name)
+            if match_model:
+                user = int(match_model[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
 
     def recover_interrupted(self) -> None:
         self.maintain()
