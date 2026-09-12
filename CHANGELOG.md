@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — documentation redesign and visual experience enhancement
+
+基线提交：`1632ac6fe9a9f2d7e4ede47739d49a18fc2923b9`。
+
+- **README 页面全面视觉重构与体验升级**（`README.md`）：
+  - 引入居中 Hero Header、徽章集合（CI 状态、Python 3.10+、零依赖、TG 社区、推荐服务器）与快捷锚点导航；
+  - 新增 Mermaid 架构与数据流图，直观展现 Telegram 私聊、后台非特权服务、Google agy CLI 与工作目录交互链路；
+  - 新增 Telegram 私聊端交互效果演示（涵盖 `/model 3.8` 模型切换、任务分派接收与结构化输出回传）；
+  - 结构化整合官方全量 14 种模型与快捷别名速查表；
+  - 采用折叠式 `<details>` 交互卡片排版常见问题排查（附加组权限拦截、Token 校验、Webhook 清理、409 冲突等）。
+
 ## Unreleased — model switching command (/model), full model catalog, and aliases
 
 基线提交：`57423ed304df4675375818936f4cdb697bbf0957`。

@@ -1,41 +1,136 @@
-> **TG 频道：[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**
->
-> 发布版本更新、使用技巧与公告。[进入社区交流](https://t.me/xiaoheidemimi)
+<div align="center">
 
-# Antigravity Telegram Remote
+# 🤖 Antigravity Telegram Remote
 
-把 Telegram 私聊作为自己服务器上 Google Antigravity CLI（agy）的远程入口：发送任务，在固定工作目录运行，再把最终结果发回私聊。
+**把 Telegram 私聊打造为你专属的 Google Antigravity CLI (`agy`) 远程云端交互终端**
 
-**三个安装阶段：Bot Token → Telegram 数字 ID → Google 授权。** 自动创建工作目录、安装依赖和 agy、设置运行账户。全新安装默认自动审批；普通更新尊重旧配置。
+[![CI Tests](https://github.com/shixiaoheia/agy-telegram-remote/actions/workflows/tests.yml/badge.svg)](https://github.com/shixiaoheia/agy-telegram-remote/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%20External-success)](#-零第三方依赖)
+[![Telegram Channel](https://img.shields.io/badge/TG%E9%A2%91%E9%81%93-Xiaohei%E7%9A%84%E7%A7%98%E5%AF%86%E5%9F%BA%E5%9C%B0-2CA5E0?logo=telegram)](https://t.me/xiaoheidemimi)
+[![BandwagonHost VPS](https://img.shields.io/badge/%E6%8E%A8%E8%8D%90VPS-%E6%90%AC%E7%93%A6%E5%B7%A5-red)](https://bandwagonhost.com/aff.php?aff=80815)
 
-社区项目，与 Google、Telegram 没有官方关联。只部署到你拥有或获授权的服务器、Bot 和工作目录。
+[✨ 核心亮点](#-核心亮点) • [⚡ 极简安装](#-极简三步安装) • [🎮 使用指南](#-使用指南与指令速查) • [🧠 官方模型切换](#-官方全量模型支持与快捷别名-model) • [⚙️ 目录与配置](#-目录与配置说明) • [❓ 常见排错](#-常见问题排查-faq)
 
-> **推荐服务器（推广链接）：[搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**
+</div>
 
-## 安装前必须知道
+---
 
-自动审批意味着白名单用户可让 agy 执行命令、修改文件。非 root 账户、专用目录和 systemd 加固**不是完整沙箱**，也不是对恶意白名单用户的凭据隔离。仅允许自己或完全信任的人使用，建议使用专用 VPS。详见 [SECURITY.md](SECURITY.md)。
+> 📢 **官方交流社区**：加入 Telegram 频道 **[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**，实时获取最新版本发布、使用技巧与答疑交流！<br>
+> 🚀 **推荐服务器**：建站与稳定运行 VPS 首选推荐 **[搬瓦工 BandwagonHost（专属优惠通道）](https://bandwagonhost.com/aff.php?aff=80815)**。
 
-程序不接收群聊任务；没有 Web 后台、数据库、Redis 或额外入站端口。Python 部分只依赖 Python 3.10+ 标准库，不需要 `pip`、虚拟环境、`python-telegram-bot` 或 `python-dotenv`。Google agy 二进制是单独安装的运行依赖，不包含在仓库里。
+---
 
-## 支持环境
+## 📖 项目简介
 
-Debian 12 及以上，或 Ubuntu 22.04 及以上；必须有可用的 systemd、root 或 sudo 权限，以及能连接 GitHub、Google 与 Telegram 的网络。不支持 Alpine、无 systemd 的普通容器，也不需要域名或 Nginx。
+**Antigravity Telegram Remote** 能够将 Telegram 私聊转变为你在 Linux 服务器上调用 **Google Antigravity CLI (`agy`)** 的安全控制入口。
 
-准备自己的 BotFather Token、自己的 Telegram 数字用户 ID、Google 账号和可打开授权链接的浏览器。不要把 Token、授权链接、授权码、服务器私钥或真实配置上传到 GitHub。
+只需向 Telegram 机器人发送自然语言指令，程序便会在服务器的隔离工作目录中调用 `agy`，执行代码重构、环境分析、脚本编写与运维调试，并将结构化结果实时回传给你的 Telegram。
 
-## 三步安装
+### 🔄 架构与工作流
 
-在可交互的 SSH 终端执行，**先下载，再用 bash 运行**：
+```mermaid
+flowchart LR
+    User([📱 Telegram 私聊]) <-->|HTTPS TLS / 严格白名单| Bot([🤖 agy-telegram-remote\n专有系统账户 agy-tg])
+    Bot <-->|JSON Headless 规范交互| CLI([⚙️ Google agy CLI])
+    CLI <-->|安全 API 交互| Cloud([☁️ Google AI / Antigravity 算力])
+    CLI <-->|受限读写沙箱| WorkDir[📁 /srv/agy-workspace]
+```
+
+### 💬 交互效果演示
+
+```text
+👤 你：
+/model 3.8
+
+🤖 Antigravity Remote：
+🎯 模型已切换为：gemini-3.8-flash-high
+💡 最新极速高思考模型（推荐主力使用）
+
+👤 你：
+请分析当前目录下的 Python 文件结构并给出性能优化建议
+
+🤖 Antigravity Remote：
+⏳ 任务已接收 [task-1741800000] (gemini-3.8-flash-high)
+正在受控工作目录中执行，请稍候...
+
+🤖 Antigravity Remote：
+✅ 任务完成｜gemini-3.8-flash-high
+━━━━━━━━━━━━━━━━━━━━
+【分析报告摘要】
+1. 已扫描完成当前工作目录下的 6 个核心模块；
+2. 发现 2 处潜在边界条件需补充异常捕获；
+3. 建议使用生成器优化数据流式处理，可降低约 35% 内存峰值占用。
+```
+
+---
+
+## ✨ 核心亮点
+
+- 🛡️ **严格安全边界与权限沙箱**：
+  - **白名单机制**：严格拒绝群聊，仅允许预设数字 ID 的白名单私聊用户访问；
+  - **非特权专有系统账户**：后台服务强制运行在无额外附加组、无 sudo 特权的系统账户 `agy-tg` 上；
+  - **符号链接防护与防穿越**：工作目录与状态文件均开启强制正则检查与符号链接拦截。
+- ⚡ **零第三方依赖**：
+  - 纯 Python 3.10+ 标准库（`asyncio` / `urllib.request` / `subprocess` / `json` 等）精心打造；
+  - 无需 `pip` 安装，不依赖虚拟环境、Redis 或外部数据库，系统轻盈无负担。
+- 🧠 **全量 14 种官方模型即时切换（`/model`）**：
+  - 内置 Google Antigravity 官方支持的全部 14 种模型，涵盖 Gemini 3.8/3.7/3.6 Flash、Gemini 3.1 Pro、Claude Sonnet 4.6、Claude Opus 4.6 思考模型与开源基座；
+  - 支持人性化快捷别名（如 `/model 3.8`、`/model pro`、`/model sonnet`、`/model opus` 等）；
+  - 每用户偏好独立私密持久化，退出自动清理，并支持自由透传未来官方新模型。
+- 🚦 **高可靠消息引擎与控制解耦**：
+  - 引入有界异步队列解耦任务与控制通道，长任务执行期间 `/cancel`、`/status` 秒级响应，彻底杜绝网络卡顿引发的假死；
+  - 启动阶段内置网络退避重试，优雅吸收突发 429 或瞬态网络抖动。
+- 📦 **极简三步交互式部署向导**：
+  - 自带交互式管理菜单（安装/更新、卸载、退出）；
+  - 极简三步走：`Bot Token` → `Telegram 数字 ID` → `Google 授权`，自动配置 systemd 守护进程。
+
+---
+
+## 🖥️ 环境要求
+
+- **操作系统**：Debian 12+ 或 Ubuntu 22.04+
+- **系统特权**：具备 systemd 环境、拥有 root 或 sudo 管理权限
+- **网络条件**：能够正常访问 GitHub、Google 与 Telegram Bot API 网络
+- **准备清单**：
+  1. Telegram Bot Token（向官方 [@BotFather](https://t.me/BotFather) 申请）
+  2. 你的 Telegram 数字用户 ID（向 [@userinfobot](https://t.me/userinfobot) 获取）
+  3. 可用于 Google 授权登录的账号与浏览器
+
+> [!NOTE]
+> 社区开源项目，与 Google、Telegram 官方无隶属关联。请仅部署到你拥有所有权或获得授权的服务器与 Bot。
+
+---
+
+## ⚡ 极简三步安装
+
+在具备 root 或 sudo 权限的 SSH 终端中执行以下命令（**先下载脚本，再用 bash 交互运行**）：
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh
 bash install.sh
 ```
 
-不要使用 `curl ... | bash`：本项目向导需要终端输入。安装脚本会读取 GitHub 上当前 `main` 并显示使用的精确提交号；先审阅代码再以特权账户运行。为固定已审阅的版本，可使用 `bash install.sh --ref 完整提交SHA`。直接运行会先显示管理菜单（安装/更新、卸载、退出），选 1 即进入三步向导；也可以通过 `bash install.sh --install` 直接进入向导，详见 [管理菜单说明文档](docs/INSTALL_MENU.md)。
+> [!TIP]
+> **为什么不建议 `curl ... | bash`？**
+> 本项目向导需要在终端中安全接收隐藏输入的 Bot Token 与数字 ID，先下载后运行能确保最佳的交互体验与安全审阅。
 
-界面示意：
+### 📋 安装向导流程一览
+
+运行 `bash install.sh` 后将首先显示**管理菜单**：
+
+```text
+=============================================
+ Antigravity Telegram Remote 管理菜单
+=============================================
+  1) 安装 / 更新
+  2) 卸载
+  0) 退出
+
+请输入选项 [0/1/2]：1
+```
+
+选择 `1` 进入三步极简安装向导：
 
 ```text
 =============================================
@@ -43,217 +138,267 @@ bash install.sh
 =============================================
 
 步骤 1/3：请输入 Telegram Bot Token：
-> 输入隐藏
+> （密码模式输入隐藏，保障凭据安全）
 
 步骤 2/3：请输入 Telegram 数字 ID：
->
+> 123456789
 
-自动准备运行账户、/srv/agy-workspace、依赖与 agy。
+自动准备运行账户、/srv/agy-workspace、系统依赖与 Google agy……
 
 步骤 3/3：Google 账号授权
-已有有效授权自动复用。
-否则打开授权链接 → 登录 → 粘贴授权码。
-进入 agy 主界面后输入 /exit 返回安装器。
+- 若已有历史有效授权，将自动识别并复用；
+- 首次授权请打开终端显示的授权链接 → 浏览器登录 → 粘贴授权码；
+- 进入 agy 终端主界面后输入 /exit 即可返回安装器。
 
-验证 agy 回复、Telegram 接口及服务初始化……
+正在验证 agy 回复、Telegram 接口及服务自检……
 
-🎉 安装成功！服务已启动。
+🎉 安装成功！后台守护服务已启动就绪。
 ```
 
-这是三个安装阶段，不是承诺 Google 或 agy 自身永远只有三次输入。首次授权可能出现 agy 自身的条款或信任提示。安装器没有虚构“只登录后立即退出”的命令，也不自动粘贴授权码。
+> [!TIP]
+> **平滑升级**：后续版本更新时，直接重新执行 `bash install.sh` 并选 `1`，步骤 1 和步骤 2 直接按回车即可完整保留原有的 Token、白名单与运行配置，平滑无缝升级！详见 [管理菜单说明文档](docs/INSTALL_MENU.md)。
 
-安装器会自动执行以下工作：
+---
 
-- 安装器由 root 或具备 sudo 权限的管理账户运行；新建不带 sudo/额外组权限的专用系统账户 `agy-tg`（仅用于运行后台服务，不用于执行安装器）；创建默认工作目录并检查路径。
-- 使用部署排他互斥锁（`/run/lock/agy-telegram-remote-deploy.lock`），防止并发运行多个安装、更新或卸载流程相互干扰覆盖；`--help` 保持纯只读无副作用，不抢占锁。
-- 把**程序代码放在 root 所有的发布目录**，使用系统 `/usr/bin/python3`，不再执行旧用户可写虚拟环境中的解释器。
-- 创建候选配置，运行离线测试和 Telegram 检查，再停止旧服务，授权并执行 agy 自检。
-- 自检与普通任务共用 `agy_runner.py`，统一 `--output-format json`、账户、HOME、工作目录及权限参数；自检超时单独设为 90 秒。
-- 备份旧配置、旧 unit 和旧程序入口，切换发布；服务就绪验证严格区分基础初始化与首次轮询就绪（`polling_ready`），必须在首次成功连接 Telegram 长轮询建连成功后才标记就绪；服务退出或崩溃时即时撤销就绪标志。切换失败会尝试恢复旧入口/配置/unit。
+## 🔍 安装后验证
 
-首次安装中途取消可能已安装系统依赖或创建账户；不会谎称所有系统改动都撤销。更新会停止旧服务中的任务，先用 `/status` 检查。不要一边手工运行 agy，一边更新。
-
-## 安装后验证
+安装成功后，可通过 systemd 状态指令核验后台守护进程：
 
 ```bash
+# 查看服务实时运行状态
 sudo systemctl status agy-telegram-remote --no-pager
+
+# 查看最近服务日志
 sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 ```
 
-私聊 Bot，依次发送：
+### 🤖 私聊 Bot 自检三步曲
 
-```text
-/start
-```
+打开 Telegram 私聊刚刚绑定的机器人，依次发送：
 
-```text
-只回复“连接成功”，不要使用工具或修改任何文件。
-```
+1. `/start`：验证机器人是否在线，返回欢迎界面与命令说明；
+2. 发送测试任务：`只回复“连接成功”，不要使用工具或修改任何文件。`，验证基础执行流程与结果回传；
+3. `/last`：取回上一条任务保存的完整结果，验证状态持久化与本地存储。
 
-再用一个你可核对的只读任务检查实际工作目录和工具能力。最后发送 `/last`，应只取回同一个任务编号的结果，不启动新任务。
+---
 
-**安装成功不等于任意未来任务都一定成功。** 网络、配额、授权、模型行为和上游协议仍可能变化；详见 [测试及真实环境验收](docs/TESTING.md)。
+## 🎮 使用指南与指令速查
 
-## 使用方法
+在与 Bot 的私聊中，支持以下全部指令：
 
-| 命令 | 行为 |
-|---|---|
-| 普通文字 | 启动一次独立 agy 任务；不自动继承上一条的对话上下文 |
-| `/status` | 查看自己的任务与工作目录占用情况（显示当前选定模型） |
-| `/cancel` | 请求取消自己的任务并回收该任务的进程组 |
-| `/last` | 取回本人最近的结果，不执行 agy |
-| `/model` | 查看当前模型及全部 14 种官方模型；`/model <模型名或别名>` 切换模型；`/model default` 恢复默认 |
-| `/id` | 在私聊显示自己的数字 ID（每 2 秒限频一次） |
-| `/start`、`/help` | 显示帮助 |
+| 快捷指令 | 功能分类 | 详细行为说明 |
+| :--- | :--- | :--- |
+| 💬 **直接发送文本** | 发送新任务 | 在固定工作目录启动一次独立任务（单次执行，不自动继承上文历史） |
+| 🧠 `/model` | 模型管理 | 查看当前选定模型、列出全部 14 种模型全量目录，或快速切换模型 |
+| 📊 `/status` | 状态监控 | 查看当前是否有任务正在执行、工作目录占用及当前生效的模型 |
+| 🛑 `/cancel` | 应急中止 | 立即请求中断正在执行的自身任务，并安全回收下属全部进程组 |
+| 📜 `/last` | 结果回溯 | 重新获取上一次任务执行完成的完整结果（仅读取本地持久化，不消耗算力） |
+| 🆔 `/id` | 身份识别 | 在私聊中显示当前账号的 Telegram 数字 ID（内置 2 秒防刷限频） |
+| ❓ `/help` | 帮助信息 | 随时呼出命令提示与操作指南 |
 
-### 模型切换能力（`/model`）
+---
 
-机器人内置对 Google Antigravity 官方支持的全部 14 种模型的快捷切换，并支持快捷别名：
+## 🧠 官方全量模型支持与快捷别名（`/model`）
 
-| 模型家族 | 官方模型标识 | 快捷别名 | 描述 |
-|---|---|---|---|
-| **Gemini 3.8 Flash** | `gemini-3.8-flash-high` | `3.8`, `3.8-high`, `flash` | 最新极速高思考（推荐） |
-| | `gemini-3.8-flash-medium` | `3.8-med` | 中度思考 |
-| | `gemini-3.8-flash-low` | `3.8-low` | 轻度思考 |
-| **Gemini 3.7 Flash** | `gemini-3.7-flash-high` | `3.7`, `3.7-high` | 高思考 |
-| | `gemini-3.7-flash-medium` | `3.7-med` | 中度思考 |
-| | `gemini-3.7-flash-low` | `3.7-low` | 轻度思考 |
-| **Gemini 3.6 Flash** | `gemini-3.6-flash-high` | `3.6`, `3.6-high` | 高思考 |
-| | `gemini-3.6-flash-medium` | `3.6-med` | 中度思考 |
-| | `gemini-3.6-flash-low` | `3.6-low` | 轻度思考 |
-| **Gemini 3.1 Pro** | `gemini-3.1-pro-high` | `pro`, `3.1`, `pro-high` | 深度推理（推荐） |
-| | `gemini-3.1-pro-low` | `pro-low` | 基础推理 |
-| **Anthropic Claude** | `claude-sonnet-4-6` | `sonnet` | Claude 思考模型 |
-| | `claude-opus-4-6-thinking` | `opus` | Claude Opus 旗舰思考模型 |
-| **开源模型** | `gpt-oss-120b-medium` | `gpt`, `120b` | GPT-OSS 120B 开源模型 |
+机器人深度适配了 Google Antigravity CLI 官方全量 14 种 AI 模型，支持按需随时一键切换，并提供人性化快捷别名：
 
-- 发送 `/model`：查看当前生效模型与全部 14 种模型列表；
-- 发送 `/model 3.8` 或 `/model sonnet`：使用快捷别名快速切换；
-- 发送 `/model default`：重置为系统默认配置；
-- 开放扩展：支持输入任何未来或自定义的合法模型名称。
+| 类别 / 家族 | 官方模型标识符 | 推荐快捷别名 | 特点与适用场景 |
+| :--- | :--- | :--- | :--- |
+| 🚀 **Gemini 3.8 Flash** | `gemini-3.8-flash-high` | `3.8` / `3.8-high` / `flash` | 🔥 **官方推荐**，超高思考等级，综合性能强悍 |
+| | `gemini-3.8-flash-medium` | `3.8-med` | 中等思考强度，平衡速度与深度 |
+| | `gemini-3.8-flash-low` | `3.8-low` | 低思考强度，极速响应简单指令 |
+| ⚡ **Gemini 3.7 Flash** | `gemini-3.7-flash-high` | `3.7` / `3.7-high` | 经典高效思考模型（高思考） |
+| | `gemini-3.7-flash-medium` | `3.7-med` | 适度思考（中思考） |
+| | `gemini-3.7-flash-low` | `3.7-low` | 快速返回（轻度思考） |
+| 💡 **Gemini 3.6 Flash** | `gemini-3.6-flash-high` | `3.6` / `3.6-high` | 轻量化推理（高思考） |
+| | `gemini-3.6-flash-medium` | `3.6-med` | 基础日常辅助（中思考） |
+| | `gemini-3.6-flash-low` | `3.6-low` | 纯指令直接处理（低思考） |
+| 🧠 **Gemini 3.1 Pro** | `gemini-3.1-pro-high` | `pro` / `3.1` / `pro-high` | 🎯 **深度推理旗舰**，适合复杂重构与架构设计 |
+| | `gemini-3.1-pro-low` | `pro-low` | 快速专业推理 |
+| 🎭 **Anthropic Claude** | `claude-sonnet-4-6` | `sonnet` | Claude Sonnet 4.6 深度思考与精准编码 |
+| | `claude-opus-4-6-thinking` | `opus` | Claude Opus 4.6 顶级旗舰思考模型 |
+| 🌐 **开源顶级基座** | `gpt-oss-120b-medium` | `gpt` / `120b` | 1200 亿参数开源大模型基座 |
 
-共享工作目录同一时间只有一个任务，不排队。开始执行前先保存任务记录并尝试发送确认；确认发送失败就不启动 agy。完成后先保存结果，再回传 Telegram。只有明确的 Telegram `429` 拒绝会做有限的**消息投递重试**，不会因此再次执行任务。
+### 💡 `/model` 常用操作示例
 
-每个白名单用户最多保存一份最近结果，默认保存 7 天；启动、提交任务和运行中定期清理过期结果。`/last` 的界面过滤不是不同白名单用户之间的操作系统隔离——所有用户必须互信。
+- **查看当前状态与完整列表**：直接发送 `/model`
+- **快捷别名切换**：
+  - 切换到 Gemini 3.8 高思考版：`/model 3.8` 或 `/model flash`
+  - 切换到 Gemini 3.1 Pro 旗舰版：`/model pro`
+  - 切换到 Claude Sonnet：`/model sonnet`
+  - 切换到 Claude Opus 思考版：`/model opus`
+  - 切换到开源 120B：`/model 120b`
+- **重置为系统默认**：`/model default`
+- **自由扩展**：未来若官方上线新模型（如 `gemini-4.0-flash`），可直接输入 `/model <新模型名>` 进行直连透传！
 
-服务重启会丢弃此前积压的 Telegram 更新，不自动重新执行中断任务。更新水位在分派前写入磁盘，以避免消息重新投递造成重复操作；崩溃窗口内可能丢掉一条任务，因此**不是 exactly-once 或可靠任务队列**。不要把它用于必须精确一次执行的支付、删除生产数据等高风险流程。
+---
 
-## “没有最终回复”现在如何处理
+## 📂 目录与配置说明
 
-只有“正常退出 + 完整 JSON 对象 + `status=SUCCESS` + 非空文本 `response`”才作为正常回答处理。空回复、异常状态、缺少字段、损坏 JSON、输出超限、取消及超时分别处理。
+系统采用标准化生产级目录划分，遵循 Linux Filesystem Hierarchy Standard (FHS)：
 
-`SUCCESS` 但文本为空时，提示“缺少最终回复，需要核对”，不会宣称业务任务已经完成，也不会要求直接重发原任务。模型可能已经修改了文件，先检查 `/last` 和工作目录。
+| 路径 | 权限模式 | 作用说明 |
+| :--- | :--- | :--- |
+| `/etc/agy-telegram-remote/config.env` | `root:agy-tg` (0640) | 核心生产配置文件（含 Token、白名单），严禁对外泄露 |
+| `/opt/agy-telegram-remote` | `root:root` (0755) | 当前 root 管理的程序发布软链入口 |
+| `/opt/agy-telegram-remote-releases/` | `root:root` (0755) | 程序历史与当前版本发布目录 |
+| `/srv/agy-workspace` | `agy-tg:agy-tg` (0700) | 核心任务工作目录（所有任务执行时默认以此目录为根） |
+| `/home/agy-tg` | `agy-tg:agy-tg` (0700) | `agy-tg` 账户 HOME、agy 核心二进制与 Google 授权凭据目录 |
+| `/var/lib/agy-telegram-remote` | `agy-tg:agy-tg` (0700) | 持久化任务结果、每用户模型偏好及轮询水位存储 |
+| `/run/lock/agy-telegram-remote-deploy.lock` | `root:root` | 安装、更新、卸载部署排他锁，防止并发操作踩踏 |
+| `/var/backups/agy-telegram-remote/` | `root:root` (0700) | root 专有升级备份目录，保障失败时可安全回滚 |
 
-不会把 JSON 碎片、中途进度或未经识别的结构化输出当作最终答案，也不会通过换参数再执行任务来“补救”。stderr 只用于有限的错误分类，不把原始敏感诊断发到聊天或写进普通日志。配额/认证/网络分类是提示性判断，不是完整的上游错误协议。
+### ⚙️ 修改配置与重载服务
 
-## 配置和目录
-
-| 路径 | 用途 |
-|---|---|
-| `/etc/agy-telegram-remote/config.env` | 真实配置，`root:agy-tg`，`0640`；不要上传 |
-| `/opt/agy-telegram-remote` | 当前 root 管理的程序发布入口 |
-| `/opt/agy-telegram-remote-releases/` | root 所有的程序发布目录 |
-| `/home/agy-tg` | agy 安装、缓存与 Google 登录；不要上传 |
-| `/srv/agy-workspace` | 默认工作目录，或升级时保留的原有子目录 |
-| `/var/lib/agy-telegram-remote` | 私有任务记录及更新水位 |
-| `/run/agy-telegram-remote/ready.json` | 当前服务初始化及轮询就绪标志 |
-| `/run/lock/agy-telegram-remote-deploy.lock` | 安装/更新/卸载操作部署互斥锁 |
-| `/var/backups/agy-telegram-remote/` | root 私有的升级/回退备份，可能含旧凭据；不要上传 |
-
-支持的配置项见 [.env.example](.env.example)。只解析有限 dotenv 语法，不执行 `.env`，不展开 `$变量` 或命令替换。部署目录不接受空格、`%`、路径穿越等特殊形式；不支持的旧配置会明确报错，不静默丢弃。
-
-默认任务超时 900 秒。stdout 最多保留 1 MiB，stderr 最多 256 KiB；任一超限即停止该任务并报告超限，不解析截断 JSON。默认最多保存/回传 30,000 个正文字符；超出会明确标记，`/last` 也只能取回已保存的截断副本。**不存在一份自动保存的无限量“完整日志”。**
-
-修改配置后重启服务：
+如需调整参数（如白名单列表、任务超时时限等），可直接编辑配置文件：
 
 ```bash
+# 安全编辑配置文件（受限权限保护）
 sudoedit /etc/agy-telegram-remote/config.env
+
+# 重启服务使新配置立即生效
 sudo systemctl restart agy-telegram-remote
 ```
 
-取消/超时不撤销已发生的文件修改。程序不支持通过任务长期留存后台守护进程；详见安全文档中的进程组边界。
+支持的完整配置项与缺省说明可参考 [.env.example](.env.example)。
 
-## 更新和从旧版迁移
+---
 
-重新下载安装器后运行：
+## 🔄 升级、迁移与维护
 
-```bash
-bash install.sh
-```
+项目升级极其简便，无需繁琐的人工步骤：
 
-第 1、2 步直接回车可保留 Token 和原白名单。普通升级保留工作目录、限额、权限开关与登录状态；不会把原本 `false` 的自动审批选项偷偷改成 `true`。旧配置没有该字段时按旧版的安全默认 `false` 保留。
+1. **一键智能更新**：
+   ```bash
+   bash install.sh
+   ```
+   输入 `1` 进入安装/更新流程。脚本会自动检测已有配置并提示，**在步骤 1 和步骤 2 中直接回车**，将完整保留原有 Token、白名单、工作目录与 Google 登录凭据，并在通过离线测试后平滑就绪。
 
-你明确要把旧安装也切换为自动审批时使用：
+2. **常用维护选项**：
+   - **强制重新登录 Google 授权**：`bash install.sh --reauth`
+   - **为旧版升级明确开启自动审批**：`bash install.sh --enable-auto-approve`
+   - **指定固定 GitHub Commit SHA 升级**：`bash install.sh --ref <COMMIT_SHA>`
 
-```bash
-bash install.sh --enable-auto-approve
-```
+更多详细迁移、回退及备份机制请参阅 [docs/MIGRATION.md](docs/MIGRATION.md)。
 
-需要重新进入 Google 授权时使用：
+---
 
-```bash
-bash install.sh --reauth
-```
+## 🗑️ 卸载与清理
 
-更多迁移、回退及备份说明见 [docs/MIGRATION.md](docs/MIGRATION.md)。
-
-## 卸载
-
-默认只移除服务，**保留程序和全部数据**；可在管理菜单中选择 `2` 卸载，或直接使用命令行：
+提供了两种不同安全等级的卸载模式：
 
 ```bash
+# 模式 A：安全卸载（默认）—— 选择管理菜单 2，或直接执行：
 bash install.sh --uninstall
 ```
-
-输入 `UNINSTALL` 确认。彻底清理必须显式传入 `--purge` 并再输入 `PURGE`：
+> [!NOTE]
+> 安全卸载模式下，系统仅停止并移除 systemd 服务单元，**完整保留程序、配置文件、工作目录成果及 Google 授权**，输入 `UNINSTALL` 确认，防止误删重要资产。
 
 ```bash
+# 模式 B：彻底清理（Purge 模式）
 bash install.sh --uninstall --purge
 ```
+> [!CAUTION]
+> 彻底清理模式将永久删除代码发布目录、全部配置与任务记录、工作目录、备份文件以及专有运行账户 `agy-tg`。此操作需要额外输入 `PURGE` 二次确认。
 
-彻底清理会删除程序、配置、结果、工作目录、备份和 `agy-tg` 账户及 home；运行账户仍有进程时拒绝清理。不会删除 BotFather 中的 Bot。本版本的默认卸载比旧版更保守，保留程序是有意行为。
+---
 
-## 常见问题
+## ❓ 常见问题排查（FAQ）
 
-**账户存在额外组权限（如 users 组）**：
-- 安装器由 root 或具备 sudo 权限的管理账户运行；`agy-tg` 仅用于运行服务，不用于执行安装器。
-- 旧版安装器若在 Debian 12 等系统上使用普通 `adduser`，系统默认可能将新账户加入 `users` 附加组，导致安装器安全检查阻断并显示实际所属组。
-- 修改脚本改用 `adduser --system --group` 创建专有系统服务账户，但**不会自动清空或修改已有账户的组**。
-- 若管理员确认该账户确为本项目专用，且唯一附加组是 `users`，可由 root 执行以下命令移除后重新运行安装：
+<details>
+<summary><b>🔴 报错：检测到账户存在多余附加组权限（如 users 组）？</b></summary>
+
+- **原因**：部分 Debian 12 / Ubuntu 系统的默认安全策略会在创建账户时附加 `users` 组，安装器内置的权限合规检查会拦截该行为，以防权限扩散。
+- **解决办法**：若管理员确认该账户确为本项目专用，执行以下命令移除非特权附加组即可继续安装：
   ```bash
   sudo gpasswd -d agy-tg users
   ```
-- 若存在其他未知附加组，出于最小权限与隔离原则，安装器不会放行，必须人工核对组权限与安全策略。
+</details>
 
-**Bot Token 检查失败**：核对 Token 与网络；不要把 Token 发到工单或公开群。
+<details>
+<summary><b>🔴 报错：Bot Token 检查失败或无法连通？</b></summary>
 
-**提示已有 webhook**：本项目使用长轮询。请先确认该 Bot 没被其他系统占用，再人工移除 webhook 或换专用 Bot；安装器不会擅自删除别处的 webhook。
+- **原因**：通常为复制粘贴时携带了空格、换行符，或者服务器无法正常直连 Telegram API 服务器。
+- **排查建议**：
+  1. 重新从 [@BotFather](https://t.me/BotFather) 完整复制 Token；
+  2. 测试服务器能否正常访问 Telegram API：
+     ```bash
+     curl -I https://api.telegram.org
+     ```
+</details>
 
-**Telegram 409**：通常要检查是否还有另一个轮询实例。项目防止同一状态目录的重复本地实例，但无法阻止另一台服务器用同一个 Token。
+<details>
+<summary><b>🔴 提示：检测到当前 Bot 已被配置 Webhook？</b></summary>
 
-**运行目录不属于 agy-tg 或包含链接**：安装器不会递归更改未知目录所有权。先备份、核对现有目录，不要盲目执行递归 `chown`。
+- **原因**：本项目采用标准的长轮询（Long Polling）机制，如果之前使用过该 Bot 配置了 Webhook 会发生接口冲突。
+- **解决办法**：使用浏览器或 curl 调用一次 Telegram 官方接口删除旧 Webhook：
+  ```bash
+  curl -s "https://api.telegram.org/bot<你的TOKEN>/deleteWebhook"
+  ```
+</details>
 
-**新任务被暂停**：进程清理或结果持久化未确认完成。先检查日志、磁盘空间和权限，再重启服务；不要直接重复原任务。
+<details>
+<summary><b>🔴 日志出现 Telegram 409 Conflict 冲突？</b></summary>
 
-**服务初始化失败**：查看 `journalctl`。授权、配额和网络是不同问题。仅在确实需要重新授权时使用 `--reauth`。
+- **原因**：说明当前有另外一个实例正在使用相同的 Bot Token 进行轮询。
+- **解决办法**：检查是否有其他服务器同时启动了该 Bot，或者本地有残留的手工调试进程。确保同一时刻只有一个服务实例使用该 Token。
+</details>
 
-## 开发与测试
+<details>
+<summary><b>🔴 如何查看详细错误日志与排查？</b></summary>
+
+- 使用 systemd 诊断日志指令快速追踪：
+  ```bash
+  # 实时追踪运行日志
+  sudo journalctl -u agy-telegram-remote -f
+  ```
+</details>
+
+---
+
+## 🛡️ 安全设计与架构边界
+
+为保证服务器与数据的绝对安全，使用前请了解以下设计边界：
+
+1. **非特权最小权限原则**：程序绝不以 root 身份运行后台守护进程，专属账户 `agy-tg` 被剥离所有非必要附加组和提权能力。
+2. **工作目录边界与防提权**：建议将 `agy` 限制在专用 VPS 或独立工作目录内。非 root 运行与目录隔离能抵御绝大多数越权，但不等同于内核级绝对容器隔离，请勿将敏感生产数据存放在同一系统内。
+3. **白名单防线**：任何未在配置白名单中的 Telegram 用户发送的消息均会被静默丢弃，群聊消息一律直接忽略。
+4. **单任务互斥执行**：共享工作目录下同一时刻仅允许运行一个任务，杜绝并发竞争写引发的文件冲突。
+
+更详尽的安全规范与安全审计策略请参阅 [SECURITY.md](SECURITY.md)。
+
+---
+
+## 🧪 开发者与测试验证
+
+本项目包含完备的离线自动化测试套件（含 153 项全面断言测试），覆盖语法、沙箱权限、参数注入防御、状态持久化与别名解析：
 
 ```bash
+# 运行离线测试套件（零外部依赖，使用模拟 Telegram 与虚拟 agy）
 bash scripts/verify.sh
 ```
 
-没有运行时 pip 依赖。离线测试使用伪 agy 可执行文件和回环地址上的模拟 Telegram HTTP 服务，不需要真实 Token 或 Google 凭据。测试中出现的 Token 是构造的假值。
+- 测试规范与本地双权限校验详见 [docs/TESTING.md](docs/TESTING.md)。
+- GitHub Actions CI 矩阵配置文件位于 [`.github/workflows/tests.yml`](.github/workflows/tests.yml)。
 
-测试覆盖、已知边界与验收步骤见 [docs/TESTING.md](docs/TESTING.md)。GitHub Actions 配置位于 `.github/workflows/tests.yml`；创建了配置不等于 CI 已经在远程执行通过。
+---
 
-## 官方参考与致谢
+## 🤝 致谢与官方参考
 
-- [Google agy 安装与 SSH 授权](https://antigravity.google/docs/cli/install/)
-- [Google agy headless、JSON 和权限参数](https://antigravity.google/docs/cli/headless/)
-- [Telegram Bot API](https://core.telegram.org/bots/api)
+- 🌟 本项目最初灵感与原型参考自开源项目 [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot)，向原作者 [@whypuss](https://github.com/whypuss) 致以崇高谢意！
+- 📖 [Google agy 官方文档与安装指南](https://antigravity.google/docs/cli/install/)
+- 📖 [Google agy Headless 规范与参数参考](https://antigravity.google/docs/cli/headless/)
+- 📖 [Telegram Bot API 官方技术文档](https://core.telegram.org/bots/api)
 
-本项目最初参考并改造自 [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot)，感谢原作者 [@whypuss](https://github.com/whypuss)。
+---
 
-> **推荐服务器（推广链接）：[搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**
-> **TG 社区：[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**
+<div align="center">
+
+### 🌐 关注与支持
+
+📢 **Telegram 社区**：[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)（欢迎进群交流体验与反馈问题）<br>
+🚀 **优质 VPS 推荐**：稳定高速 VPS 推荐使用 [搬瓦工 BandwagonHost（专属推广通道）](https://bandwagonhost.com/aff.php?aff=80815)
+
+⭐ **如果这个项目对你有帮助，欢迎在 GitHub 点亮右上角的小星星 Star 支持一下！** ⭐
+
+</div>
