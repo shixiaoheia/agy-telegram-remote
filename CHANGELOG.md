@@ -11,7 +11,12 @@
   - 优化为仅在服务单元文件存在时检测自启状态，并对 `systemctl` 状态查询与自启设置重定向屏蔽标准错误，确保全新部署流程清爽无误导提示。
 - **Google OAuth 授权指引与 agy 服务条款自动确认（Google Auth & TOS UX）**（`install.sh`）：
   - 优化步骤 3/3 授权引导文本与排版，清晰提示浏览器授权链接、复制粘贴授权码与 `/exit` 退出机制；
-  - 自动预设 `onboarding.json` 标记完成 agy 服务条款确认，避免安装过程中弹出额外的交互式 TOS 确认界面打断流程。
+- **修复步骤 3/3 授权自检失败无法进入交互式登录流程的缺陷（Google Auth Pre-check Fix）**（`install.sh`、`agy_runner.py`、`manage.py`、`settings.py`）：
+  - 修复安装向导在步骤 3/3 进行已有授权复用检查（smoke）时，若返回非 10 状态码（如 15 unknown 错误）会跳过交互式登录流程直接报错中断安装的缺陷；调整为预检任何非零均顺利触发交互式授权引导；
+  - 扩充 `agy_runner.py` 认证错误分类规则，广泛覆盖 OAuth、invalid_grant、token expired、unauthorized 及 401 等常见认证过期场景；
+  - 优化 `parse_result` 与 `manage.py smoke` 的错误详情展示，完整回显底层返回的错误信息；
+  - 加固旧配置迁移合并逻辑（`merged_config`），升级时自动净化历史遗留的非 root 路径（如 `/home/agy-tg` 与 `/srv/agy-workspace`），避免阻断配置验证。
+
 
 - **全面精简为纯 Root 模式架构（Pure Root Architecture）**（`install.sh`、`settings.py`、`manage.py`、`.env.example`）：
   - 响应单机个人 VPS 用户极简部署诉求，彻底移除历史多用户非特权账户（`agy-tg`）及其配置逻辑；

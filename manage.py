@@ -67,7 +67,7 @@ def prepare_config(args: argparse.Namespace) -> int:
         if unknown:
             raise ConfigError("旧配置包含不支持的项目，请先备份并人工核对：" + ", ".join(sorted(unknown)))
     print("\n步骤 1/3：请输入 Telegram Bot Token（更新时直接回车保留原 Token）：")
-    if old.get("BOT_TOKEN"):
+    if old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN"):
         print("（已有 Token，直接回车保留。粘贴新 Token 后按回车可更新。）")
     token = input("> ").strip()
     print("\n步骤 2/3：请输入 Telegram 数字 ID（多个 ID 用逗号分隔）：")
@@ -98,7 +98,10 @@ async def smoke(settings: Settings, allow_root: bool = True) -> int:
         print("AGY_SMOKE_OK")
         return 0
     print(f"AGY_SMOKE_FAILED outcome={result.outcome} category={result.category or 'unknown'}")
-    print(result.detail or "未取得预期的测试回复。")
+    if result.detail:
+        print(result.detail)
+    if result.text and result.text.strip() != "AGY ready.":
+        print(result.text.strip())
     if result.category == "auth":
         return 10
     return {"quota": 12, "network": 13, "permission": 14}.get(result.category, 15)

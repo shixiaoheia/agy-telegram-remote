@@ -221,10 +221,10 @@ def merged_config(old: Mapping[str, str], token: str, ids: str,
     values = DEFAULTS | {key: value for key, value in old.items() if key in KEYS}
     if old and "AGY_SKIP_PERMISSIONS" not in old:
         values["AGY_SKIP_PERMISSIONS"] = "false"
-    if not old.get("AGY_PATH"):
+    if not old.get("AGY_PATH") or (home == "/root" and "/home/agy-tg" in old.get("AGY_PATH", "")):
         values["AGY_PATH"] = home + "/.local/bin/agy"
     values["AGY_HOME"] = home
-    if not old.get("AGY_WORKSPACE"):
+    if not old.get("AGY_WORKSPACE") or (home == "/root" and not old.get("AGY_WORKSPACE", "").startswith("/root")):
         values["AGY_WORKSPACE"] = home
     if token:
         values["TELEGRAM_BOT_TOKEN"] = token

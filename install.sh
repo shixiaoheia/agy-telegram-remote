@@ -433,7 +433,7 @@ _ONBOARDING_EOF
       smoke_rc=$?
     fi
   fi
-  if [[ "$smoke_rc" == 10 || "$REAUTH" == 1 ]]; then
+  if [[ "$smoke_rc" -ne 0 || "$REAUTH" == 1 ]]; then
     local auth_rc=0
     echo '🔑 正在启动 Google 授权流程……'
     as_user env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \

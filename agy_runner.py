@@ -48,11 +48,14 @@ def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
     if any(s in low for s in ("authentication required", "not authenticated",
-                             "login required", "unauthenticated")):
+                             "login required", "unauthenticated", "unauthorized",
+                             "invalid_grant", "token expired", "no credentials",
+                             "oauth", "sign in", "signin", "headlessauthrequired",
+                             "401", "re-authenticate", "credentials")):
         return "auth"
     if any(s in low for s in ("quota", "rate limit", "resource_exhausted", "429")):
         return "quota"
-    if "soft-denied" in low:
+    if "soft-denied" in low or "permissiondenied" in low:
         return "permission"
     if any(s in low for s in ("connection", "network", "dns", "timed out",
                              "certificate", "unable to resolve")):
@@ -109,8 +112,10 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
     }:
         return Result("invalid", detail="agy 结果缺少有效的最终状态。", exit_code=exit_code)
     if exit_code != 0 or status != "SUCCESS" or raw_error not in (None, ""):
+        err_msg = str(raw_error).strip() if raw_error else ""
+        detail = f"agy 返回异常状态 ({status})：{err_msg}" if err_msg else "agy 返回异常状态；已执行的操作不会自动撤销。"
         return Result(
-            "error", detail="agy 返回异常状态；已执行的操作不会自动撤销。",
+            "error", detail=detail,
             category=category, agy_status=status[:32], exit_code=exit_code,
             conversation_id=conversation_id, num_turns=num_turns,
         )
