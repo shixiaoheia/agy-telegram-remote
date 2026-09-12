@@ -2,6 +2,11 @@
 
 ## Unreleased — comprehensive documentation overhaul, system monitoring, workspace browsing, dynamic whitelist, engine effort & mode controls
 
+- **全量安装体验与一键命令清晰化（Installation UX Polish）**（`install.sh`、`README.md`、`docs/INSTALL_MENU.md`）：
+  - 核心文档提供醒目、复制即用的一行式安装指令，明确区分「👑 方式一：个人独享 VPS 极简 Root 模式（强烈推荐）」与「🛡️ 方式二：生产级最小权限沙箱模式」；
+  - `install.sh` 脚本启动横幅精准匹配生效模式（Root 模式与沙箱模式分别展示对应账户与工作区，杜绝误导提示）；
+  - `install.sh` 优化安装就绪后的服务状态卡片、实时日志指引与 Telegram 使用下一步提示；
+  - 新增完整的常用运维管理命令速查表（菜单、平滑更新、Root 模式切换、重新授权、日志追踪与安全卸载）。
 - **全量系统性文档与使用指南深度重构（Comprehensive Documentation Overhaul）**（`README.md`、`docs/`、`SECURITY.md`）：
   - `README.md` 重构升级：新增覆盖全部 15 种指令与行为的速查表（含完整语法、参数与默认值、操作权限与典型场景）；
   - 新增 `/effort` 思考强度分级建议、`/mode plan` 只读推演零写入安全机制、多轮会话记忆工作流与 `/usage` 报表说明；

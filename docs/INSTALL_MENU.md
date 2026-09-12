@@ -1,5 +1,17 @@
 # 📋 管理菜单与向导交互说明
 
+## 🚀 快速一键执行命令
+
+在 VPS 终端中直接复制运行：
+- **👑 个人 VPS 极简 Root 模式直装（推荐）**：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
+  ```
+- **🛡️ 生产最小权限沙箱模式**：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
+  ```
+
 ## 🎮 普通使用与菜单交互
 
 运行 `bash install.sh`，先显示管理菜单：
@@ -8,8 +20,8 @@
 =============================================
  Antigravity Telegram Remote 管理菜单
 =============================================
-  1) 安装 / 更新
-  2) 卸载
+  1) 安装 / 更新 (标准沙箱模式；如需 Root 模式请退出执行 bash install.sh --root)
+  2) 卸载服务
   0) 退出
 
 请输入选项 [0/1/2]：

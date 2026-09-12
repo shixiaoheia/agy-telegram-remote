@@ -40,15 +40,19 @@ fail() { printf '\n错误：%s\n' "$*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
+=============================================
+ Antigravity Telegram Remote 安装与管理脚本
+=============================================
 用法：
-  bash install.sh                         显示菜单：安装/更新、卸载、退出
-  bash install.sh --install               直接进入安装 / 更新（三步向导）
-  bash install.sh --root                  以 root 用户模式运行服务（适合 VPS 直接管理）
-  bash install.sh --enable-auto-approve    更新时明确改为自动审批
-  bash install.sh --reauth                 重新进入 Google 授权
-  bash install.sh --ref COMMIT_OR_BRANCH   测试已审阅的提交或分支
-  bash install.sh --uninstall              移除服务，保留程序、配置和数据
-  bash install.sh --uninstall --purge      二次确认后彻底清理本项目数据
+  bash install.sh                         显示管理菜单（安装/更新、卸载、退出）
+  bash install.sh --root                  👑 极简 Root 模式安装/更新（推荐个人独立 VPS，直接以 root 运行）
+  bash install.sh --install               🛡️ 标准沙箱模式安装/更新（专有系统账户 agy-tg，多用户隔离）
+  bash install.sh --enable-auto-approve    更新时明确启用自动审批（跳过权限确认弹窗）
+  bash install.sh --reauth                 重新进入 Google 账号授权流程
+  bash install.sh --ref COMMIT_OR_BRANCH   安装指定 Git 提交 SHA 或分支
+  bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
+  bash install.sh --uninstall --purge      彻底清理（需输入 PURGE 二次确认，清除所有数据与账户）
+  bash install.sh --help                   显示此帮助说明
 EOF
 }
 
@@ -58,8 +62,8 @@ choose_operation() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 管理菜单'
   echo '============================================='
-  echo '  1) 安装 / 更新'
-  echo '  2) 卸载'
+  echo '  1) 安装 / 更新 (标准沙箱模式；如需 Root 模式请退出执行 bash install.sh --root)'
+  echo '  2) 卸载服务'
   echo '  0) 退出'
   echo
   while true; do
@@ -341,8 +345,13 @@ main() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 极简一键安装向导'
   echo '============================================='
-  echo '新安装默认自动审批，始终以非 root 账户运行。仅供完全信任的白名单用户使用。'
-  echo '正在准备系统依赖和已选择的项目版本……'
+  if [[ "$APP_USER" == "root" ]]; then
+    echo '👑 运行模式：个人 VPS 极简 Root 模式（运行账户: root，工作目录: /root）'
+  else
+    echo '🛡️ 运行模式：生产级安全沙箱模式（运行账户: agy-tg，工作目录: /srv/agy-workspace）'
+  fi
+  echo '⚡ 特性支持：默认开启自动审批（无头运行不挂起），仅供信任的白名单用户使用。'
+  echo '📦 正在准备系统依赖与核心运行环境……'
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 git curl ca-certificates procps util-linux adduser
@@ -506,13 +515,17 @@ main() {
   done
   [[ "$ready" == 1 ]] || fail '服务没有通过应用级就绪检查；请查看 journalctl 日志。'
   COMMITTED=1
-  echo
-  echo '🎉 安装成功！服务已启动。'
-  echo "配置：$CONFIG"
-  echo "工作目录：$work"
-  echo "回退备份：$BACKUP（root 私有，包含旧配置；请勿上传）"
-  echo "查看日志：sudo journalctl -u $SERVICE -n 80 --no-pager"
-  echo '请在 Telegram 发送 /start，再做一条只读任务。'
+  echo '============================================='
+  echo ' 🎉 安装成功！后台守护服务已启动就绪'
+  echo '============================================='
+  echo "• ⚙️ 配置文件：$CONFIG"
+  echo "• 📁 核心工作目录：$work"
+  echo "• 👤 运行系统账户：$APP_USER"
+  echo "• 💾 升级回退备份：$BACKUP (root 私有，包含旧配置，请勿上传)"
+  echo "• 📋 查看服务状态：sudo systemctl status $SERVICE --no-pager"
+  echo "• 📜 查看实时日志：sudo journalctl -u $SERVICE -f"
+  echo '━━━━━━━━━━━━━━━━━━━━'
+  echo '👉 部署完成！请打开 Telegram 向你的机器人私聊发送 /start 开始体验。'
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

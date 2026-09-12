@@ -200,67 +200,83 @@ flowchart LR
 
 ## ⚡ 极简三步安装
 
-在具备 root 或 sudo 权限的 SSH 终端中执行以下命令（**先下载脚本，再用 bash 交互运行**）：
+### 🚀 一键安装命令（在 VPS 的 SSH 终端复制执行）
 
+根据你的使用场景，任选以下**一行命令**直接复制粘贴运行：
+
+#### 👑 方式一：个人独享 VPS 极简 Root 模式（🔥 强烈推荐 · 省心免折腾）
+> **适用**：个人专用的独立 VPS，直接以 root 账户运行管理，免除多系统用户权限切换、附加组冲突与环境隔离烦恼！
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
+```
+
+#### 🛡️ 方式二：生产级最小权限沙箱模式（多用户 / 严格隔离）
+> **适用**：共享服务器或对权限有严苛要求的生产环境，系统将创建独立受限账户 `agy-tg` 并限制在 `/srv/agy-workspace` 沙箱中运行。
+```bash
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
 ```
 
 > [!TIP]
-> **为什么不建议 `curl ... | bash`？**
-> 本项目向导需要在终端中安全接收隐藏输入的 Bot Token 与数字 ID，先下载后运行能确保最佳的交互体验与安全审阅。
+> **💡 为什么使用 `curl ... -o install.sh && bash install.sh`？**
+> 本项目的安装向导需要在交互式终端中安全接收**密码模式隐藏输入的 Bot Token**、数字 ID，并完成 Google 账号的 OAuth 浏览器授权跳转。若直接使用 `curl ... | bash` 管道会抢占终端标准输入（stdin），导致交互卡死。使用 `-o install.sh && bash` 可以在一条命令中静默下载并立即启动交互，既安全顺畅，又无需多步敲击！
 
-### 📋 安装向导流程一览
+---
 
-运行 `bash install.sh` 后将首先显示**管理菜单**：
+### 📋 极简三步安装流程拆解
 
-```text
-=============================================
- Antigravity Telegram Remote 管理菜单
-=============================================
-  1) 安装 / 更新
-  2) 卸载
-  0) 退出
-
-请输入选项 [0/1/2]：1
-```
-
-选择 `1` 进入三步极简安装向导：
+执行命令后，安装器将引导你完成仅需 1 分钟的极简三步配置：
 
 ```text
 =============================================
  Antigravity Telegram Remote 极简一键安装向导
 =============================================
+👑 运行模式：个人 VPS 极简 Root 模式（运行账户: root，工作目录: /root）
+⚡ 特性支持：默认开启自动审批（无头运行不挂起），仅供信任的白名单用户使用。
+📦 正在准备系统依赖与核心运行环境……
 
 步骤 1/3：请输入 Telegram Bot Token：
-> （密码模式输入隐藏，保障凭据安全）
+> （输入时界面自动隐藏密码字符，直接回车确认）
 
-步骤 2/3：请输入 Telegram 数字 ID：
+步骤 2/3：请输入 Telegram 数字 ID（主管理员）：
 > 123456789
 
-自动准备运行账户、/srv/agy-workspace、系统依赖与 Google agy……
-
 步骤 3/3：Google 账号授权
-- 若已有历史有效授权，将自动识别并复用；
-- 首次授权请打开终端显示的授权链接 → 浏览器登录 → 粘贴授权码；
-- 进入 agy 终端主界面后输入 /exit 即可返回安装器。
+• 若已有历史有效授权，将自动识别并复用；
+• 首次授权请在终端打开显示的授权链接 → 浏览器登录 Google → 复制授权码粘贴回车；
+• 进入 agy 终端交互主界面后，输入 /exit 回车即可返回安装向导继续。
 
-正在验证 agy 回复、Telegram 接口及服务自检……
-
-🎉 安装成功！后台守护服务已启动就绪。
+=============================================
+ 🎉 安装成功！后台守护服务已启动就绪
+=============================================
+• ⚙️ 配置文件：/etc/agy-telegram-remote/config.env
+• 📁 核心工作目录：/root
+• 👤 运行系统账户：root
+• 📋 查看服务状态：sudo systemctl status agy-telegram-remote --no-pager
+• 📜 查看实时日志：sudo journalctl -u agy-telegram-remote -f
+━━━━━━━━━━━━━━━━━━━━
+👉 部署完成！请打开 Telegram 向你的机器人私聊发送 /start 开始体验。
 ```
 
 > [!TIP]
 > **平滑升级**：后续版本更新时，直接重新执行 `bash install.sh` 并选 `1`，步骤 1 和步骤 2 直接按回车即可完整保留原有的 Token、白名单与运行配置，平滑无缝升级！详见 [管理菜单说明文档](docs/INSTALL_MENU.md)。
 
-> [!TIP]
-> **👑 个人独立 VPS 的 Root 极简模式**：
-> 如果你的 VPS 为个人独享主机（无需多用户沙箱隔离），推荐使用 `--root` 参数一键部署：
-> ```bash
-> bash install.sh --root
-> ```
-> 守护进程将直接以 root 身份运行于 `/root` 环境，免除多系统用户切换与权限隔离的繁琐配置。
+---
+
+### 🛠️ 常用管理与运维命令速查
+
+安装完成后，脚本自动保存在本地，随时可在终端直接运行管理：
+
+| 运维场景 | 执行命令 | 功能说明 |
+| :--- | :--- | :--- |
+| 🎮 **打开交互管理菜单** | `bash install.sh` | 弹出管理菜单，支持一键升级、更新配置或安全卸载 |
+| 🔄 **一键无缝平滑升级** | `bash install.sh` 选 `1` | 自动保留原 Token、白名单、多用户偏好与登录凭据，静默升级代码 |
+| 👑 **升级并切换为 Root 模式** | `bash install.sh --root` | 保留配置并平滑切换到 Root 极简模式运行 |
+| 🔑 **重新进行 Google 授权** | `bash install.sh --reauth` | 强制唤起 Google 浏览器 OAuth 重新授权 |
+| 📊 **查看后台服务实时状态** | `sudo systemctl status agy-telegram-remote` | 查看 systemd 守护进程状态、PID 与内存 |
+| 📜 **查看实时运行日志** | `sudo journalctl -u agy-telegram-remote -f` | 追踪 Bot 消息接收、执行与回传日志 |
+| 🔄 **重启后台服务** | `sudo systemctl restart agy-telegram-remote` | 重新载入并启动守护进程（亦可在私聊发送 `/restart`） |
+| 🗑️ **安全卸载服务** | `bash install.sh --uninstall` | 停止并移除服务，完整保留代码、配置、工作区资产与凭据 |
+| 💥 **彻底清理（Purge 模式）** | `bash install.sh --uninstall --purge` | 二次输入 `PURGE` 确认后，彻底清除项目所有数据与运行账户 |
 
 ---
 
