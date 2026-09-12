@@ -33,7 +33,7 @@ curl -fsSLO https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/ma
 bash install.sh
 ```
 
-不要使用 `curl ... | bash`：本项目向导需要终端输入。安装脚本会读取 GitHub 上当前 `main` 并显示使用的精确提交号；先审阅代码再以特权账户运行。为固定已审阅的版本，可使用 `bash install.sh --ref 完整提交SHA`。
+不要使用 `curl ... | bash`：本项目向导需要终端输入。安装脚本会读取 GitHub 上当前 `main` 并显示使用的精确提交号；先审阅代码再以特权账户运行。为固定已审阅的版本，可使用 `bash install.sh --ref 完整提交SHA`。直接运行会先显示管理菜单（安装/更新、卸载、退出），选 1 即进入三步向导；也可以通过 `bash install.sh --install` 直接进入向导，详见 [管理菜单说明文档](docs/INSTALL_MENU.md)。
 
 界面示意：
 
@@ -172,7 +172,7 @@ bash install.sh --reauth
 
 ## 卸载
 
-默认只移除服务，**保留程序和全部数据**，不再显示开头的安装/卸载菜单：
+默认只移除服务，**保留程序和全部数据**；可在管理菜单中选择 `2` 卸载，或直接使用命令行：
 
 ```bash
 bash install.sh --uninstall

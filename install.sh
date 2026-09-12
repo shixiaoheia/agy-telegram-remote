@@ -21,7 +21,7 @@ DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/agy-telegram-remote-deploy.lock}
 REF=main
 ENABLE_AUTO=0
 REAUTH=0
-MODE=install
+MODE=menu
 PURGE=0
 TRANSACTION=0
 COMMITTED=0
@@ -41,13 +41,50 @@ fail() { printf '\n错误：%s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 用法：
-  bash install.sh                         安装 / 更新（三步向导）
+  bash install.sh                         显示菜单：安装/更新、卸载、退出
+  bash install.sh --install               直接进入安装 / 更新（三步向导）
   bash install.sh --enable-auto-approve    更新时明确改为自动审批
   bash install.sh --reauth                 重新进入 Google 授权
   bash install.sh --ref COMMIT_OR_BRANCH   测试已审阅的提交或分支
   bash install.sh --uninstall              移除服务，保留程序、配置和数据
   bash install.sh --uninstall --purge      二次确认后彻底清理本项目数据
 EOF
+}
+
+# This menu only selects a mode. No credentials or system changes happen here.
+choose_operation() {
+  local choice rc
+  echo '============================================='
+  echo ' Antigravity Telegram Remote 管理菜单'
+  echo '============================================='
+  echo '  1) 安装 / 更新'
+  echo '  2) 卸载'
+  echo '  0) 退出'
+  echo
+  while true; do
+    printf '请输入选项 [0/1/2]： '
+    if IFS= read -r choice; then
+      case "$choice" in
+        1) MODE=install; return 0 ;;
+        2) MODE=uninstall; return 0 ;;
+        0)
+          MODE="exit"
+          echo '已退出，未开始任何安装或卸载操作。'
+          return 0
+          ;;
+        *) echo '请输入 1、2 或 0，然后回车。' ;;
+      esac
+    else
+      rc=$?
+      if [[ "$rc" -eq 1 ]]; then
+        MODE="exit"
+        echo
+        echo '检测到输入结束，已退出，未开始安装或卸载。'
+        return 0
+      fi
+      fail "无法读取菜单选项（read 返回 $rc）。"
+    fi
+  done
 }
 
 supported_os() {
@@ -235,28 +272,39 @@ uninstall() {
 
 main() {
   local original_args=("$@")
+  local direct_install=0
   while (( $# )); do
     case "$1" in
       --help|-h) usage; return ;;
-      --enable-auto-approve) ENABLE_AUTO=1 ;;
-      --reauth) REAUTH=1 ;;
+      --install) MODE=install ;;
+      --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
+      --reauth) REAUTH=1; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
       --purge) PURGE=1 ;;
       --ref)
         (( $# >= 2 )) || fail '--ref 缺少值。'
         REF="$2"; shift
+        direct_install=1
         [[ "$REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && "$REF" != *..* ]] || fail '非法 Git ref。'
         ;;
       *) fail "未知参数：$1" ;;
     esac
     shift
   done
+  # Existing explicit install flags remain shortcuts; bare invocation shows the menu.
+  if [[ "$MODE" == menu && "$direct_install" == 1 ]]; then
+    MODE=install
+  fi
   [[ "$MODE" == uninstall || "$PURGE" == 0 ]] || fail '--purge 必须与 --uninstall 一起使用。'
   [[ -t 0 && -t 1 ]] || fail '请在可交互 SSH 终端运行，不要把脚本通过管道传给 bash。'
+  if [[ "$MODE" == menu ]]; then
+    choose_operation
+  fi
+  [[ "$MODE" != exit ]] || return 0
   if [[ "$EUID" -ne 0 ]]; then
     command -v sudo >/dev/null || fail '请使用 root 或具备 sudo 权限的账户。'
     exec sudo /usr/bin/env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
-      /bin/bash "$0" "${original_args[@]}"
+      /bin/bash "$0" "${original_args[@]}" "--$MODE"
   fi
   [[ -r /etc/os-release ]] || fail '无法识别系统。'
   # Only the system-owned OS descriptor is sourced. Never source a .env file.

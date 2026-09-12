@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — management menu before sequential setup
+
+基线提交：`da49dac47e2b3305c1ca19a01597159864c16d07`。
+
+- **安装器入口管理菜单**（`install.sh`）：
+  - 默认执行 `bash install.sh` 先显示管理菜单：1) 安装 / 更新、2) 卸载、0) 退出；
+  - 选项 1 进入原有的三步向导（Token → ID → Google 授权），保留 manage.py 顺序输入；
+  - 选项 2 进入原有的卸载流程与 UNINSTALL 确认；
+  - 选项 0 或 EOF 安全退出，未进行任何提权、获取部署锁或系统修改；
+  - 新增 `--install` 参数直接跳过菜单执行安装；保留 `--enable-auto-approve`、`--reauth`、`--ref`、`--uninstall`、`--purge` 等命令行快捷方式；
+  - sudo 提权重启时自动透传选定模式参数，避免重复提示菜单。
+- **文档与测试**：
+  - 新增管理菜单说明文档 [`docs/INSTALL_MENU.md`](docs/INSTALL_MENU.md)；
+  - 新增菜单交互与顺序测试 [`tests/test_install_menu.py`](tests/test_install_menu.py)（23 项新测试，全套测试增至 134 项）。
+
 ## Unreleased — account test hardening, deferred startup readiness, and deploy mutex
 
 审阅基线：`8d72c4e233f480dca81ddc7565872500c4a7e776`。
