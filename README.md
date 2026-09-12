@@ -65,10 +65,11 @@ bash install.sh
 安装器会自动执行以下工作：
 
 - 安装器由 root 或具备 sudo 权限的管理账户运行；新建不带 sudo/额外组权限的专用系统账户 `agy-tg`（仅用于运行后台服务，不用于执行安装器）；创建默认工作目录并检查路径。
+- 使用部署排他互斥锁（`/run/lock/agy-telegram-remote-deploy.lock`），防止并发运行多个安装、更新或卸载流程相互干扰覆盖；`--help` 保持纯只读无副作用，不抢占锁。
 - 把**程序代码放在 root 所有的发布目录**，使用系统 `/usr/bin/python3`，不再执行旧用户可写虚拟环境中的解释器。
 - 创建候选配置，运行离线测试和 Telegram 检查，再停止旧服务，授权并执行 agy 自检。
 - 自检与普通任务共用 `agy_runner.py`，统一 `--output-format json`、账户、HOME、工作目录及权限参数；自检超时单独设为 90 秒。
-- 备份旧配置、旧 unit 和旧程序入口，切换发布；必须通过实际 Bot 初始化检查才显示成功。切换失败会尝试恢复旧入口/配置/unit。
+- 备份旧配置、旧 unit 和旧程序入口，切换发布；服务就绪验证严格区分基础初始化与首次轮询就绪（`polling_ready`），必须在首次成功连接 Telegram 长轮询建连成功后才标记就绪；服务退出或崩溃时即时撤销就绪标志。切换失败会尝试恢复旧入口/配置/unit。
 
 首次安装中途取消可能已安装系统依赖或创建账户；不会谎称所有系统改动都撤销。更新会停止旧服务中的任务，先用 `/status` 检查。不要一边手工运行 agy，一边更新。
 
@@ -128,7 +129,8 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 | `/home/agy-tg` | agy 安装、缓存与 Google 登录；不要上传 |
 | `/srv/agy-workspace` | 默认工作目录，或升级时保留的原有子目录 |
 | `/var/lib/agy-telegram-remote` | 私有任务记录及更新水位 |
-| `/run/agy-telegram-remote/ready.json` | 当前服务初始化就绪标志 |
+| `/run/agy-telegram-remote/ready.json` | 当前服务初始化及轮询就绪标志 |
+| `/run/lock/agy-telegram-remote-deploy.lock` | 安装/更新/卸载操作部署互斥锁 |
 | `/var/backups/agy-telegram-remote/` | root 私有的升级/回退备份，可能含旧凭据；不要上传 |
 
 支持的配置项见 [.env.example](.env.example)。只解析有限 dotenv 语法，不执行 `.env`，不展开 `$变量` 或命令替换。部署目录不接受空格、`%`、路径穿越等特殊形式；不支持的旧配置会明确报错，不静默丢弃。

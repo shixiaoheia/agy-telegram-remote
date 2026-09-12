@@ -40,4 +40,6 @@ jobs:
           apt-get update
           apt-get install -y adduser passwd bash
       - name: Run Debian 12 real account creation tests
-        run: bash scripts/test_account_debian12.sh
+        env:
+          AGY_TEST_ISOLATED_CONTAINER: "1"
+        run: bash scripts/test_account_debian12.sh --confirm-isolated-environment

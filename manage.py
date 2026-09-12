@@ -142,7 +142,9 @@ def main() -> int:
             data = read_json(args.file, 1024)
             return 0 if (
                 isinstance(data, dict) and args.pid > 0
-                and data.get("pid") == args.pid and data.get("initialized") is True
+                and data.get("pid") == args.pid
+                and data.get("initialized") is True
+                and data.get("polling_ready") is True
                 and isinstance(data.get("started_at"), (int, float))
                 and 0 <= time.time() - data["started_at"] < 120
             ) else 1

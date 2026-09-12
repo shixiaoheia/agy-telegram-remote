@@ -71,6 +71,8 @@ class Bridge:
                  runner: Runner, ready_file: Path | None = None):
         self.settings, self.api, self.store, self.runner = settings, api, store, runner
         self.ready_file = ready_file
+        self.polling_ready = False
+        self._started_at = time.time()
         self.slot: Job | None = None
         self.stop = asyncio.Event()
         self.offset = store.offset()
@@ -252,9 +254,12 @@ class Bridge:
         self.store.recover_interrupted()
         if self.ready_file is not None:
             atomic_json(self.ready_file, {
-                "pid": os.getpid(), "initialized": True, "started_at": time.time(),
+                "pid": os.getpid(),
+                "initialized": True,
+                "polling_ready": False,
+                "started_at": self._started_at,
             })
-        LOG.info("READY pid=%s", os.getpid())
+        LOG.info("INITIALIZED pid=%s", os.getpid())
 
     async def run(self) -> None:
         try:
@@ -269,6 +274,19 @@ class Bridge:
                         "getUpdates", offset=self.offset, limit=25, timeout=10,
                         allowed_updates=["message"],
                     )
+                    if not isinstance(updates, list):
+                        raise TelegramError()
+                    if not self.polling_ready:
+                        self.polling_ready = True
+                        if self.ready_file is not None:
+                            atomic_json(self.ready_file, {
+                                "pid": os.getpid(),
+                                "initialized": True,
+                                "polling_ready": True,
+                                "started_at": self._started_at,
+                                "ready_at": time.time(),
+                            })
+                        LOG.info("POLLING_READY pid=%s", os.getpid())
                     await self.consume_updates(updates)
                     backoff = 1.0
                 except TelegramError as error:

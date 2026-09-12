@@ -1,5 +1,7 @@
 import asyncio
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -241,3 +243,118 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         for text in ("/status", "/help", "/unknown"):
             await self.bridge.handle(update(text))
         self.assertEqual(self.runner.calls, 0)
+
+    async def test_update_id_smaller_than_offset_dropped_for_replay_protection(self):
+        self.bridge.offset = 500
+        await self.bridge.consume_updates([update("replayed task", update_id=400)])
+        self.assertEqual(self.runner.calls, 0)
+        self.assertEqual(self.bridge.offset, 500)
+
+
+class ReadinessTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.settings = settings_at(Path(self.temp.name))
+        self.ready_file = Path(self.temp.name) / "ready.json"
+        self.api = FakeAPI()
+        self.store = Store(self.settings.state_dir, self.settings.allowed,
+                           self.settings.max_reply, 7, self.settings.token)
+        self.runner = FakeRunner()
+        self.bridge = Bridge(self.settings, self.api, self.store, self.runner, self.ready_file)
+
+    async def asyncTearDown(self):
+        self.bridge.stop.set()
+        self.store.close()
+        self.temp.cleanup()
+
+    async def test_initialization_marks_not_polling_ready(self):
+        await self.bridge.initialize()
+        self.assertTrue(self.ready_file.is_file())
+        from state_store import read_json
+        data = read_json(self.ready_file, 1024)
+        self.assertTrue(data.get("initialized"))
+        self.assertFalse(data.get("polling_ready"))
+
+        from manage import main
+        with patch("sys.argv", ["manage.py", "check-ready", "--file", str(self.ready_file), "--pid", str(os.getpid())]):
+            self.assertEqual(main(), 1)
+
+    async def test_first_polling_success_marks_ready_and_exit_revokes(self):
+        self.api.backlog = []
+        original_call = self.api.call
+
+        async def poll_call(method, **payload):
+            if method == "getUpdates":
+                await asyncio.sleep(0.01)
+                return self.api.backlog
+            return await original_call(method, **payload)
+
+        self.api.call = poll_call
+        task = asyncio.create_task(self.bridge.run())
+        for _ in range(50):
+            if self.bridge.polling_ready:
+                break
+            await asyncio.sleep(0.02)
+        self.assertTrue(self.bridge.polling_ready)
+
+        from state_store import read_json
+        data = read_json(self.ready_file, 1024)
+        self.assertTrue(data.get("polling_ready"))
+
+        from manage import main
+        with patch("sys.argv", ["manage.py", "check-ready", "--file", str(self.ready_file), "--pid", str(os.getpid())]):
+            self.assertEqual(main(), 0)
+
+        # Stop the bridge and verify exit revokes ready file
+        self.bridge.stop.set()
+        await task
+        self.assertFalse(self.ready_file.exists())
+
+    async def test_first_polling_failure_does_not_mark_ready(self):
+        async def failing_call(method, **payload):
+            if method == "getMe":
+                return {"id": 100, "is_bot": True}
+            if method == "getWebhookInfo":
+                return {"url": ""}
+            if method == "getUpdates":
+                raise TelegramError(code=401)
+            raise AssertionError(method)
+        self.api.call = failing_call
+
+        with self.assertRaises(TelegramError):
+            await self.bridge.run()
+
+        self.assertFalse(self.bridge.polling_ready)
+        self.assertFalse(self.ready_file.exists())
+
+    async def test_first_round_messages_processed_exactly_once(self):
+        self.api.backlog = [update("first message", update_id=10)]
+        original_call = self.api.call
+
+        async def poll_call(method, **payload):
+            if method == "getUpdates":
+                await asyncio.sleep(0.01)
+                if payload.get("offset") == -1:
+                    return []
+                res = list(self.api.backlog)
+                self.api.backlog = []
+                return res
+            return await original_call(method, **payload)
+
+        self.api.call = poll_call
+        task = asyncio.create_task(self.bridge.run())
+        for _ in range(50):
+            if self.bridge.polling_ready and self.runner.calls == 1:
+                break
+            await asyncio.sleep(0.02)
+
+        self.assertTrue(self.bridge.polling_ready)
+        self.assertEqual(self.runner.calls, 1)
+
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.runner.calls, 1)
+        self.bridge.stop.set()
+        await task

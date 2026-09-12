@@ -16,6 +16,7 @@ BACKUPS=/var/backups/agy-telegram-remote
 UNIT=/etc/systemd/system/agy-telegram-remote.service
 SERVICE='agy-telegram-remote'
 REPO=https://github.com/shixiaoheia/agy-telegram-remote.git
+DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/agy-telegram-remote-deploy.lock}"
 
 REF=main
 ENABLE_AUTO=0
@@ -120,6 +121,19 @@ ensure_service_account() {
       echo "  gpasswd -d $APP_USER users" >&2
     fi
     fail "账户存在额外组权限（实际组：$user_group_list），请先人工核对。"
+  fi
+}
+
+acquire_deploy_lock() {
+  local lock_dir
+  lock_dir="$(dirname -- "$DEPLOY_LOCK_FILE")"
+  [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || fail "锁定目录异常：$lock_dir"
+  [[ "$(stat -c %u "$lock_dir")" == 0 ]] || fail "锁定目录不受 root 管理：$lock_dir"
+  [[ ! -L "$DEPLOY_LOCK_FILE" ]] || fail "锁定文件是符号链接：$DEPLOY_LOCK_FILE"
+  exec 9>>"$DEPLOY_LOCK_FILE"
+  chmod 0600 "$DEPLOY_LOCK_FILE" 2>/dev/null || true
+  if ! flock -n 9; then
+    fail "已有安装、更新或卸载进程正在运行，请等待其完成。"
   fi
 }
 
@@ -245,6 +259,7 @@ main() {
   [[ -r /etc/os-release ]] || fail '无法识别系统。'
   # Only the system-owned OS descriptor is sourced. Never source a .env file.
   . /etc/os-release
+  acquire_deploy_lock
   supported_os "$ID" "$VERSION_ID" || fail '仅支持 Debian 12+ / Ubuntu 22.04+。'
   [[ -d /run/systemd/system ]] || fail '需要正在运行的 systemd（不支持普通容器或 Alpine）。'
   systemctl show-environment >/dev/null || fail '无法连接 systemd。'

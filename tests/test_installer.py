@@ -262,6 +262,61 @@ ensure_service_account
                 else:
                     self.assertNotIn("gpasswd -d agy-tg users", result.stderr)
 
+    def test_account_script_refuses_without_explicit_isolation(self):
+        script = str(ROOT / "scripts/test_account_debian12.sh")
+        # Without flag and without env var
+        r1 = subprocess.run(["bash", script], capture_output=True, text=True)
+        self.assertEqual(r1.returncode, 2)
+        self.assertIn("--confirm-isolated-environment", r1.stderr)
+
+        # With flag but without env var
+        r2 = subprocess.run(["bash", script, "--confirm-isolated-environment"],
+                            capture_output=True, text=True)
+        self.assertEqual(r2.returncode, 2)
+        self.assertIn("AGY_TEST_ISOLATED_CONTAINER=1", r2.stderr)
+
+        # With env var but without flag
+        r3 = subprocess.run(["bash", script], env=os.environ | {"AGY_TEST_ISOLATED_CONTAINER": "1"},
+                            capture_output=True, text=True)
+        self.assertEqual(r3.returncode, 2)
+        self.assertIn("--confirm-isolated-environment", r3.stderr)
+
+    def test_account_script_safety_and_scoped_cleanup(self):
+        content = (ROOT / "scripts/test_account_debian12.sh").read_text(encoding="utf-8")
+        self.assertIn('TEST_USER="test-agy-${RAND_SUFFIX}"', content)
+        self.assertIn('[[ "$TEST_USER" == "agy-tg" || "$TEST_HOME" == "/home/agy-tg" ]]', content)
+        self.assertIn('"$CREATED_USER" =~ ^test-agy-', content)
+        self.assertNotIn('userdel -r "$APP_USER" 2>/dev/null || userdel "$APP_USER"', content)
+
+    def test_deploy_lock_mutual_exclusion(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_path = Path(temp) / "deploy.lock"
+            code = r'''
+source "$1"
+DEPLOY_LOCK_FILE="$2"
+exec 8>>"$DEPLOY_LOCK_FILE"
+flock -n 8
+acquire_deploy_lock
+'''
+            result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(lock_path)],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("已有安装、更新或卸载进程正在运行", result.stderr)
+
+    def test_help_does_not_acquire_lock(self):
+        with tempfile.TemporaryDirectory() as temp:
+            lock_path = Path(temp) / "deploy.lock"
+            code = r'''
+DEPLOY_LOCK_FILE="$2"
+exec 8>>"$DEPLOY_LOCK_FILE"
+flock -n 8
+bash "$1" --help
+'''
+            result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(lock_path)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("用法：", result.stdout)
+
 class SmokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_smoke_uses_same_runner_and_requires_exact_reply(self):
         with tempfile.TemporaryDirectory() as temp:

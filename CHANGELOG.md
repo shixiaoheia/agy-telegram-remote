@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased — account test hardening, deferred startup readiness, and deploy mutex
+
+审阅基线：`8d72c4e233f480dca81ddc7565872500c4a7e776`。
+
+- **账户测试脚本防误用与隔离强化**（`scripts/test_account_debian12.sh`）：
+  - 强制要求显式传入 `--confirm-isolated-environment` 且环境变量 `AGY_TEST_ISOLATED_CONTAINER=1`，防止在非隔离环境或生产宿主机误执行；
+  - 改用随机测试账户名 `test-agy-${RAND_SUFFIX}` 与 `/home/${TEST_USER}`，绝对禁止使用 `agy-tg` 或 `/home/agy-tg`；执行前若发现任何同名测试资源已存在则直接拒绝执行；
+  - 注册严格的 `trap EXIT` 清理，精确跟踪并清理本次测试创建的用户、主组、测试附加组与临时家目录，移除所有无差别清理与盲目 `|| true`；
+  - CI 容器工作流增加隔离参数并补充拒绝运行与资源存在的负向单元测试。
+- **服务就绪判定递延至首次轮询成功**（`bot.py`、`manage.py`）：
+  - 严格区分进程基础初始化完成与首次轮询就绪（`polling_ready`）；
+  - 仅在首次长轮询请求成功返回时才在 `ready.json` 写入 `polling_ready: true`，首轮返回的消息确保仅被处理一次；
+  - 若首次轮询遭遇 401、409 或网络异常，不写入就绪标志；
+  - 服务退出或崩溃时通过 `finally` 撤销就绪文件；
+  - `manage.py check-ready` 联合校验 PID、时间窗口（120秒内）及 `polling_ready: true`。
+- **安装器部署排他互斥锁**（`install.sh`）：
+  - 使用 `flock -n` 锁定 `/run/lock/agy-telegram-remote-deploy.lock`，杜绝并发执行安装、更新或卸载导致的配置覆盖与状态错乱；
+  - `--help` 参数保持无副作用，不抢占锁也不触发特权检查。
+- **Telegram update_id 边界与防重放核验**（Task 3）：
+  - 调研 Telegram 官方规范关于空闲 7 天以上可能随机重置 `update_id` 的行为；由于盲目接受小 ID 会破坏针对网络重传与代理乱序的防重放保护，将其记录为**待验证项（Pending Verification）**，完整保留原有的 `uid < self.offset` 防重放机制并补充回归测试，不盲目修改核心 offset 逻辑。
+- **测试覆盖扩展**：
+  - 单元测试增至 110 项，新增用例覆盖就绪标记递延/撤销、部署排他锁、测试脚本防误用门禁及 `update_id` 防重放逻辑。
+
 ## Unreleased — dedicated service account without default user groups
 
 复核基线：`fa51d06340ba1eac3b3ccd27d35876442031e2ed`。
