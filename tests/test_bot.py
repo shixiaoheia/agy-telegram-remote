@@ -92,8 +92,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             worker = self.bridge.slot.worker
             if worker:
                 await asyncio.wait_for(worker, 2)
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
         self.store.close()
         self.temp.cleanup()
+
+    async def handle(self, event):
+        await self.bridge.handle(event)
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
 
     async def finish_job(self):
         if self.bridge.slot and self.bridge.slot.worker:
@@ -106,21 +113,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await start(self.settings, None)
 
     async def test_unauthorized_user_and_group_ignored(self):
-        await self.bridge.handle(update("task", user=999))
-        await self.bridge.handle(update("task", chat_type="group"))
+        await self.handle(update("task", user=999))
+        await self.handle(update("task", chat_type="group"))
         self.assertEqual(self.runner.calls, 0)
         self.assertEqual(self.api.messages, [])
 
     async def test_id_private_without_authorization(self):
-        await self.bridge.handle(update("/id", user=999))
+        await self.handle(update("/id", user=999))
         self.assertIn("999", self.api.messages[0][1])
         self.assertEqual(self.runner.calls, 0)
 
     async def test_one_job_per_workspace(self):
         self.runner.hold = True
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
         await self.runner.started.wait()
-        await self.bridge.handle(update("other task", user=67890))
+        await self.handle(update("other task", user=67890))
         self.assertEqual(self.runner.calls, 1)
         self.assertIn("已有任务", self.api.messages[-1][1])
         self.runner.finish.set()
@@ -130,7 +137,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.api.accept_gate = asyncio.Event()
         task = asyncio.create_task(self.bridge.handle(update("task")))
         await asyncio.sleep(0)
-        await self.bridge.handle(update("/cancel"))
+        await self.handle(update("/cancel"))
         self.api.accept_gate.set()
         await task
         await self.finish_job()
@@ -138,35 +145,36 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancel_active_task(self):
         self.runner.hold = True
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
         await self.runner.started.wait()
-        await self.bridge.handle(update("/cancel"))
+        await self.handle(update("/cancel"))
         await self.finish_job()
         self.assertEqual(self.store.load(12345)["outcome"], "cancelled")
         self.assertEqual(self.runner.calls, 1)
 
     async def test_other_user_cannot_cancel(self):
         self.runner.hold = True
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
         await self.runner.started.wait()
-        await self.bridge.handle(update("/cancel", user=67890))
+        await self.handle(update("/cancel", user=67890))
         self.assertFalse(self.bridge.slot.cancel.is_set())
         self.runner.finish.set()
         await self.finish_job()
 
     async def test_delivery_failure_keeps_result_without_rerun(self):
         self.api.fail_at = {2}
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
         self.assertEqual(self.store.load(12345)["delivery"], "failed_or_partial")
-        await self.bridge.handle(update("/last"))
+        await self.handle(update("/last"))
         self.assertEqual(self.runner.calls, 1)
         self.assertIn("the result", self.api.messages[-1][1])
 
     async def test_acceptance_failure_does_not_execute(self):
         self.api.fail_at = {1}
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
+        await self.finish_job()
         self.assertEqual(self.runner.calls, 0)
         self.assertEqual(self.store.load(12345)["outcome"], "not_started")
 
@@ -177,18 +185,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.store.load(12345)["text"], "the result")
             await original_send(chat, text)
         self.api.send = checked
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
         await self.finish_job()
 
     async def test_last_cannot_read_other_user(self):
         self.store.save(12345, {"outcome": "success", "text": "secret"})
-        await self.bridge.handle(update("/last", user=67890))
+        await self.handle(update("/last", user=67890))
         self.assertNotIn("secret", self.api.messages[-1][1])
         self.assertEqual(self.runner.calls, 0)
 
     async def test_empty_result_does_not_say_task_completed_or_retry(self):
         self.runner.result = Result("no_text", detail="缺少回复")
-        await self.bridge.handle(update("task"))
+        await self.handle(update("task"))
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
         self.assertIn("没有自动重跑", self.api.messages[-1][1])
@@ -230,18 +238,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_storage_failure_blocks_new_tasks(self):
         with patch.object(self.store, "save", side_effect=OSError("disk full")):
-            await self.bridge.handle(update("task"))
+            await self.handle(update("task"))
         self.assertTrue(self.runner.blocked)
         self.assertEqual(self.runner.calls, 0)
 
     async def test_invalid_or_oversized_task_not_launched(self):
-        await self.bridge.handle(update("a" * (self.settings.max_prompt + 1)))
-        await self.bridge.handle(update("null\x00byte"))
+        await self.handle(update("a" * (self.settings.max_prompt + 1)))
+        await self.handle(update("null\x00byte"))
         self.assertEqual(self.runner.calls, 0)
 
     async def test_status_help_unknown_commands_do_not_run_agy(self):
         for text in ("/status", "/help", "/unknown"):
-            await self.bridge.handle(update(text))
+            await self.handle(update(text))
         self.assertEqual(self.runner.calls, 0)
 
     async def test_update_id_smaller_than_offset_dropped_for_replay_protection(self):
@@ -249,6 +257,77 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.consume_updates([update("replayed task", update_id=400)])
         self.assertEqual(self.runner.calls, 0)
         self.assertEqual(self.bridge.offset, 500)
+
+
+    async def test_slow_last_does_not_delay_cancel_from_polling(self):
+        self.runner.hold = True
+        await self.bridge.consume_updates([update("task", update_id=1)])
+        await self.runner.started.wait()
+        job = self.bridge.slot
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = self.api.send
+
+        async def slow_send(chat, text):
+            if "任务执行中" in text:
+                entered.set()
+                await release.wait()
+            await original(chat, text)
+
+        self.api.send = slow_send
+        try:
+            await self.bridge.consume_updates([update("/last", update_id=2)])
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(
+                self.bridge.consume_updates([update("/cancel", update_id=3)]), 1)
+            self.assertTrue(job.cancel.is_set())
+            self.assertEqual(self.store.offset(), 4)
+            await self.finish_job()
+            self.assertEqual(self.runner.calls, 1)
+            self.assertEqual(self.store.load(12345)["outcome"], "cancelled")
+        finally:
+            release.set()
+            if self.bridge.reply_worker:
+                await self.bridge.reply_worker
+
+    async def test_slow_acceptance_does_not_block_cancel_or_start_task(self):
+        self.api.accept_gate = asyncio.Event()
+        try:
+            await self.bridge.consume_updates([update("task", update_id=1)])
+            job = self.bridge.slot
+            await asyncio.sleep(0)
+            await asyncio.wait_for(
+                self.bridge.consume_updates([update("/cancel", update_id=2)]), 1)
+            self.assertTrue(job.cancel.is_set())
+        finally:
+            self.api.accept_gate.set()
+        await self.finish_job()
+        self.assertEqual(self.runner.calls, 0)
+        self.assertEqual(self.store.load(12345)["outcome"], "not_started")
+
+    async def test_reply_queue_is_bounded_and_cancel_survives_overload(self):
+        self.runner.hold = True
+        await self.bridge.consume_updates([update("task", update_id=1)])
+        await self.runner.started.wait()
+        job = self.bridge.slot
+        for uid in range(2, 102):
+            await self.bridge.consume_updates([update("/status", update_id=uid)])
+        self.assertEqual(self.bridge.replies.qsize(), 32)
+        await self.bridge.consume_updates([update("/cancel", update_id=102)])
+        self.assertTrue(job.cancel.is_set())
+        self.assertEqual(self.bridge.replies.qsize(), 32)
+        await self.finish_job()
+
+    async def test_public_id_has_global_cooldown_without_user_map(self):
+        with patch("bot.time.monotonic", return_value=100):
+            for user in range(1000, 1100):
+                await self.bridge.consume_updates([update("/id", user=user, update_id=user)])
+        await self.bridge.reply_worker
+        self.assertEqual(len(self.api.messages), 1)
+        with patch("bot.time.monotonic", return_value=103):
+            await self.bridge.consume_updates([update("/id", user=2000, update_id=2000)])
+        await self.bridge.reply_worker
+        self.assertEqual(len(self.api.messages), 2)
+        self.assertEqual(self.runner.calls, 0)
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):
@@ -358,3 +437,55 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runner.calls, 1)
         self.bridge.stop.set()
         await task
+
+    async def test_initialization_transient_failures_retry_then_recover(self):
+        from unittest.mock import AsyncMock
+        for code, retry in ((0, 0), (429, 7), (503, 0)):
+            with self.subTest(code=code):
+                initialize = AsyncMock(side_effect=[TelegramError(code, retry), None])
+                async def elapsed(awaitable, timeout):
+                    awaitable.close()
+                    raise asyncio.TimeoutError()
+                with patch.object(self.bridge, "initialize", initialize), patch(
+                        "bot.asyncio.wait_for", side_effect=elapsed) as wait:
+                    await self.bridge.initialize_with_retry()
+                self.assertEqual(initialize.await_count, 2)
+                self.assertEqual(wait.call_args.args[1] if len(wait.call_args.args) > 1
+                                 else wait.call_args.kwargs["timeout"], max(1.0, retry))
+                self.assertEqual(self.runner.calls, 0)
+
+    async def test_initialization_permanent_errors_do_not_retry(self):
+        from unittest.mock import AsyncMock
+        for code in (400, 401, 403, 409):
+            with self.subTest(code=code):
+                initialize = AsyncMock(side_effect=TelegramError(code))
+                with patch.object(self.bridge, "initialize", initialize):
+                    with self.assertRaises(TelegramError):
+                        await self.bridge.initialize_with_retry()
+                self.assertEqual(initialize.await_count, 1)
+
+    async def test_stop_interrupts_initialization_backoff(self):
+        from unittest.mock import AsyncMock
+        entered = asyncio.Event()
+        async def fail():
+            entered.set()
+            raise TelegramError(429, 86400)
+        with patch.object(self.bridge, "initialize", side_effect=fail):
+            task = asyncio.create_task(self.bridge.run())
+            await entered.wait()
+            self.bridge.stop.set()
+            await asyncio.wait_for(task, 1)
+        self.assertFalse(self.bridge.polling_ready)
+        self.assertFalse(self.ready_file.exists())
+
+    async def test_shutdown_cancels_pending_control_delivery(self):
+        entered = asyncio.Event()
+        async def blocked_send(*args):
+            entered.set()
+            await asyncio.Event().wait()
+        self.api.send = blocked_send
+        self.bridge.queue_reply(12345, "pending")
+        await entered.wait()
+        self.bridge.stop.set()
+        await self.bridge.run()
+        self.assertTrue(self.bridge.reply_worker.done())

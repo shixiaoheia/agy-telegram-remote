@@ -116,6 +116,8 @@ class Settings:
 
     @classmethod
     def from_mapping(cls, original: Mapping[str, str]) -> "Settings":
+        if set(original) - KEYS:
+            raise ConfigError("配置包含未知项目，请检查配置项拼写。")
         values = DEFAULTS | dict(original)
         token = values.get("TELEGRAM_BOT_TOKEN", "")
         if not TOKEN_RE.fullmatch(token):

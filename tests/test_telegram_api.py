@@ -136,6 +136,7 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
             await worker
             self.assertEqual(store.load(12345)["delivery"], "failed_or_partial")
             await bridge.consume_updates([event("/last", 2)])
+            await bridge.reply_worker
             self.assertEqual(marker.read_text(), "run\n")
             self.assertIn("offline pipeline OK", self.requests[-1][1]["text"])
             self.assertEqual(store.offset(), 3)

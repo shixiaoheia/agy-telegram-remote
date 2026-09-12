@@ -77,6 +77,9 @@ class Bridge:
         self.stop = asyncio.Event()
         self.offset = store.offset()
         self._last_maintenance = 0.0
+        self.replies: asyncio.Queue[tuple[int, str]] = asyncio.Queue(maxsize=32)
+        self.reply_worker: asyncio.Task | None = None
+        self._next_id_reply = 0.0
 
     async def send_text(self, chat: int, text: str) -> bool:
         try:
@@ -86,6 +89,44 @@ class Bridge:
         except TelegramError as error:
             LOG.warning("telegram_delivery_failed code=%s", error.code)
             return False
+
+    def queue_reply(self, chat: int, text: str) -> None:
+        # Control replies must never hold up update ingestion or cancellation.
+        if self.stop.is_set():
+            return
+        try:
+            self.replies.put_nowait((chat, text))
+        except asyncio.QueueFull:
+            return
+        if self.reply_worker is None or self.reply_worker.done():
+            self.reply_worker = asyncio.create_task(self._send_replies())
+
+    async def _send_replies(self) -> None:
+        while not self.replies.empty():
+            chat, text = self.replies.get_nowait()
+            try:
+                await self.send_text(chat, text)
+            finally:
+                self.replies.task_done()
+
+    async def _accept_and_work(self, job: Job, prompt: str) -> None:
+        try:
+            accepted = await self.send_text(job.chat, f"任务 {job.job_id} 已接收，准备调用 agy。")
+            if not accepted or self.stop.is_set() or job.cancel.is_set():
+                self.store.save(job.user, {
+                    "job_id": job.job_id, "outcome": "not_started",
+                    "detail": "确认消息未成功投递、任务已取消或服务正在停止；没有启动 agy。",
+                    "delivery": "sent" if accepted else "failed",
+                })
+                return
+            await self._work(job, prompt)
+        except Exception as error:
+            self.runner.blocked = True
+            LOG.error("job_accept_failed id=%s type=%s", job.job_id, type(error).__name__)
+            self.queue_reply(job.chat, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。")
+        finally:
+            if self.slot is job:
+                self.slot = None
 
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
@@ -138,12 +179,16 @@ class Bridge:
         text = text.strip()
         command = text.split()[0].split("@")[0] if text.startswith("/") else ""
         if command == "/id":
-            await self.send_text(chat_id, f"你的 Telegram 数字 ID：{user}")
+            now = time.monotonic()
+            if now < self._next_id_reply:
+                return
+            self._next_id_reply = now + 2.0
+            self.queue_reply(chat_id, f"你的 Telegram 数字 ID：{user}")
             return
         if user not in self.settings.allowed or sender.get("is_bot") is True:
             return
         if command in {"/start", "/help"}:
-            await self.send_text(
+            self.queue_reply(
                 chat_id, "直接发送任务给 agy。\n/status 查看状态\n/cancel 请求取消"
                 "\n/last 取回本人最近结果（不会重新执行）\n/id 查看数字 ID"
                 "\n每条普通消息独立执行，不保留对话上下文。",
@@ -158,15 +203,15 @@ class Bridge:
                 text = "已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
                 text = "你当前没有任务。" + ("工作目录正被其他任务占用。" if self.slot else "")
-            await self.send_text(chat_id, text)
+            self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
             job = self.slot
             if job is not None and job.user == user:
                 job.cancel.set()
-                await self.send_text(chat_id, "已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
+                self.queue_reply(chat_id, "已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
             else:
-                await self.send_text(chat_id, "你当前没有可取消的任务。")
+                self.queue_reply(chat_id, "你当前没有可取消的任务。")
             return
         if command == "/last":
             try:
@@ -174,19 +219,19 @@ class Bridge:
                 text = describe(record) if record else "没有可取回的结果，或结果已过保留期。"
             except (OSError, ValueError):
                 text = "无法读取最近结果，请检查服务器状态。"
-            await self.send_text(chat_id, text)
+            self.queue_reply(chat_id, text)
             return
         if command:
-            await self.send_text(chat_id, "不支持这个控制命令。发送 /help 查看用法。")
+            self.queue_reply(chat_id, "不支持这个控制命令。发送 /help 查看用法。")
             return
         if len(text) > self.settings.max_prompt or "\x00" in text:
-            await self.send_text(chat_id, f"任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+            self.queue_reply(chat_id, f"任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
             return
         if self.runner.blocked:
-            await self.send_text(chat_id, "新任务已暂停，请检查服务器并重启服务。")
+            self.queue_reply(chat_id, "新任务已暂停，请检查服务器并重启服务。")
             return
         if self.slot is not None:
-            await self.send_text(chat_id, "工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
+            self.queue_reply(chat_id, "工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
             return
 
         job = Job(user, chat_id)
@@ -197,21 +242,12 @@ class Bridge:
                 "job_id": job.job_id, "outcome": "running", "delivery": "pending",
                 "detail": "任务准备或执行中；服务中断时不会自动重试。",
             })
-            accepted = await self.send_text(chat_id, f"任务 {job.job_id} 已接收，准备调用 agy。")
-            if not accepted or self.stop.is_set():
-                self.store.save(user, {
-                    "job_id": job.job_id, "outcome": "not_started",
-                    "detail": "确认消息未成功投递或服务正在停止；没有启动 agy。",
-                    "delivery": "failed",
-                })
-                self.slot = None
-                return
-            job.worker = asyncio.create_task(self._work(job, text))
+            job.worker = asyncio.create_task(self._accept_and_work(job, text))
         except Exception:
             self.slot = None
             self.runner.blocked = True
             LOG.error("job_prepare_failed id=%s", job.job_id)
-            await self.send_text(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+            self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
 
     async def consume_updates(self, updates: object) -> None:
         if not isinstance(updates, list):
@@ -261,9 +297,26 @@ class Bridge:
             })
         LOG.info("INITIALIZED pid=%s", os.getpid())
 
+    async def initialize_with_retry(self) -> None:
+        backoff = 1.0
+        while not self.stop.is_set():
+            try:
+                await self.initialize()
+                return
+            except TelegramError as error:
+                if error.code != 0 and error.code != 429 and not 500 <= error.code < 600:
+                    raise
+                LOG.warning("telegram_init_retry code=%s", error.code)
+                try:
+                    await asyncio.wait_for(
+                        self.stop.wait(), max(backoff, float(error.retry_after)))
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(30.0, backoff * 2)
+
     async def run(self) -> None:
         try:
-            await self.initialize()
+            await self.initialize_with_retry()
             backoff = 1.0
             while not self.stop.is_set():
                 if time.monotonic() - self._last_maintenance > 3600:
@@ -306,8 +359,11 @@ class Bridge:
             job = self.slot
             if job is not None:
                 job.cancel.set()
-                if job.worker is not None:
-                    await job.worker
+            if self.reply_worker is not None:
+                self.reply_worker.cancel()
+                await asyncio.gather(self.reply_worker, return_exceptions=True)
+            if job is not None and job.worker is not None:
+                await job.worker
 
 
 async def start(settings: Settings, ready_file: Path | None) -> None:

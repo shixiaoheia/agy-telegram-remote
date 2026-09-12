@@ -11,6 +11,20 @@ from settings import (ConfigError, Settings, check_no_symlink, merged_config,
                       parse_env, read_private_text, serialize_env)
 
 class ConfigurationTests(unittest.TestCase):
+    def test_unknown_permission_key_rejected(self):
+        with self.assertRaises(ConfigError):
+            Settings.from_mapping(config_values() | {"AGY_SKIP_PERMISSION": "false"})
+
+    def test_load_rejects_unknown_key_without_exposing_value(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "config"
+            path.write_text(
+                "".join(f"{key}={value}\n" for key, value in config_values().items())
+                + "AGY_SKIP_PERMISSION=private-value\n", encoding="utf-8")
+            with self.assertRaises(ConfigError) as caught:
+                Settings.load(path)
+            self.assertNotIn("private-value", str(caught.exception))
+
     def test_defaults_auto_approve(self):
         self.assertTrue(Settings.from_mapping(config_values()).skip_permissions)
 
