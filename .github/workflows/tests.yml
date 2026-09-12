@@ -22,3 +22,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Verify source and offline tests
         run: bash scripts/verify.sh
+      - name: Verify with installer umask
+        run: |
+          umask 077
+          bash scripts/verify.sh

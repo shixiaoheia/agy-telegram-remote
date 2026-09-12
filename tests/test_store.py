@@ -81,6 +81,10 @@ class StoreTests(unittest.TestCase):
     def test_public_state_directory_rejected(self):
         public = Path(self.temp.name) / "public"
         public.mkdir(mode=0o755)
+        # mkdir's mode is filtered by the caller's umask. The installer uses
+        # 077, so explicitly make this negative-test fixture public. Do not
+        # weaken Store's private-directory check or the installer's umask.
         public.chmod(0o755)
+        self.assertEqual(public.stat().st_mode & 0o777, 0o755)
         with self.assertRaises(PermissionError):
             Store(public, self.store.allowed, 1000, 7)

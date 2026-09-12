@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — installer umask regression fix
+
+复核基线：`64d0715694069759853d64746d70bcfcff470cbd`。
+
+- 修复离线测试在安装器 `umask 077` 环境中的误失败：
+  公开目录测试显式设置临时目录为 `0755`，不再依赖调用者的 umask。
+- CI 在每个 Python 版本增加 `umask 077` 复跑，覆盖安装器的权限环境。
+- 同步测试说明；保留三步安装、自动审批、运行时权限检查及所有原有测试。
+- 不改变 Bot、Runner、安装器执行逻辑或配置，不引入新依赖；上线和真实账号验收仍需单独进行。
+
 ## Unreleased — three-step installer and reliable result handling
 
 审阅基线：`5e9ee9fed91beb4821003f7063b4602e0df4f50b`。这是待发布改造，不代表已经部署。

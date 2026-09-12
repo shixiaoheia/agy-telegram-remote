@@ -8,6 +8,23 @@ bash scripts/verify.sh
 
 脚本运行 Bash 语法检查、Python AST 语法检查和 `unittest`。安装了 ShellCheck 时也检查 Shell 脚本；没有安装会明确显示跳过，不冒充通过。GitHub Actions 会安装 ShellCheck 并计划在 Python 3.10、3.11、3.12、3.13 上运行。
 
+### 安装器权限环境回归
+
+安装器会设置 `umask 077`，并通过 `runuser` 以非 root 账户运行离线测试。
+CI 现在对每个 Python 版本分别运行常规测试和 `umask 077` 测试。
+本地可在非 root 账户下复验：
+
+```bash
+(umask 022; bash scripts/verify.sh)
+(umask 077; bash scripts/verify.sh)
+```
+
+权限负向测试必须显式构造“不安全目录”。`mkdir(mode=0o755)` 的实际权限仍会受
+调用进程的 umask 限制；在 `077` 下它实际成为 `0700`，不能作为“公开目录”
+测试用例。`test_public_state_directory_rejected` 因此在临时目录上显式
+`chmod(0o755)` 并核对权限，再断言 Store 拒绝该目录。不要为了通过测试关闭
+Store 的权限检查、降低安装器 umask 或跳过安装自检。
+
 本地测试不运行安装器主流程，不调用真实 Google 或 Telegram，不创建系统用户，不删除系统目录。会创建临时文件、短生命周期测试进程及仅绑定回环地址的 HTTP 服务。安装器中的同一离线测试以 `agy-tg` 执行。
 
 ## 自动化覆盖
