@@ -405,13 +405,12 @@ main() {
   echo ''
   echo '📌 授权说明：'
   echo '  · 已有有效的 Google 授权将自动复用，无需重新登录。'
-  echo '  · 首次授权或重新授权时，终端会显示一个链接。'
-  echo '  · 请复制该链接在浏览器中打开，用你的 Google 账号登录并授权。'
-  echo '  · 获取授权码后，粘贴回此终端并按回车。'
-  echo '  · 进入 agy 主界面后，请输入 /exit 返回安装器（不需要输入 YES）。'
+  echo '  · 首次授权或凭证失效时，终端会直接输出 Google 授权登录网址。'
+  echo '  · 复制该链接并在浏览器打开，登录你的 Google 账号并获取授权码。'
+  echo '  · 将授权码粘贴回下方终端按回车，系统将自动完成认证并直接继续！'
   echo ''
 
-  # 自动预接受 agy 首次使用服务条款，避免交互式 TOS 弹窗打断授权流程
+  # 自动预接受 agy 首次使用服务条款，避免条款弹窗打断
   local _onboarding_dir="$APP_HOME/.gemini/antigravity-cli/cache"
   if [[ ! -f "$_onboarding_dir/onboarding.json" ]]; then
     mkdir -p "$_onboarding_dir"
@@ -422,7 +421,6 @@ main() {
   "onboardingComplete": true
 }
 _ONBOARDING_EOF
-    echo '✅ 已自动接受 agy 服务条款，授权过程中不会再弹出条款确认界面。'
   fi
 
   local smoke_rc=10
@@ -435,10 +433,22 @@ _ONBOARDING_EOF
   fi
   if [[ "$smoke_rc" -ne 0 || "$REAUTH" == 1 ]]; then
     local auth_rc=0
-    echo '🔑 正在启动 Google 授权流程……'
+    local _token_file="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+    # 若已有凭证失效或主动重授，移开旧凭据以确保直接输出全新授权链接
+    if [[ -f "$_token_file" ]]; then
+      mv -f -- "$_token_file" "$_token_file.bak.$$" 2>/dev/null || rm -f -- "$_token_file"
+    fi
+    echo '🔑 正在获取 Google 授权链接（复制网址打开登录并粘贴授权码即可）：'
+    echo ''
     as_user env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
-      /bin/bash -c 'cd -- "$1"; exec "$2"' _ "$work" "$agy" || auth_rc=$?
-    [[ "$auth_rc" == 0 || "$auth_rc" == 130 ]] || fail 'agy 交互授权异常退出。'
+      /bin/bash -c 'cd -- "$1"; exec "$2" --print "AGY ready."' _ "$work" "$agy" || auth_rc=$?
+    if [[ "$auth_rc" -ne 0 ]]; then
+      [[ ! -f "$_token_file.bak.$$" ]] || mv -f -- "$_token_file.bak.$$" "$_token_file" 2>/dev/null || true
+      fail 'agy 授权未完成或异常退出。'
+    fi
+    rm -f -- "$_token_file.bak.$$" 2>/dev/null || true
+    echo ''
+    echo '✅ Google 账号授权成功！'
     if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
       smoke_rc=0
     else

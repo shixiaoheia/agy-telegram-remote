@@ -9,8 +9,10 @@
 - **消除全新安装时 systemd 单元状态报错提示（Systemd Unit State Warning Fix）**（`install.sh`）：
   - 修复全新安装或未安装服务时，执行 `systemctl is-enabled` 泄漏 `Failed to get unit file state for agy-telegram-remote.service: No such file or directory` 报错信息干扰终端输出的问题；
   - 优化为仅在服务单元文件存在时检测自启状态，并对 `systemctl` 状态查询与自启设置重定向屏蔽标准错误，确保全新部署流程清爽无误导提示。
-- **Google OAuth 授权指引与 agy 服务条款自动确认（Google Auth & TOS UX）**（`install.sh`）：
-  - 优化步骤 3/3 授权引导文本与排版，清晰提示浏览器授权链接、复制粘贴授权码与 `/exit` 退出机制；
+- **步骤 3/3 改为直接输出 Google 授权链接与纯 CLI 自动认证（Direct Google OAuth Flow）**（`install.sh`、`README.md`、`docs/INSTALL_MENU.md`、`docs/TESTING.md`）：
+  - 彻底去除繁琐的 TUI 全屏界面（欢迎 ASCII art、配色方案选择、条款确认按钮、手动输入 `/exit` 等交互干扰）；
+  - 改为纯命令行直接输出 Google OAuth 登录网址；用户在浏览器登录后将授权码粘贴回车，即自动完成认证并直接继续后续部署；
+  - 授权前自动暂存并移开失效的旧 Token 文件，确保每次需要授权时均能立即干净生成全新登录链接。
 - **修复步骤 3/3 授权自检失败无法进入交互式登录流程的缺陷（Google Auth Pre-check Fix）**（`install.sh`、`agy_runner.py`、`manage.py`、`settings.py`）：
   - 修复安装向导在步骤 3/3 进行已有授权复用检查（smoke）时，若返回非 10 状态码（如 15 unknown 错误）会跳过交互式登录流程直接报错中断安装的缺陷；调整为预检任何非零均顺利触发交互式授权引导；
   - 扩充 `agy_runner.py` 认证错误分类规则，广泛覆盖 OAuth、invalid_grant、token expired、unauthorized 及 401 等常见认证过期场景；
