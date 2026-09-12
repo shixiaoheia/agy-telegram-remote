@@ -95,6 +95,34 @@ for x in [*reversed(p.parents), p]:
   install -d -o "$APP_USER" -g "$APP_USER" -m 0700 "$path"
 }
 
+ensure_service_account() {
+  if ! id "$APP_USER" >/dev/null 2>&1; then
+    adduser --system --group \
+      --home "$APP_HOME" \
+      --shell /bin/bash \
+      "$APP_USER"
+  fi
+  [[ "$(getent passwd "$APP_USER" | cut -d: -f6)" == "$APP_HOME" ]] || fail '已有账户 home 不符合预期。'
+  [[ "$(id -gn "$APP_USER")" == "$APP_USER" ]] || fail '已有账户主组异常。'
+  (( $(id -u "$APP_USER") >= 100 )) || fail '拒绝使用系统特权账户。'
+
+  local user_group_list all_groups supp_groups=()
+  user_group_list="$(id -Gn "$APP_USER")"
+  read -r -a all_groups <<<"$user_group_list"
+  for g in "${all_groups[@]}"; do
+    if [[ "$g" != "$APP_USER" ]]; then
+      supp_groups+=("$g")
+    fi
+  done
+  if (( ${#supp_groups[@]} > 0 )); then
+    if [[ "${#supp_groups[@]}" -eq 1 && "${supp_groups[0]}" == "users" ]]; then
+      echo "提示：若管理员确认 $APP_USER 账户为本项目专用，可由 root 执行：" >&2
+      echo "  gpasswd -d $APP_USER users" >&2
+    fi
+    fail "账户存在额外组权限（实际组：$user_group_list），请先人工核对。"
+  fi
+}
+
 as_user() {
   runuser -u "$APP_USER" -- env -i \
     HOME="$APP_HOME" USER="$APP_USER" LOGNAME="$APP_USER" \
@@ -238,13 +266,7 @@ main() {
     python3 git curl ca-certificates procps util-linux adduser
   /usr/bin/python3 -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
     || fail '需要 Python 3.10+。'
-  if ! id "$APP_USER" >/dev/null 2>&1; then
-    adduser --disabled-password --gecos '' "$APP_USER"
-  fi
-  [[ "$(getent passwd "$APP_USER" | cut -d: -f6)" == "$APP_HOME" ]] || fail '已有账户 home 不符合预期。'
-  [[ "$(id -gn "$APP_USER")" == "$APP_USER" ]] || fail '已有账户主组异常。'
-  (( $(id -u "$APP_USER") >= 100 )) || fail '拒绝使用系统特权账户。'
-  [[ "$(id -Gn "$APP_USER")" == "$APP_USER" ]] || fail '账户存在额外组权限，请先人工核对。'
+  ensure_service_account
   user_dir "$APP_HOME"
   root_dir "$RELEASES"
   root_dir "$BACKUPS" 0700

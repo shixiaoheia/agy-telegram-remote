@@ -36,7 +36,16 @@ Store 的权限检查、降低安装器 umask 或跳过安装自检。
 | `test_store.py` | 私有权限、限长、过期、用户路由、凭据替换、崩溃记录、更新水位和实例锁 |
 | `test_bot.py` | 白名单、群聊拦截、工作目录互斥、准备/运行取消、投递失败、`/last`、重复更新 |
 | `test_telegram_api.py` | 本地真实 HTTP 请求、429、网络/协议错误、UTF-16 分段、完整离线回传链路 |
-| `test_installer.py` | Bash 语法、OS 版本门槛、两个配置输入、生成 unit、配置保留、临时目录内的真实回退函数、自检分类 |
+| `test_installer.py` | Bash 语法、OS 版本门槛、系统服务账户创建参数、已有 UID 保持、附加组拒绝与名单展示、两个配置输入、生成 unit、配置保留、临时目录内的真实回退函数、自检分类 |
+
+### Debian 12 一次性环境账户创建测试
+
+为验证真实的系统账户创建命令（`adduser --system --group`）在 Debian 12 环境下的表现，项目提供了 `scripts/test_account_debian12.sh`，并在 GitHub Actions CI 中通过 `container: debian:12` 自动化执行：
+- 验证新建服务账户仅属于自身同名组，不附带 Debian 默认的 `users` 附加组，UID >= 100 且 home 正确；
+- 验证重复执行安装器时复用已有账户，不更改已有 UID；
+- 验证当已有账户存在附加组时阻断安装并打印实际组名单；在唯一附加组为 `users` 时给出 `gpasswd -d agy-tg users` 修复提示。
+
+注意：本地离线单元测试通过模拟函数覆盖上述逻辑，不在本地服务器上实际创建或修改真实用户。
 
 错误分类依赖诊断关键词，属于保守提示，不保证覆盖 Google 所有错误文案。测试 fixture 的协议来自当前官方文档，不等于验证所有真实 agy 版本。
 

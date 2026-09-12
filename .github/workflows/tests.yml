@@ -26,3 +26,18 @@ jobs:
         run: |
           umask 077
           bash scripts/verify.sh
+
+  debian12-account-test:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4 ref
+        with:
+          persist-credentials: false
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y adduser passwd bash
+      - name: Run Debian 12 real account creation tests
+        run: bash scripts/test_account_debian12.sh

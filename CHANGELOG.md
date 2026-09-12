@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — dedicated service account without default user groups
+
+复核基线：`fa51d06340ba1eac3b3ccd27d35876442031e2ed`。
+
+- 修复安装账户兼容性问题：
+  改用 `adduser --system --group --home "$APP_HOME" --shell /bin/bash "$APP_USER"` 创建专有系统服务账户，避免 Debian 12 默认将普通用户加入 `users` 附加组导致自身安全检查阻断。
+- 附加组检查失败时打印实际所属组名单；仅在唯一附加组为 `users` 且管理员确认专用于本项目时，提示由 root 执行 `gpasswd -d agy-tg users`。
+- 说明安装器由 root 或具备 sudo 权限的管理账户运行；`agy-tg` 仅用于运行服务，不用于执行安装器。修改安装脚本不会自动修复或清空已有账户的附加组。
+- 严格保持已有账户策略：不删除、不重建已有账户，不改变已有 UID，不修改已有 home、工作目录、配置或 Google 授权，不授予 sudo 权限。
+- 增加账户创建与组验证的单元回归测试，并在 GitHub Actions CI 中通过一次性 Debian 12 容器环境验证真实系统账户创建流程。
+
 ## Unreleased — installer umask regression fix
 
 复核基线：`64d0715694069759853d64746d70bcfcff470cbd`。

@@ -154,6 +154,114 @@ rollback
             self.assertFalse((base / "app").is_symlink())
             self.assertEqual((base / "app/file").read_text(), "old code")
 
+    def test_service_account_flags_in_installer(self):
+        script = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertIn("adduser --system --group", script)
+        self.assertIn('--home "$APP_HOME"', script)
+        self.assertIn('--shell /bin/bash', script)
+        self.assertNotIn("--disabled-password", script)
+
+    def test_ensure_service_account_creates_new_system_user(self):
+        code = r'''
+source "$1"
+called_adduser=()
+id() {
+    if [[ "$1" == "agy-tg" ]]; then
+        if [[ -n "${USER_CREATED:-}" ]]; then return 0; else return 1; fi
+    elif [[ "$1" == "-gn" ]]; then
+        echo "agy-tg"
+    elif [[ "$1" == "-u" ]]; then
+        echo "105"
+    elif [[ "$1" == "-Gn" ]]; then
+        echo "agy-tg"
+    fi
+}
+adduser() {
+    called_adduser=("$@")
+    USER_CREATED=1
+}
+getent() {
+    echo "agy-tg:x:105:105::/home/agy-tg:/bin/bash"
+}
+ensure_service_account
+echo "ARGS: ${called_adduser[*]}"
+'''
+        result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh")],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("--system", result.stdout)
+        self.assertIn("--group", result.stdout)
+        self.assertIn("--home /home/agy-tg", result.stdout)
+        self.assertIn("--shell /bin/bash", result.stdout)
+        self.assertIn("agy-tg", result.stdout)
+
+    def test_ensure_service_account_preserves_existing_user_uid(self):
+        code = r'''
+source "$1"
+called_adduser=0
+id() {
+    if [[ "$1" == "agy-tg" ]]; then
+        return 0
+    elif [[ "$1" == "-gn" ]]; then
+        echo "agy-tg"
+    elif [[ "$1" == "-u" ]]; then
+        echo "105"
+    elif [[ "$1" == "-Gn" ]]; then
+        echo "agy-tg"
+    fi
+}
+adduser() {
+    called_adduser=1
+}
+getent() {
+    echo "agy-tg:x:105:105::/home/agy-tg:/bin/bash"
+}
+ensure_service_account
+echo "CALLED: $called_adduser"
+echo "UID: $(id -u agy-tg)"
+'''
+        result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh")],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("CALLED: 0", result.stdout)
+        self.assertIn("UID: 105", result.stdout)
+
+    def test_ensure_service_account_rejects_supplementary_groups_and_prints_list(self):
+        for groups, expect_hint in [
+            ("agy-tg users", True),
+            ("users agy-tg", True),
+            ("agy-tg sudo", False),
+            ("agy-tg users sudo", False),
+            ("agy-tg docker", False),
+        ]:
+            with self.subTest(groups=groups, expect_hint=expect_hint):
+                code = r'''
+source "$1"
+id() {
+    if [[ "$1" == "agy-tg" ]]; then
+        return 0
+    elif [[ "$1" == "-gn" ]]; then
+        echo "agy-tg"
+    elif [[ "$1" == "-u" ]]; then
+        echo "105"
+    elif [[ "$1" == "-Gn" ]]; then
+        echo "''' + groups + r'''"
+    fi
+}
+getent() {
+    echo "agy-tg:x:105:105::/home/agy-tg:/bin/bash"
+}
+ensure_service_account
+'''
+                result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh")],
+                                        capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"实际组：{groups}", result.stderr)
+                if expect_hint:
+                    self.assertIn("gpasswd -d agy-tg users", result.stderr)
+                else:
+                    self.assertNotIn("gpasswd -d agy-tg users", result.stderr)
+
 class SmokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_smoke_uses_same_runner_and_requires_exact_reply(self):
         with tempfile.TemporaryDirectory() as temp:
