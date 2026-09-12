@@ -25,6 +25,17 @@ def update(text, user=12345, chat_type="private", update_id=1):
         },
     }
 
+def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int = 12345) -> dict:
+    return {
+        "update_id": 1,
+        "callback_query": {
+            "id": cq_id,
+            "from": {"id": user, "is_bot": False},
+            "message": {"chat": {"id": chat_id, "type": "private"}},
+            "data": data,
+        }
+    }
+
 class FakeAPI:
     def __init__(self):
         self.messages = []
@@ -33,14 +44,18 @@ class FakeAPI:
         self.backlog = []
         self.webhook = ""
         self.accept_gate = None
+        self.answered_callbacks = []
 
-    async def send(self, chat_id, text):
+    async def send(self, chat_id, text, reply_markup=None):
         self.sent_count += 1
         if self.accept_gate and self.sent_count == 1:
             await self.accept_gate.wait()
         if self.sent_count in self.fail_at:
             raise TelegramError()
-        self.messages.append((chat_id, text))
+        self.messages.append((chat_id, text, reply_markup))
+
+    async def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False):
+        self.answered_callbacks.append((callback_query_id, text, show_alert))
 
     async def call(self, method, **payload):
         if method == "getMe":
@@ -61,9 +76,11 @@ class FakeRunner:
         self.finish = asyncio.Event()
         self.result = Result("success", text="the result")
         self.last_model = None
+        self.last_conversation_id = None
 
-    async def run(self, prompt, cancel, model=None):
+    async def run(self, prompt, cancel, model=None, conversation_id=None):
         self.last_model = model
+        self.last_conversation_id = conversation_id
         self.calls += 1
         if cancel.is_set():
             return Result("cancelled", detail="cancelled before launch", model=model or "")
@@ -418,6 +435,89 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         total = len(self.api.messages)
         self.assertIn(f"[第 1/{total} 页]", self.api.messages[0][1])
         self.assertIn(f"[第 {total}/{total} 页]", self.api.messages[-1][1])
+
+    async def test_model_command_sends_inline_keyboard(self):
+        await self.handle(update("/model"))
+        self.assertIsNotNone(self.api.messages[-1][2])
+        keyboard = self.api.messages[-1][2]
+        self.assertIn("inline_keyboard", keyboard)
+        buttons = [btn["callback_data"] for row in keyboard["inline_keyboard"] for btn in row]
+        self.assertIn("model:gemini-3.8-flash-high", buttons)
+        self.assertIn("model:claude-sonnet-4-6", buttons)
+        self.assertIn("model:default", buttons)
+
+    async def test_callback_query_switches_model_and_answers(self):
+        await self.handle(callback_update("model:claude-opus-4-6-thinking", cq_id="cq_opus"))
+        self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
+        self.assertEqual(len(self.api.answered_callbacks), 1)
+        self.assertEqual(self.api.answered_callbacks[0][0], "cq_opus")
+        self.assertIn("claude-opus-4-6-thinking", self.api.answered_callbacks[0][1])
+        self.assertIn("已切换模型为", self.api.messages[-1][1])
+
+    async def test_callback_query_resets_model_default(self):
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        await self.handle(callback_update("model:default", cq_id="cq_def"))
+        self.assertIsNone(self.store.get_model(12345))
+        self.assertEqual(self.api.answered_callbacks[0][0], "cq_def")
+        self.assertIn("已恢复为默认模型", self.api.messages[-1][1])
+
+    async def test_conversation_memory_is_persisted_and_passed(self):
+        self.runner.result = Result("success", text="Turn 1 ok", conversation_id="conv-turn-1", num_turns=1)
+        await self.handle(update("Hello first turn"))
+        await self.finish_job()
+        conv = self.store.get_conversation(12345)
+        self.assertIsNotNone(conv)
+        self.assertEqual(conv["conversation_id"], "conv-turn-1")
+        self.assertEqual(conv["num_turns"], 1)
+
+        self.runner.result = Result("success", text="Turn 2 ok", conversation_id="conv-turn-1", num_turns=2)
+        await self.handle(update("Second turn message"))
+        await self.finish_job()
+        self.assertEqual(self.runner.last_conversation_id, "conv-turn-1")
+        conv2 = self.store.get_conversation(12345)
+        self.assertEqual(conv2["num_turns"], 2)
+
+    async def test_reset_command_clears_conversation_memory(self):
+        self.store.set_conversation(12345, "conv-existing-123", 3)
+        await self.handle(update("/new"))
+        self.assertIsNone(self.store.get_conversation(12345))
+        self.assertIn("记忆已重置", self.api.messages[-1][1])
+
+    async def test_usage_command_and_token_accumulation(self):
+        self.runner.result = Result("success", text="done", input_tokens=1500, output_tokens=250, total_tokens=1750)
+        await self.handle(update("calculate tokens"))
+        await self.finish_job()
+        usage = self.store.get_usage(12345)
+        self.assertEqual(usage["total_input_tokens"], 1500)
+        self.assertEqual(usage["total_output_tokens"], 250)
+
+        await self.handle(update("/usage"))
+        msg = self.api.messages[-1][1]
+        self.assertIn("Token 用量统计报告", msg)
+        self.assertIn("1,500", msg)
+        self.assertIn("250", msg)
+
+    async def test_describe_includes_card_dividers_and_token_metrics(self):
+        record = {
+            "job_id": "job999",
+            "outcome": "success",
+            "model": "gemini-3.8-flash-high",
+            "duration_seconds": 3.5,
+            "text": "Task finished successfully.",
+            "input_tokens": 12000,
+            "output_tokens": 450,
+            "total_tokens": 12450,
+            "num_turns": 2,
+        }
+        card = describe(record)
+        self.assertIn("━━━━━━━━━━━━━━━━━━━━", card)
+        self.assertIn("✅ 任务完成", card)
+        self.assertIn("Task finished successfully.", card)
+        self.assertIn("⏱️ 3.5s", card)
+        self.assertIn("12,000", card)
+        self.assertIn("450", card)
+        self.assertIn("12,450", card)
+        self.assertIn("第 2 轮", card)
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):

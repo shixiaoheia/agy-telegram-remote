@@ -58,6 +58,13 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("/venv/", unit)
         self.assertNotIn("TELEGRAM_BOT_TOKEN", unit)
 
+    def test_root_mode_service_unit(self):
+        unit = service_unit(Path("/root"), Path("/srv/agy-workspace"),
+                            Path("/var/lib/agy-telegram-remote"))
+        self.assertIn("User=root", unit)
+        self.assertIn("Group=root", unit)
+        self.assertIn("ProtectHome=no", unit)
+
     def test_no_old_venv_or_dotenv_execution(self):
         script = (ROOT / "install.sh").read_text()
         self.assertNotIn("/venv/bin/python", script)
@@ -395,3 +402,15 @@ class SmokeTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as temp:
             with patch("manage.os.geteuid", return_value=0), self.assertRaises(ConfigError):
                 await smoke(settings_at(Path(temp)))
+
+    async def test_smoke_allows_root_when_specified(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = settings_at(Path(temp))
+            class MockRunner:
+                def __init__(self, settings):
+                    pass
+                async def run(self, prompt, cancel):
+                    return Result("success", text="AGY ready.")
+            with patch("manage.os.geteuid", return_value=0), patch("manage.Runner", MockRunner), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(await smoke(config, allow_root=True), 0)

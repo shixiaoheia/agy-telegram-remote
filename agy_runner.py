@@ -31,6 +31,12 @@ class Result:
     cleanup_ok: bool = True
     model: str = ""
     duration_seconds: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+    total_tokens: int = 0
+    conversation_id: str = ""
+    num_turns: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -84,6 +90,16 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
     status = envelope.get("status")
     response = envelope.get("response")
     raw_error = envelope.get("error")
+    conversation_id = str(envelope.get("conversation_id") or "")
+    num_turns = int(envelope.get("num_turns") or 0)
+    usage = envelope.get("usage")
+    input_tokens, output_tokens, thinking_tokens, total_tokens = 0, 0, 0, 0
+    if isinstance(usage, dict):
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        thinking_tokens = int(usage.get("thinking_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or 0)
+
     if isinstance(raw_error, str):
         category = classify(raw_error + "\n" + diagnostics)
     if not isinstance(status, str) or status not in {
@@ -94,11 +110,13 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
         return Result(
             "error", detail="agy 返回异常状态；已执行的操作不会自动撤销。",
             category=category, agy_status=status[:32], exit_code=exit_code,
+            conversation_id=conversation_id, num_turns=num_turns,
         )
     if not isinstance(response, str):
         return Result(
             "invalid", detail="agy 的 response 缺失或不是文本。",
             agy_status=status, exit_code=exit_code,
+            conversation_id=conversation_id, num_turns=num_turns,
         )
     try:
         response.encode("utf-8")
@@ -109,20 +127,32 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
             "permission", text=response.strip(),
             detail="检测到工具权限拒绝；请核对任务实际完成情况。",
             category="permission", agy_status=status, exit_code=exit_code,
+            conversation_id=conversation_id, num_turns=num_turns,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            thinking_tokens=thinking_tokens, total_tokens=total_tokens,
         )
     if not response.strip():
         return Result(
             "no_text", detail="agy 已结束，但缺少最终文字回复；请先核对执行记录和工作目录。",
             agy_status=status, exit_code=exit_code,
+            conversation_id=conversation_id, num_turns=num_turns,
+            input_tokens=input_tokens, output_tokens=output_tokens,
+            thinking_tokens=thinking_tokens, total_tokens=total_tokens,
         )
-    return Result("success", text=response.strip(), agy_status=status, exit_code=exit_code)
+    return Result(
+        "success", text=response.strip(), agy_status=status, exit_code=exit_code,
+        conversation_id=conversation_id, num_turns=num_turns,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        thinking_tokens=thinking_tokens, total_tokens=total_tokens,
+    )
 
 
 def child_environment(home: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
     # Deliberately exclude BOT_TOKEN, PYTHONPATH, SSH_AUTH_SOCK and cloud keys.
     inherited = os.environ if inherited is None else inherited
+    user = "root" if str(home) == "/root" else inherited.get("USER", "root")
     env = {
-        "HOME": str(home), "USER": "agy-tg", "LOGNAME": "agy-tg",
+        "HOME": str(home), "USER": user, "LOGNAME": user,
         "PATH": f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8", "TERM": "dumb", "NO_COLOR": "1",
     }
@@ -133,13 +163,16 @@ def child_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
     return env
 
 
-def build_command(settings: Settings, prompt: str, model: str | None = None) -> list[str]:
+def build_command(settings: Settings, prompt: str, model: str | None = None,
+                  conversation_id: str | None = None) -> list[str]:
     command = [
         str(settings.agy), "--print-timeout", f"{math.ceil(settings.timeout)}s",
         "--output-format", "json",
     ]
     if settings.skip_permissions:
         command.append("--dangerously-skip-permissions")
+    if conversation_id:
+        command.extend(["--conversation", conversation_id])
     if model:
         command.extend(["--model", model])
     return command + ["--print", prompt]
@@ -236,7 +269,7 @@ class Runner:
         self.blocked = False
 
     async def run(self, prompt: str, cancel: asyncio.Event,
-                  model: str | None = None) -> Result:
+                  model: str | None = None, conversation_id: str | None = None) -> Result:
         selected_model = model or self.settings.model or ""
         start_time = asyncio.get_running_loop().time()
         if self.blocked:
@@ -257,7 +290,8 @@ class Runner:
         cleanup_ok = True
         try:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-                *build_command(self.settings, prompt, model=selected_model or None),
+                *build_command(self.settings, prompt, model=selected_model or None,
+                               conversation_id=conversation_id or None),
                 cwd=self.settings.workspace,
                 env=child_environment(self.settings.home),
                 stdin=asyncio.subprocess.DEVNULL,

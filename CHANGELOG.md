@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — interactive model keyboard, conversation memory, token metrics, and root mode
+
+- **拟物化卡片与视觉排版全面重构**（`bot.py`）：
+  - 任务分派确认（`_accept_and_work`）与最终交付结果（`describe`）全面采用 Antigravity 拟物风格卡片式排版；
+  - 统一规范卡片标头、分割线（`━━━━━━━━━━━━━━━━━━━━`）、耗时指示（`⏱️ 12.4s`）与模型标签；
+  - 交付卡片底部新增多维度执行元数据区块：Token 消耗明细（输入、输出、总计）、会话轮次进度与任务追踪 ID。
+- **一键点击切换模型行内键盘（Inline Keyboard）**（`bot.py`、`telegram_api.py`）：
+  - `/model` 指令不仅展示全量官方 14 种模型，同时动态下发 Telegram 行内按钮（`inline_keyboard`）；
+  - 当前激活模型标示选中高亮（`🔘` / `⚪`），用户可直接点击按钮切换目标模型；
+  - 点击后通过 Telegram `answerCallbackQuery` 实时弹出顶部 Toast 气泡提醒，并更新私聊消息。
+- **连续对话与多轮记忆能力（Context Continuity）**（`bot.py`、`agy_runner.py`、`state_store.py`）：
+  - 自动持久化与关联当前用户的会话上下文（`conversation_id`）；
+  - 后台自动向 `agy` CLI 注入 `--conversation <id>` 保持连续多轮对话记忆与历史上下文；
+  - 新增 `/new` 与 `/reset` 指令：随时一键重置清空当前记忆，开启全新独立会话；
+  - 任务接收确认时智能指示上下文状态（`已关联上下文 (第 N 轮)` 或 `全新独立会话`）。
+- **Token 消耗统计与 `/usage` 报表**（`bot.py`、`agy_runner.py`、`state_store.py`）：
+  - 解析 `agy` CLI JSON 响应中回传的真实 Token 用量（`input_tokens`、`output_tokens`、`thinking_tokens`、`total_tokens`）；
+  - 状态存储模块新增用户累计 Token 用量落盘（`usage-{user}.json`）与维护清理；
+  - 新增 `/usage` 命令：汇总展示当前活动会话 ID、当前轮次进度，以及历史累计消耗的 Prompt / Output / Thinking / Total Token 详细报表。
+- **极简 VPS 专用 Root 模式支持**（`manage.py`、`install.sh`）：
+  - `install.sh` 新增 `--root` 参数：专为单机 VPS 用户设计，直接以 `root` 身份安装与运行后台守护进程，省去多用户权限切换与 `/home/agy-tg` 依赖；
+  - `manage.py unit` 与 `smoke` 增加 `--user` 与 `--allow-root` 支持，适配 `root:root` 与 `ProtectHome=no` 安全策略。
+- **全套测试覆盖扩展至 166 项**（`tests/`）：
+  - 新增 9 项针对 Telegram 行内键盘、回调查询处理、会话透传、会话重置、Token 报表格式、Root 模式 unit 与 Root smoke 鉴权的自动化测试。
+
 ## Unreleased — documentation redesign and visual experience enhancement
 
 基线提交：`1632ac6fe9a9f2d7e4ede47739d49a18fc2923b9`。

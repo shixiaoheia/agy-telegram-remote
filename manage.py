@@ -18,8 +18,11 @@ from state_store import read_json
 from telegram_api import TelegramAPI, TelegramError
 
 
-def service_unit(home: Path, workspace: Path, state: Path) -> str:
+def service_unit(home: Path, workspace: Path, state: Path, user: str | None = None) -> str:
     # Paths have already passed Settings validation (no whitespace/%/newlines).
+    run_user = user or ("root" if home == Path("/root") else "agy-tg")
+    run_group = run_user
+    protect_home = "no" if run_user == "root" else "read-only"
     return f"""[Unit]
 Description=Antigravity Telegram Remote
 Wants=network-online.target
@@ -29,8 +32,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=agy-tg
-Group=agy-tg
+User={run_user}
+Group={run_group}
 WorkingDirectory=/opt/agy-telegram-remote
 Environment=HOME={home}
 Environment=PYTHONUNBUFFERED=1
@@ -44,7 +47,7 @@ UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome={protect_home}
 ReadWritePaths={home} {workspace} {state}
 CapabilityBoundingSet=
 AmbientCapabilities=
@@ -87,8 +90,8 @@ def prepare_config(args: argparse.Namespace) -> int:
     return 0
 
 
-async def smoke(settings: Settings) -> int:
-    if os.geteuid() == 0:
+async def smoke(settings: Settings, allow_root: bool = False) -> int:
+    if os.geteuid() == 0 and not allow_root and settings.home != Path("/root"):
         raise ConfigError("自检必须以 agy-tg 运行，不允许 root。")
     result = await Runner(replace(settings, timeout=90)).run(SMOKE_PROMPT, asyncio.Event())
     if result.outcome == "success" and result.text.strip() == "AGY ready.":
@@ -131,6 +134,10 @@ def main() -> int:
     for command in ("fields", "smoke", "check-token", "unit", "check-local"):
         child = sub.add_parser(command)
         child.add_argument("--config", type=Path, required=True)
+        if command == "unit":
+            child.add_argument("--user", type=str, default=None)
+        elif command == "smoke":
+            child.add_argument("--allow-root", action="store_true")
     ready = sub.add_parser("check-ready")
     ready.add_argument("--file", type=Path, required=True)
     ready.add_argument("--pid", type=int, required=True)
@@ -155,11 +162,11 @@ def main() -> int:
             print(settings.state_dir)
             print(settings.agy)
         elif args.command == "smoke":
-            return asyncio.run(smoke(settings))
+            return asyncio.run(smoke(settings, allow_root=getattr(args, "allow_root", False)))
         elif args.command == "check-token":
             return asyncio.run(check_token(settings))
         elif args.command == "unit":
-            print(service_unit(settings.home, settings.workspace, settings.state_dir), end="")
+            print(service_unit(settings.home, settings.workspace, settings.state_dir, user=getattr(args, "user", None)), end="")
         elif args.command == "check-local":
             for path in (settings.home, settings.workspace, settings.state_dir):
                 check_no_symlink(path)

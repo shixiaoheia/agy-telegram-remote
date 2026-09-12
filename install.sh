@@ -43,6 +43,7 @@ usage() {
 用法：
   bash install.sh                         显示菜单：安装/更新、卸载、退出
   bash install.sh --install               直接进入安装 / 更新（三步向导）
+  bash install.sh --root                  以 root 用户模式运行服务（适合 VPS 直接管理）
   bash install.sh --enable-auto-approve    更新时明确改为自动审批
   bash install.sh --reauth                 重新进入 Google 授权
   bash install.sh --ref COMMIT_OR_BRANCH   测试已审阅的提交或分支
@@ -119,21 +120,25 @@ root_dir() {
 
 user_dir() {
   local path="$1"
-  /usr/bin/python3 -I -c '
-import pathlib, sys
-p = pathlib.Path(sys.argv[1])
-for x in [*reversed(p.parents), p]:
-    if x.is_symlink():
-        raise SystemExit("Refusing a symlink in runtime directory")
-' "$path"
-  if [[ -e "$path" ]]; then
-    [[ -d "$path" && "$(stat -c %U "$path")" == "$APP_USER" ]] \
-      || fail "已有运行目录不属于 $APP_USER：$path"
+  if [[ -e "$path" && ! -d "$path" ]]; then
+    fail "已有运行路径不是目录：$path"
   fi
-  install -d -o "$APP_USER" -g "$APP_USER" -m 0700 "$path"
+  if [[ -L "$path" ]]; then
+    fail "已有运行路径是符号链接：$path"
+  fi
+  if [[ -d "$path" ]]; then
+    if [[ "$APP_USER" != "root" ]]; then
+      [[ "$(stat -c %U "$path")" == "$APP_USER" ]] || fail "已有运行目录不属于 $APP_USER：$path"
+    fi
+  else
+    install -d -o "$APP_USER" -g "$APP_USER" -m 0700 "$path"
+  fi
 }
 
 ensure_service_account() {
+  if [[ "$APP_USER" == "root" ]]; then
+    return 0
+  fi
   if ! id "$APP_USER" >/dev/null 2>&1; then
     adduser --system --group \
       --home "$APP_HOME" \
@@ -177,10 +182,17 @@ acquire_deploy_lock() {
 }
 
 as_user() {
-  runuser -u "$APP_USER" -- env -i \
-    HOME="$APP_HOME" USER="$APP_USER" LOGNAME="$APP_USER" \
-    PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
-    "$@"
+  if [[ "$APP_USER" == "root" ]]; then
+    env -i \
+      HOME="$APP_HOME" USER="root" LOGNAME="root" \
+      PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+      "$@"
+  else
+    runuser -u "$APP_USER" -- env -i \
+      HOME="$APP_HOME" USER="$APP_USER" LOGNAME="$APP_USER" \
+      PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+      "$@"
+  fi
 }
 
 rollback() {
@@ -277,6 +289,11 @@ main() {
     case "$1" in
       --help|-h) usage; return ;;
       --install) MODE=install ;;
+      --root)
+        APP_USER='root'
+        APP_HOME='/root'
+        direct_install=1
+        ;;
       --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
       --reauth) REAUTH=1; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
@@ -429,8 +446,10 @@ main() {
   echo '已有有效授权会自动复用。新授权请打开链接登录，再粘贴授权码。'
   echo '进入 agy 主界面后输入 /exit 返回安装器；不需要额外输入 YES。'
   local smoke_rc=10
+  local allow_root_flag=""
+  [[ "$APP_USER" == "root" ]] && allow_root_flag="--allow-root"
   if [[ "$installed_now" == 0 && "$REAUTH" == 0 ]]; then
-    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE"; then
+    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" $allow_root_flag; then
       smoke_rc=0
     else
       smoke_rc=$?
@@ -441,7 +460,7 @@ main() {
     as_user env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
       /bin/bash -c 'cd -- "$1"; exec "$2"' _ "$work" "$agy" || auth_rc=$?
     [[ "$auth_rc" == 0 || "$auth_rc" == 130 ]] || fail 'agy 交互授权异常退出。'
-    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE"; then
+    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" $allow_root_flag; then
       smoke_rc=0
     else
       smoke_rc=$?
@@ -465,7 +484,7 @@ main() {
   mv -f -- "$CANDIDATE" "$CONFIG"
   CANDIDATE=
   chown root:"$APP_USER" "$CONFIG"; chmod 0640 "$CONFIG"
-  /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" > "$BACKUP/new.service"
+  /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" --user "$APP_USER" > "$BACKUP/new.service"
   UNIT_CHANGED=1
   install -o root -g root -m 0644 "$BACKUP/new.service" "$UNIT"
   systemctl daemon-reload

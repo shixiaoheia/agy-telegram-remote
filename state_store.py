@@ -107,7 +107,9 @@ class Store:
         record = {key: record[key] for key in (
             "user_id", "updated_at", "job_id", "outcome", "text", "detail",
             "category", "agy_status", "exit_code", "stdout_bytes", "stderr_bytes",
-            "cleanup_ok", "delivery", "model",
+            "cleanup_ok", "delivery", "model", "duration_seconds",
+            "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",
+            "conversation_id", "num_turns",
         ) if key in record}
         atomic_json(self._path(user), record)
         return record
@@ -138,6 +140,76 @@ class Store:
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
             raise ValueError("Invalid model name")
         atomic_json(path, {"user_id": user, "model": model, "updated_at": time.time()})
+
+    def _conv_path(self, user: int) -> Path:
+        if type(user) is not int or user not in self.allowed:
+            raise ValueError("User is not allowed")
+        return self.directory / f"conv-{user}.json"
+
+    def get_conversation(self, user: int) -> dict | None:
+        path = self._conv_path(user)
+        try:
+            value = read_json(path, 2048)
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            return None
+        cid = value.get("conversation_id")
+        if isinstance(cid, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,128}", cid):
+            return value
+        return None
+
+    def set_conversation(self, user: int, conversation_id: str | None, num_turns: int = 1) -> None:
+        path = self._conv_path(user)
+        if not conversation_id:
+            path.unlink(missing_ok=True)
+            return
+        if not isinstance(conversation_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,128}", conversation_id):
+            raise ValueError("Invalid conversation ID")
+        atomic_json(path, {
+            "user_id": user,
+            "conversation_id": conversation_id,
+            "num_turns": num_turns,
+            "updated_at": time.time(),
+        })
+
+    def reset_conversation(self, user: int) -> None:
+        self.set_conversation(user, None)
+
+    def _usage_path(self, user: int) -> Path:
+        if type(user) is not int or user not in self.allowed:
+            raise ValueError("User is not allowed")
+        return self.directory / f"usage-{user}.json"
+
+    def get_usage(self, user: int) -> dict:
+        path = self._usage_path(user)
+        try:
+            value = read_json(path, 2048)
+        except FileNotFoundError:
+            return {
+                "user_id": user, "total_input_tokens": 0, "total_output_tokens": 0,
+                "total_thinking_tokens": 0, "total_turns": 0,
+            }
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            return {
+                "user_id": user, "total_input_tokens": 0, "total_output_tokens": 0,
+                "total_thinking_tokens": 0, "total_turns": 0,
+            }
+        return value
+
+    def record_usage(self, user: int, input_tokens: int, output_tokens: int,
+                     thinking_tokens: int = 0) -> dict:
+        curr = self.get_usage(user)
+        new_usage = {
+            "user_id": user,
+            "total_input_tokens": curr.get("total_input_tokens", 0) + max(0, input_tokens),
+            "total_output_tokens": curr.get("total_output_tokens", 0) + max(0, output_tokens),
+            "total_thinking_tokens": curr.get("total_thinking_tokens", 0) + max(0, thinking_tokens),
+            "total_turns": curr.get("total_turns", 0) + 1,
+            "updated_at": time.time(),
+        }
+        atomic_json(self._usage_path(user), new_usage)
+        return new_usage
 
     def load(self, user: int) -> dict | None:
         path = self._path(user)
@@ -171,6 +243,22 @@ class Store:
             match_model = re.fullmatch(r"model-([0-9]+)\.json", path.name)
             if match_model:
                 user = int(match_model[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                continue
+            match_conv = re.fullmatch(r"conv-([0-9]+)\.json", path.name)
+            if match_conv:
+                user = int(match_conv[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                continue
+            match_usage = re.fullmatch(r"usage-([0-9]+)\.json", path.name)
+            if match_usage:
+                user = int(match_usage[1])
                 if path.is_symlink():
                     raise ValueError("Linked state record")
                 if user not in self.allowed:

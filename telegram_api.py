@@ -63,17 +63,31 @@ class TelegramAPI:
     async def call(self, method: str, **payload) -> object:
         return await asyncio.to_thread(self._request, method, payload)
 
-    async def send(self, chat_id: int, text: str) -> None:
+    async def send(self, chat_id: int, text: str, reply_markup: dict | None = None) -> None:
         # Retry ONLY a definite 429 rejection, not an ambiguous network failure.
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "text": text,
+            "link_preview_options": {"is_disabled": True},
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
         for attempt in range(3):
             try:
-                await self.call("sendMessage", chat_id=chat_id, text=text,
-                                link_preview_options={"is_disabled": True})
+                await self.call("sendMessage", **payload)
                 return
             except TelegramError as error:
                 if error.code != 429 or not 0 < error.retry_after <= 10 or attempt == 2:
                     raise
                 await asyncio.sleep(error.retry_after)
+
+    async def answer_callback_query(self, callback_query_id: str, text: str = "",
+                                    show_alert: bool = False) -> None:
+        try:
+            await self.call("answerCallbackQuery", callback_query_id=callback_query_id,
+                            text=text, show_alert=show_alert)
+        except TelegramError:
+            pass
 
 
 def chunks_utf16(text: str, units: int = 3500) -> list[str]:

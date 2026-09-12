@@ -49,24 +49,52 @@ class Job:
     cancel: asyncio.Event = field(default_factory=asyncio.Event)
     worker: asyncio.Task | None = None
     model: str = ""
+    conversation_id: str = ""
 
 
 def describe(record: dict) -> str:
     outcome = str(record.get("outcome", "error"))
     title = LABELS.get(outcome, "结果需核对")
-    model_tag = f"｜{record['model']}" if record.get("model") else ""
+    job_id = record.get("job_id", "-")
+    model = record.get("model", "")
+    model_tag = f"｜{model}" if model else ""
     duration = record.get("duration_seconds")
     duration_tag = f"｜⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
-    parts = [f"{title}｜任务 {record.get('job_id', '-') }{model_tag}{duration_tag}"]
-    if record.get("detail"):
-        parts.append(str(record["detail"]))
-    help_text = CATEGORY_HELP.get(record.get("category"))
-    if help_text:
-        parts.append(help_text)
+
+    parts = [f"{title}｜任务 {job_id}{model_tag}{duration_tag}"]
+    parts.append("━━━━━━━━━━━━━━━━━━━━")
+
     if record.get("text"):
         parts.append(str(record["text"]))
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+    elif record.get("detail"):
+        parts.append(str(record["detail"]))
+        parts.append("━━━━━━━━━━━━━━━━━━━━")
+
+    stats = []
+    if isinstance(duration, (int, float)) and duration > 0:
+        stats.append(f"• ⏱️ 执行耗时：{duration}s")
+    if model:
+        stats.append(f"• 🏷️ 选用模型：{model}")
+    input_tok = record.get("input_tokens", 0)
+    output_tok = record.get("output_tokens", 0)
+    total_tok = record.get("total_tokens", 0)
+    if total_tok:
+        stats.append(f"• 📈 Token 消耗：输入 {input_tok:,} ｜ 输出 {output_tok:,} ｜ 总计 {total_tok:,}")
+    num_turns = record.get("num_turns", 0)
+    if num_turns:
+        stats.append(f"• 🧠 会话轮次：第 {num_turns} 轮")
+
+    if stats:
+        parts.append("📊 运行统计：\n" + "\n".join(stats))
+
+    help_text = CATEGORY_HELP.get(record.get("category"))
+    if help_text:
+        parts.append(f"💡 建议：{help_text}")
+
     if outcome not in {"success", "not_started", "running"}:
-        parts.append("没有自动重跑任务。请先核对工作目录；/last 只取回记录，不重新执行。")
+        parts.append("ℹ️ 没有自动重跑任务。请先核对工作目录；/last 只取回记录，不重新执行。")
+
     return "\n\n".join(parts)
 
 
@@ -81,28 +109,32 @@ class Bridge:
         self.stop = asyncio.Event()
         self.offset = store.offset()
         self._last_maintenance = 0.0
-        self.replies: asyncio.Queue[tuple[int, str]] = asyncio.Queue(maxsize=32)
+        self.replies: asyncio.Queue[tuple] = asyncio.Queue(maxsize=32)
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
 
-    async def send_text(self, chat: int, text: str) -> bool:
+    async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
         try:
             chunks = chunks_utf16(self.store.redact(text))
             total = len(chunks)
             for i, chunk in enumerate(chunks):
                 suffix = f"\n\n📄 [第 {i+1}/{total} 页]" if total > 1 else ""
-                await self.api.send(chat, chunk + suffix)
+                markup = reply_markup if i == total - 1 else None
+                try:
+                    await self.api.send(chat, chunk + suffix, reply_markup=markup)
+                except TypeError:
+                    await self.api.send(chat, chunk + suffix)
             return True
         except TelegramError as error:
             LOG.warning("telegram_delivery_failed code=%s", error.code)
             return False
 
-    def queue_reply(self, chat: int, text: str) -> None:
+    def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None) -> None:
         # Control replies must never hold up update ingestion or cancellation.
         if self.stop.is_set():
             return
         try:
-            self.replies.put_nowait((chat, text))
+            self.replies.put_nowait((chat, text, reply_markup))
         except asyncio.QueueFull:
             return
         if self.reply_worker is None or self.reply_worker.done():
@@ -110,16 +142,34 @@ class Bridge:
 
     async def _send_replies(self) -> None:
         while not self.replies.empty():
-            chat, text = self.replies.get_nowait()
+            item = self.replies.get_nowait()
+            if len(item) == 3:
+                chat, text, reply_markup = item
+            else:
+                chat, text = item
+                reply_markup = None
             try:
-                await self.send_text(chat, text)
+                await self.send_text(chat, text, reply_markup=reply_markup)
             finally:
                 self.replies.task_done()
 
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
         try:
             model_info = f"（模型：{job.model}）" if job.model else ""
-            accepted = await self.send_text(job.chat, f"⏳ 任务 {job.job_id} 已接收{model_info}，准备调用 agy。")
+            conv = self.store.get_conversation(job.user)
+            conv_tag = ""
+            if conv and conv.get("conversation_id"):
+                turns = conv.get("num_turns", 1)
+                conv_tag = f"\n🧠 会话记忆：已关联上下文 (第 {turns + 1} 轮)"
+            else:
+                conv_tag = "\n🧠 会话记忆：全新独立会话"
+
+            accept_msg = (
+                f"🚀 任务 {job.job_id} 已接收{model_info}，准备调用 agy。\n"
+                f"━━━━━━━━━━━━━━━━━━━━{conv_tag}\n"
+                f"⏳ 正在调用 Antigravity 执行任务，请稍候..."
+            )
+            accepted = await self.send_text(job.chat, accept_msg)
             if not accepted or self.stop.is_set() or job.cancel.is_set():
                 self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
@@ -141,9 +191,26 @@ class Bridge:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
             try:
-                result = await self.runner.run(prompt, job.cancel, model=job.model or None)
+                result = await self.runner.run(
+                    prompt, job.cancel, model=job.model or None,
+                    conversation_id=job.conversation_id or None,
+                )
             except TypeError:
-                result = await self.runner.run(prompt, job.cancel)
+                try:
+                    result = await self.runner.run(prompt, job.cancel, model=job.model or None)
+                except TypeError:
+                    result = await self.runner.run(prompt, job.cancel)
+
+            if result.outcome == "success" and getattr(result, "conversation_id", None):
+                self.store.set_conversation(job.user, result.conversation_id, getattr(result, "num_turns", 1))
+            if getattr(result, "total_tokens", 0) > 0:
+                self.store.record_usage(
+                    job.user,
+                    getattr(result, "input_tokens", 0),
+                    getattr(result, "output_tokens", 0),
+                    getattr(result, "thinking_tokens", 0),
+                )
+
             record = self.store.save(
                 job.user, result.to_dict() | {
                     "job_id": job.job_id, "delivery": "pending",
@@ -173,8 +240,46 @@ class Bridge:
             if self.slot is job:
                 self.slot = None
 
+    async def handle_callback(self, cq: dict) -> None:
+        cq_id = str(cq.get("id") or "")
+        sender = cq.get("from") or {}
+        user = sender.get("id")
+        message = cq.get("message") or {}
+        chat = message.get("chat") or {}
+        chat_id = chat.get("id") or user
+        data = str(cq.get("data") or "")
+
+        if type(user) is not int or user not in self.settings.allowed or sender.get("is_bot") is True:
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="⚠️ 无操作权限", show_alert=True)
+            return
+
+        if data.startswith("model:"):
+            target = data[6:].strip()
+            if target.lower() in {"default", "reset", "auto", "clear"}:
+                self.store.set_model(user, None)
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="🔄 已恢复为默认模型")
+                self.queue_reply(chat_id, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model")
+                return
+            resolved = resolve_model(target)
+            if not MODEL_RE.fullmatch(resolved):
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="⚠️ 模型名称格式错误", show_alert=True)
+                return
+            self.store.set_model(user, resolved)
+            alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {resolved}")
+            self.queue_reply(chat_id, f"🎯 已切换模型为：`{resolved}`{alias_note}\n🚀 后续任务将使用此模型。")
+            return
+
     async def handle(self, update: dict) -> None:
         if self.stop.is_set():
+            return
+        callback_query = update.get("callback_query")
+        if isinstance(callback_query, dict):
+            await self.handle_callback(callback_query)
             return
         message = update.get("message")
         if not isinstance(message, dict):
@@ -205,20 +310,59 @@ class Bridge:
         if command in {"/start", "/help"}:
             self.queue_reply(
                 chat_id,
-                "🤖 Antigravity Telegram Remote\n\n"
-                "💬 直接发送文本：发送新任务给 agy 执行\n"
-                "🧠 /model - 查看或切换模型（支持 14 种官方模型与快捷别名）\n"
-                "📊 /status - 查看当前任务执行状态与生效模型\n"
-                "🛑 /cancel - 立即取消任务并清理进程\n"
-                "📜 /last - 取回本人最近结果（不重新执行）\n"
+                "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
+                "💬 直接发送文字：向 AI 助手提问或分派任务\n"
+                "🧠 /model - 切换 AI 模型（支持点击按钮与 14 种模型速查）\n"
+                "🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
+                "📊 /usage - 查看 Token 消耗统计与对话轮数\n"
+                "📈 /status - 查看当前任务执行状态、记忆与磁盘空间\n"
+                "🛑 /cancel - 立即取消正在执行的任务\n"
+                "📜 /last - 查看最近一条任务的执行结果\n"
                 "🆔 /id - 查看你的 Telegram 数字 ID\n"
-                "❓ /help - 显示命令帮助说明\n\n"
-                "💡 提示：每条普通消息独立执行，不保留历史上下文。",
+                "❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
+                "✨ 支持原生上下文连续对话与自动记忆！",
+            )
+            return
+        if command in {"/new", "/reset"}:
+            self.store.reset_conversation(user)
+            self.queue_reply(
+                chat_id,
+                "🧠 对话记忆已重置！\n━━━━━━━━━━━━━━━━━━━━\n已清空当前上下文，下一条消息将开启全新对话。",
+            )
+            return
+        if command == "/usage":
+            usage = self.store.get_usage(user)
+            conv = self.store.get_conversation(user)
+            conv_info = "无活跃上下文（发送任意消息自动开启）"
+            if conv and conv.get("conversation_id"):
+                cid = conv["conversation_id"]
+                short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+                turns = conv.get("num_turns", 1)
+                conv_info = f"`{short_cid}`（已连续对话 {turns} 轮）"
+            self.queue_reply(
+                chat_id,
+                f"📊 Token 用量统计报告\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"💬 当前会话：{conv_info}\n\n"
+                f"📈 累计总用量统计：\n"
+                f"• 累计对话轮次：{usage.get('total_turns', 0)} 轮\n"
+                f"• 输入 Token：{usage.get('total_input_tokens', 0):,}\n"
+                f"• 输出 Token：{usage.get('total_output_tokens', 0):,}\n"
+                f"• 思考 Token：{usage.get('total_thinking_tokens', 0):,}\n"
+                f"• 总计 Token：{(usage.get('total_input_tokens', 0) + usage.get('total_output_tokens', 0)):,}\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 发送 /new 或 /reset 可重置当前会话上下文。",
             )
             return
         if command == "/status":
             current_model = self.store.get_model(user) or self.settings.model
             model_info = f" [模型：{current_model}]" if current_model else ""
+            conv = self.store.get_conversation(user)
+            conv_info = ""
+            if conv and conv.get("conversation_id"):
+                cid = conv["conversation_id"]
+                short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+                turns = conv.get("num_turns", 1)
+                conv_info = f"\n🧠 记忆会话：`{short_cid}` (第 {turns} 轮)"
             disk_info = ""
             try:
                 import shutil
@@ -236,7 +380,7 @@ class Bridge:
                 text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
                 text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
-            text += disk_info
+            text += conv_info + disk_info
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
@@ -278,7 +422,28 @@ class Bridge:
                         lines.append(f"• {mid} ({desc})")
                 lines.append("\n快捷别名：3.8, 3.7, 3.6, pro, sonnet, opus, 120b 等")
                 lines.append("💡 也支持直接输入任何未来或自定义的有效模型名称。")
-                self.queue_reply(chat_id, "\n".join(lines))
+                lines.append("\n👇 点击下方按钮可直接一键切换模型：")
+                keyboard = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "✨ 3.8 Flash (推荐)", "callback_data": "model:gemini-3.8-flash-high"},
+                            {"text": "⚡ 3.7 Flash", "callback_data": "model:gemini-3.7-flash-high"},
+                        ],
+                        [
+                            {"text": "🧠 3.1 Pro (旗舰)", "callback_data": "model:gemini-3.1-pro-high"},
+                            {"text": "💡 3.6 Flash", "callback_data": "model:gemini-3.6-flash-high"},
+                        ],
+                        [
+                            {"text": "🚀 Claude Sonnet 4.6", "callback_data": "model:claude-sonnet-4-6"},
+                            {"text": "🏆 Claude Opus 4.6", "callback_data": "model:claude-opus-4-6-thinking"},
+                        ],
+                        [
+                            {"text": "🌐 GPT-OSS 120B", "callback_data": "model:gpt-oss-120b-medium"},
+                            {"text": "🔄 恢复系统默认", "callback_data": "model:default"},
+                        ],
+                    ]
+                }
+                self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
                 return
             if target.lower() in {"default", "reset", "auto", "clear"}:
                 self.store.set_model(user, None)
@@ -309,7 +474,9 @@ class Bridge:
             return
 
         user_model = self.store.get_model(user) or self.settings.model or ""
-        job = Job(user, chat_id, model=user_model)
+        conv = self.store.get_conversation(user)
+        conv_id = conv.get("conversation_id", "") if conv else ""
+        job = Job(user, chat_id, model=user_model, conversation_id=conv_id)
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
