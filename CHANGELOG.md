@@ -2,6 +2,13 @@
 
 ## Unreleased — pure Root mode architecture consolidation and installer fix
 
+- **步骤 3/3 Google 账号 OAuth 授权流完全汉化与交互式 CLI 包装（Localized Google OAuth CLI Wrapper）**（`manage.py`、`install.sh`、`tests/test_installer.py`、`README.md`）：
+  - 新增 `manage.py auth-login` 子命令，通过标准库 `pty` 伪终端流式接管底层 `agy` 的 OAuth 授权交互；
+  - 彻底拦截并汉化底层 Go CLI 的所有英文提示字符串（如 `Authentication required...`、`Waiting for authentication...`、`Or, paste the authorization code here...` 等）；
+  - 终端以青色高亮显著展示 Google OAuth 网页授权链接，并提供清晰中文引导；
+  - 在终端提示「👉 请在此处粘贴浏览器显示的授权码并按回车：」，读取用户输入的授权码后自动写入伪终端并流式监听验证结果；
+  - 增加详细中文状态提示（「🔄 正在验证授权码并完成配置，请稍候……」、「✅ Google 账号授权成功！」及针对授权码失效/超时/网络故障的精准中文诊断）；
+  - 覆盖已授权复用、首次授权交互成功、授权码无效、用户取消、缺少可执行文件及 CLI 参数调度等 6 项自动化单元与集成测试。
 - **Telegram Bot Token 输入交互优化与可见性支持（Token Input UX Polish）**（`manage.py`、`tests/`、`README.md`、`docs/INSTALL_MENU.md`）：
   - 将安装向导步骤 1/3 的 Bot Token 输入改为标准可见输入，解决终端粘贴时不显示字符让用户误以为未录入或卡死的问题；
   - 增强已有 Token 提示（直接回车即可保留原 Token，粘贴新 Token 即时更新）；

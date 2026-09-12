@@ -126,6 +126,196 @@ async def check_token(settings: Settings) -> int:
     return 0
 
 
+def highlight_url(url: str) -> str:
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return url
+    return f"\033[1;36m{url}\033[0m"
+
+
+def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -> int:
+    try:
+        import pty
+        import select
+        import subprocess
+    except ImportError:
+        print("❌ 错误：当前系统缺少 pty 伪终端支持。", file=sys.stderr)
+        return 1
+
+    if not agy.is_file() or not os.access(agy, os.X_OK):
+        print(f"❌ 错误：agy 执行文件不存在或无执行权限：{agy}", file=sys.stderr)
+        return 1
+
+    cache_dir = home / ".gemini" / "antigravity-cli" / "cache"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        onboarding = cache_dir / "onboarding.json"
+        if not onboarding.is_file():
+            onboarding.write_text(
+                '{\n  "consumerOnboardingComplete": true,\n  "enterpriseOnboardingComplete": true,\n  "onboardingComplete": true\n}\n',
+                encoding="utf-8",
+            )
+    except OSError:
+        pass
+
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+    env["TERM"] = "xterm-256color"
+
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            [str(agy), "--print", "AGY ready."],
+            cwd=str(workspace),
+            env=env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+    finally:
+        os.close(slave)
+
+    buffer = ""
+    auth_prompted = False
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        r, _, _ = select.select([master], [], [], 0.2)
+        if master in r:
+            try:
+                data = os.read(master, 4096)
+                if not data:
+                    break
+                buffer += data.decode("utf-8", errors="replace")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    clean = line.strip().replace("\r", "")
+                    if not clean:
+                        continue
+                    low = clean.lower()
+                    if "authentication required" in low:
+                        print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
+                    elif clean.startswith("https://accounts.google.com/") or (
+                        "accounts.google.com" in clean and clean.startswith("https://")
+                    ):
+                        print(f"  {highlight_url(clean)}\n")
+                    elif "waiting for authentication" in low:
+                        print("⏳ 正在等待授权（有效时间约 60 秒）……")
+                    elif "paste the authorization code" in low:
+                        auth_prompted = True
+                        break
+                if auth_prompted:
+                    break
+            except OSError:
+                break
+        if "paste the authorization code" in buffer.lower():
+            auth_prompted = True
+            buffer = ""
+            break
+        if proc.poll() is not None:
+            break
+
+    if auth_prompted:
+        try:
+            code = input("👉 请在此处粘贴浏览器显示的授权码并按回车：").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n已取消授权流程。")
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+            try:
+                os.close(master)
+            except OSError:
+                pass
+            return 20
+
+        try:
+            os.write(master, (code + "\n").encode("utf-8"))
+        except OSError:
+            pass
+
+        print("🔄 正在验证授权码并完成配置，请稍候……")
+
+        post_buf = ""
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                break
+            r, _, _ = select.select([master], [], [], 0.2)
+            if master in r:
+                try:
+                    data = os.read(master, 4096)
+                    if not data:
+                        break
+                    post_buf += data.decode("utf-8", errors="replace")
+                except OSError:
+                    break
+
+        try:
+            rc = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            rc = 1
+
+        try:
+            os.close(master)
+        except OSError:
+            pass
+
+        if rc == 0:
+            print("\n✅ Google 账号授权成功！")
+            return 0
+
+        low = post_buf.lower()
+        if "invalid_grant" in low or "malformed" in low:
+            print("\n❌ 授权失败：授权码无效或格式不正确，请确保完整复制网页上的授权码。", file=sys.stderr)
+        elif "timeout" in low or "timed out" in low:
+            print("\n❌ 授权失败：等待授权超时，请重试。", file=sys.stderr)
+        elif "not eligible" in low or "location" in low:
+            print("\n❌ 地区或资格受限：当前 IP 或账号所在地区暂不支持 Antigravity 服务。", file=sys.stderr)
+        elif any(s in low for s in ("network", "connection", "eof")):
+            print("\n❌ 授权失败：连接 Google 认证服务器失败，请检查网络或代理配置。", file=sys.stderr)
+        else:
+            print("\n❌ Google 账号授权未成功完成，请重试。", file=sys.stderr)
+        return 1
+
+    try:
+        os.close(master)
+    except OSError:
+        pass
+
+    try:
+        rc = proc.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        rc = 1
+
+    if rc == 0:
+        print("\n✅ 已检测到有效的 Google 账号授权，无需重新登录！")
+        return 0
+
+    low = buffer.lower()
+    if "not eligible" in low or "location" in low:
+        print("\n❌ 地区或资格受限：当前 IP 或账号所在地区暂不支持 Antigravity 服务。", file=sys.stderr)
+    elif any(s in low for s in ("network", "connection", "dns")):
+        print("\n❌ 网络连接失败：无法连接至 Google 认证服务，请检查网络或代理配置。", file=sys.stderr)
+    else:
+        print(f"\n❌ agy 启动异常（退出代码 {rc}）。", file=sys.stderr)
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -141,6 +331,11 @@ def main() -> int:
             child.add_argument("--user", type=str, default=None)
         elif command == "smoke":
             child.add_argument("--allow-root", action="store_true")
+    auth_cmd = sub.add_parser("auth-login")
+    auth_cmd.add_argument("--config", type=Path, default=None)
+    auth_cmd.add_argument("--agy", type=Path, default=None)
+    auth_cmd.add_argument("--home", type=Path, default=None)
+    auth_cmd.add_argument("--workspace", type=Path, default=None)
     ready = sub.add_parser("check-ready")
     ready.add_argument("--file", type=Path, required=True)
     ready.add_argument("--pid", type=int, required=True)
@@ -158,6 +353,17 @@ def main() -> int:
                 and isinstance(data.get("started_at"), (int, float))
                 and 0 <= time.time() - data["started_at"] < 120
             ) else 1
+        if args.command == "auth-login":
+            if args.config:
+                settings = Settings.load(args.config)
+                agy_path = settings.agy
+                home_path = settings.home
+                work_path = settings.workspace
+            else:
+                home_path = args.home or Path(os.environ.get("HOME", "/root"))
+                agy_path = args.agy or (home_path / ".local" / "bin" / "agy")
+                work_path = args.workspace or home_path
+            return auth_login(agy_path, home_path, work_path)
         settings = Settings.load(args.config)
         if args.command == "fields":
             print(settings.home)

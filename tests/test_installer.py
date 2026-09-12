@@ -12,7 +12,7 @@ try:
 except ImportError:
     from common import ROOT, config_values, settings_at
 from agy_runner import Result, SMOKE_PROMPT, build_command
-from manage import main, service_unit, smoke
+from manage import auth_login, main, service_unit, smoke
 from settings import ConfigError, Settings, parse_env
 
 class InstallerTests(unittest.TestCase):
@@ -307,3 +307,117 @@ class SmokeTests(unittest.IsolatedAsyncioTestCase):
             with patch("manage.os.geteuid", return_value=0), patch("manage.Runner", MockRunner), \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(await smoke(config), 0)
+
+
+class AuthLoginTests(unittest.TestCase):
+    def test_auth_login_when_already_authorized(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            mock_agy.write_text("#!/bin/bash\necho 'AGY ready.'\nexit 0\n")
+            mock_agy.chmod(0o755)
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 0)
+            self.assertIn("无需重新登录", buf.getvalue())
+
+    def test_auth_login_interactive_flow_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "  https://accounts.google.com/o/oauth2/auth?test=1"
+echo "Waiting for authentication (timeout 60s)..."
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+if [[ "$code" == "good_code" ]]; then
+  echo "AGY ready."
+  exit 0
+else
+  echo 'Error: authentication failed: token exchange failed: oauth2: "invalid_grant"' >&2
+  exit 1
+fi
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf = io.StringIO()
+            with patch("sys.stdout", buf), patch("builtins.input", return_value="good_code"):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 0)
+            out = buf.getvalue()
+            self.assertIn("Google 账号授权成功", out)
+            self.assertIn("https://accounts.google.com/o/oauth2/auth?test=1", out)
+            self.assertIn("正在等待授权", out)
+
+    def test_auth_login_invalid_grant(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "  https://accounts.google.com/o/oauth2/auth?test=1"
+echo "Waiting for authentication (timeout 60s)..."
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+echo 'Error: authentication failed: token exchange failed: oauth2: "invalid_grant"' >&2
+exit 1
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
+                 patch("builtins.input", return_value="bad_code"):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 1)
+            self.assertIn("授权码无效或格式不正确", buf_err.getvalue())
+
+    def test_auth_login_user_cancel(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "  https://accounts.google.com/o/oauth2/auth?test=1"
+echo "Or, paste the authorization code here and press Enter:"
+sleep 10
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf = io.StringIO()
+            with patch("sys.stdout", buf), patch("builtins.input", side_effect=KeyboardInterrupt):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 20)
+            self.assertIn("已取消授权流程", buf.getvalue())
+
+    def test_auth_login_missing_executable(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "nonexistent"
+            buf_err = io.StringIO()
+            with patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 1)
+            self.assertIn("执行文件不存在", buf_err.getvalue())
+
+    def test_auth_login_cli_dispatch(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            mock_agy = base / "mock_agy"
+            mock_agy.write_text("#!/bin/bash\necho 'AGY ready.'\nexit 0\n")
+            mock_agy.chmod(0o755)
+
+            # Test dispatch with --config
+            dest = base / "candidate"
+            dest.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
+                "AGY_PATH": str(mock_agy),
+                "AGY_HOME": "/root",
+                "AGY_WORKSPACE": "/root",
+                "STATE_DIR": "/var/lib/agy-telegram-remote",
+            }).items()))
+            argv_config = ["manage.py", "auth-login", "--config", str(dest)]
+            with patch("sys.argv", argv_config), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+
+            # Test dispatch with explicit flags
+            argv_flags = ["manage.py", "auth-login", "--agy", str(mock_agy),
+                          "--home", str(base), "--workspace", str(base)]
+            with patch("sys.argv", argv_flags), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)

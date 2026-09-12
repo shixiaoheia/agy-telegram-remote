@@ -155,6 +155,9 @@ as_user() {
   env -i \
     HOME="$APP_HOME" USER="root" LOGNAME="root" \
     PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+    TERM="${TERM:-xterm-256color}" \
+    HTTP_PROXY="${HTTP_PROXY-}" HTTPS_PROXY="${HTTPS_PROXY-}" ALL_PROXY="${ALL_PROXY-}" NO_PROXY="${NO_PROXY-}" \
+    http_proxy="${http_proxy-}" https_proxy="${https_proxy-}" all_proxy="${all_proxy-}" no_proxy="${no_proxy-}" \
     "$@"
 }
 
@@ -438,17 +441,12 @@ _ONBOARDING_EOF
     if [[ -f "$_token_file" ]]; then
       mv -f -- "$_token_file" "$_token_file.bak.$$" 2>/dev/null || rm -f -- "$_token_file"
     fi
-    echo '🔑 正在获取 Google 授权链接（复制网址打开登录并粘贴授权码即可）：'
-    echo ''
-    as_user env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
-      /bin/bash -c 'cd -- "$1"; exec "$2" --print "AGY ready."' _ "$work" "$agy" || auth_rc=$?
+    as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
     if [[ "$auth_rc" -ne 0 ]]; then
       [[ ! -f "$_token_file.bak.$$" ]] || mv -f -- "$_token_file.bak.$$" "$_token_file" 2>/dev/null || true
-      fail 'agy 授权未完成或异常退出。'
+      fail 'Google 账号授权未完成或失败。'
     fi
     rm -f -- "$_token_file.bak.$$" 2>/dev/null || true
-    echo ''
-    echo '✅ Google 账号授权成功！'
     if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
       smoke_rc=0
     else
