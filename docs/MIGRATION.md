@@ -48,6 +48,25 @@ bash install.sh --ref 完整提交SHA
 
 前提是正在执行的 `install.sh` 自身就是这份新版，不是旧下载文件。仅把新版上传到分支并不会改变 `main` 的一键安装地址；必须明确区分“已上传分支”“已创建 PR”和“已合并 main”。
 
+## 💾 动态状态与偏好持久化继承
+
+升级过程中，除核心配置文件之外，所有用户动态产生的状态与偏好文件均完整保留并继承：
+- `/var/lib/agy-telegram-remote/whitelist.json`：动态白名单用户授权列表；
+- `/var/lib/agy-telegram-remote/model-*.json`：每用户独立选择的 AI 模型；
+- `/var/lib/agy-telegram-remote/effort-*.json`：每用户独立的思考深度设定；
+- `/var/lib/agy-telegram-remote/mode-*.json`：每用户独立的执行模式设定（plan / accept-edits）；
+- `/var/lib/agy-telegram-remote/conversation-*.json`：多轮对话连续上下文与轮次；
+- `/var/lib/agy-telegram-remote/usage-*.json`：历史累计 Token 资源消耗报表。
+
+新版程序升级后将自动加载上述私有文件（`0600` 权限保护），老用户无感知无缝过渡。
+
+## 👑 模式迁移（标准沙箱模式 ↔ Root 极简模式）
+
+- **从标准沙箱迁移到 Root 模式**：
+  执行 `bash install.sh --root`，安装器将自动把 systemd 服务账户切换为 `root:root`，HOME 调整为 `/root`，工作区调整为 `/root`，同时保留原配置与 Token。
+- **从 Root 模式切回标准沙箱模式**：
+  执行 `bash install.sh`（或 `bash install.sh --install`），安装器将重新创建/审计 `agy-tg` 账户，恢复受限工作空间与 `ProtectHome=read-only` 策略。
+
 ## 🗑️ 卸载语义变化
 
 新版默认 `--uninstall` 只移除服务，保留代码、配置与数据。`--uninstall --purge` 必须二次明确确认，且运行账户不能有剩余进程。彻底清理范围会先完整显示。

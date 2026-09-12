@@ -1,7 +1,18 @@
 # Changelog
 
-## Unreleased — system monitoring, workspace browsing, dynamic whitelist, engine effort & mode controls
+## Unreleased — comprehensive documentation overhaul, system monitoring, workspace browsing, dynamic whitelist, engine effort & mode controls
 
+- **全量系统性文档与使用指南深度重构（Comprehensive Documentation Overhaul）**（`README.md`、`docs/`、`SECURITY.md`）：
+  - `README.md` 重构升级：新增覆盖全部 15 种指令与行为的速查表（含完整语法、参数与默认值、操作权限与典型场景）；
+  - 新增 `/effort` 思考强度分级建议、`/mode plan` 只读推演零写入安全机制、多轮会话记忆工作流与 `/usage` 报表说明；
+  - 补充 `/sys` 硬件与进程监控卡片、`/ls` 11 类 Emoji 文件类型图标映射表、相对子路径漫游沙箱防护详解；
+  - 详细梳理单机 VPS 极简 Root 部署模式（`--root`）与标准沙箱模式的全维度对比表；
+  - 扩充状态存储目录结构树（`0600` 权限独立状态文件清单）与核心配置项表格；
+  - 常见问题排查（FAQ）扩充动态授权白名单安全模型、`/restart` 互斥锁保护机制、`/mode plan` 只读安全保障及 `--root` 适用选型建议；
+  - `docs/INSTALL_MENU.md` 补全 `--root` 命令行参数与 Root 极简模式行为说明；
+  - `docs/TESTING.md` 补全全部新功能 176 项断言回归测试分类细则；
+  - `docs/MIGRATION.md` 增加升级期间动态白名单与用户偏好持久化继承机制以及标准/Root 模式互相平滑迁移指南；
+  - `SECURITY.md` 补充动态白名单权限隔离与防踢保护、重启互斥锁、`/ls` 防越权遍历沙箱与 CLI 参数安全白名单规范。
 - **原生 Linux VPS 硬件与进程实时监控（`/sys` & `/system`）**（`bot.py`）：
   - 纯标准库直接读取 Linux `/proc/uptime`、`/proc/loadavg`、`/proc/meminfo`、`/proc/<pid>/statm` 与平台系统信息；
   - 零外部三方依赖，秒级回传 VPS 系统负载、物理内存使用率、磁盘可用空间、Bot PID 及常驻内存（RSS MB）；

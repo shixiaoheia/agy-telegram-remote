@@ -99,3 +99,54 @@ Store 的权限检查、降低安装器 umask 或跳过安装自检。
 `/model default` 重置模型偏好为默认（由 agy 决定）。
 偏好以 `0600` 私有权限存储于 `model-{user}.json`，在白名单用户被移除时由 `maintain()` 自动清理。
 任务启动时将用户模型透传给 `agy_runner` 的 `--model` 参数，并在接收确认及最终执行结果中回显模型标识。
+
+## 思考深度与执行模式回归（/effort 与 /mode）
+
+- **思考深度（`/effort`）**：
+  - 仅接受 `low`、`medium`、`high` 或恢复默认 `default`，支持中英文别名（`低`/`中`/`高`/`med`）；
+  - 选项偏好独立原子落盘至 `state/effort-{user}.json`（权限 `0600`），未授权或移除用户在 `maintain()` 时物理删除；
+  - `agy_runner` 在任务构建时透传 `--effort <level>`，`test_runner` 断言命令行参数正确装配；
+  - `test_bot` 覆盖行内按钮与回调查询（`callback_query`）处理，并向 Telegram 发送 Toast 响应。
+- **执行模式（`/mode`）**：
+  - 支持推演规划 `plan`（只读，严禁写入任何工作区文件）与落地编辑 `accept-edits`（代码生成），支持中文别名（`规划`/`编辑`/`落地`）；
+  - 偏好独立落盘至 `state/mode-{user}.json`（权限 `0600`）；
+  - `agy_runner` 在任务构建时透传 `--mode <mode>` 参数，`test_runner` 断言参数透明拼装。
+
+## 连续对话与 Token 统计回归（--conversation 与 /usage）
+
+- **连续对话多轮记忆（Context Continuity）**：
+  - `state_store` 记录每用户的 `conversation_id` 及轮次 `num_turns`（落盘至 `conversation-{user}.json`）；
+  - `agy_runner` 构建命令时注入 `--conversation <id>`，`test_runner` 断言会话 ID 正确透传；
+  - `/new` 与 `/reset` 重置会话，测试断言清除上下文后下一轮开启独立会话；
+  - 任务接收卡片智能显示 `已关联上下文 (第 N 轮)` 或 `全新独立会话`。
+- **Token 消耗统计与 `/usage` 报表**：
+  - 严格解析 `agy` JSON 响应中的 `input_tokens`、`output_tokens`、`thinking_tokens` 和 `total_tokens`；
+  - 自动累加至 `state/usage-{user}.json`（含轮次与各项 Token），`test_store` 验证维护清理；
+  - `/usage` 汇总当前会话 ID 与历史累计消耗，`test_bot` 断言千分位格式化报表输出。
+
+## 系统监控与工作空间沙箱回归（/sys 与 /ls）
+
+- **系统监控（`/sys` 或 `/system`）**：
+  - 纯标准库读取 `/proc/uptime`、`/proc/loadavg`、`/proc/meminfo`、`/proc/<pid>/statm` 与 `/etc/os-release`；
+  - `test_bot` 验证在虚拟或不同 Linux 发行版环境下的容错解析，断言格式包含平台、运行时间、CPU、物理内存、磁盘与 Bot PID/常驻内存。
+- **工作区速览与防穿越沙箱（`/ls` 或 `/files`）**：
+  - 智能文件类型图标映射（`format_file_entry`）涵盖 Python `🐍`、Shell `🐚`、Markdown `📝`、配置 `⚙️`、日志 `📋`、数据库 `🗄️`、压缩包 `📦`、图片 `🖼️`、目录 `📁`、文件 `📄`；
+  - 支持 `/ls <subpath>` 浏览子目录；
+  - `test_bot` 深度验证路径沙箱安全：使用 `os.path.realpath` 严密阻断 `..` 目录遍历越权逃逸，自动过滤工作区外的恶意软链接。
+
+## 动态白名单与安全平滑重启回归（/whitelist 与 /restart）
+
+- **动态白名单（`/whitelist`）**：
+  - 仅主管理员（`ALLOWED_USER_IDS` 首个 ID）有权执行 `add` 与 `remove`；
+  - 动态白名单安全保存至 `state/whitelist.json`（权限 `0600`）；
+  - `test_store` 验证基础配置用户与动态用户安全合并，验证移除动态用户逻辑；
+  - `test_bot` 验证非管理员阻断、基础配置用户防移除保护，以及数字 ID 格式校验。
+- **安全平滑热重载（`/restart`）**：
+  - 仅主管理员可用；
+  - `test_bot` 验证当 `self.slot` 处于任务执行中时强阻断重启，防止掐断长任务；空闲时放行并就地触发 `os.execv`。
+
+## Root 极简部署模式回归（--root 与 --allow-root）
+
+- `test_installer` 验证 `--root` 参数生成以 `root:root` 运行、`ProtectHome=no` 的 systemd unit；
+- 验证 `smoke` 自检测试在携带 `--allow-root` 参数时放行 root 执行，未携带时维持拒绝策略；
+- 保证个人独立 VPS 用户免除多用户配置困扰，同时不放宽生产级默认安装模式的安全审计。

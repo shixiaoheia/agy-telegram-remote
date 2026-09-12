@@ -45,6 +45,7 @@
 |---|---|
 | `bash install.sh` | 显示管理菜单 |
 | `bash install.sh --install` | 直接进入安装/更新，不再显示管理菜单 |
+| `bash install.sh --root` | 直接以 root 账户安装/更新与运行后台守护进程，省去多系统用户隔离（个人 VPS 极简模式） |
 | `bash install.sh --enable-auto-approve` | 按原含义直接安装/更新，并明确启用自动审批 |
 | `bash install.sh --reauth` | 按原含义直接安装/更新，重新授权 |
 | `bash install.sh --ref COMMIT_OR_BRANCH` | 按原含义直接安装选定版本 |
@@ -54,6 +55,14 @@
 
 没有 sudo 权限的运行账户不能用来安装。普通管理账户选择模式后，
 安装器在提权重启时携带所选模式，避免重复显示菜单。
+
+### 👑 Root 极简部署模式说明
+
+使用 `bash install.sh --root` 时：
+1. 运行账户直接指定为 `root:root`，HOME 目录为 `/root`；
+2. 守护进程 systemd unit 中的 `ProtectHome` 策略调整为 `no`，以便直接访问管理宿主机 `/root` 工作区；
+3. smoke 自检测试自动携带 `--allow-root` 参数通过权限校验；
+4. 升级时自动保留原配置、动态白名单及用户偏好，省去多系统用户切换与权限排查成本。
 
 ## 📦 改动范围说明
 
