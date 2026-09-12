@@ -1,0 +1,191 @@
+"""Strict, non-executable configuration. Python 3.10+, standard library only."""
+from __future__ import annotations
+
+import os
+import re
+import shlex
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
+
+TOKEN_RE = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,200}\Z")
+PATH_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
+DEFAULTS = {
+    "AGY_PATH": "/home/agy-tg/.local/bin/agy",
+    "AGY_HOME": "/home/agy-tg",
+    "AGY_WORKSPACE": "/srv/agy-workspace",
+    "AGY_TIMEOUT_SECONDS": "900",
+    "MAX_PROMPT_CHARS": "12000",
+    "MAX_OUTPUT_BYTES": "1048576",
+    "MAX_REPLY_CHARS": "30000",
+    "AGY_SKIP_PERMISSIONS": "true",
+    "STATE_DIR": "/var/lib/agy-telegram-remote",
+    "RESULT_RETENTION_DAYS": "7",
+}
+KEYS = frozenset(DEFAULTS) | {"TELEGRAM_BOT_TOKEN", "ALLOWED_USER_IDS"}
+
+
+class ConfigError(ValueError):
+    """Messages must not contain configuration values or secrets."""
+
+
+def read_private_text(path: Path, limit: int = 65536) -> str:
+    """Reject symlinks, non-regular files and oversized inputs before reading."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        meta = os.fstat(fd)
+        if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1:
+            raise ConfigError("配置必须是独立的普通文件，不能是链接或设备。")
+        if meta.st_size > limit:
+            raise ConfigError("配置文件过大。")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            raise ConfigError("配置文件过大。")
+        return raw.decode("utf-8-sig")
+    finally:
+        os.close(fd)
+
+
+def parse_env(text: str) -> dict[str, str]:
+    """A limited dotenv subset; NEVER source/eval or expand $variables."""
+    values: dict[str, str] = {}
+    for number, original in enumerate(text.splitlines(), 1):
+        line = original.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not separator or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            raise ConfigError(f"配置第 {number} 行格式错误。")
+        if key in values:
+            raise ConfigError(f"配置项重复：{key}。")
+        if value.startswith(("'", '"')):
+            try:
+                parts = shlex.split(value, comments=True, posix=True)
+            except ValueError:
+                raise ConfigError(f"配置第 {number} 行引号不完整。") from None
+            if len(parts) != 1:
+                raise ConfigError(f"配置第 {number} 行格式错误。")
+            value = parts[0]
+        else:
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+        if any(c in value for c in ("\x00", "\r", "\n")):
+            raise ConfigError(f"配置第 {number} 行包含控制字符。")
+        values[key] = value
+    return values
+
+
+def integer(values: Mapping[str, str], key: str, minimum: int, maximum: int) -> int:
+    try:
+        result = int(values[key])
+    except (KeyError, ValueError, TypeError):
+        raise ConfigError(f"{key} 必须是整数。") from None
+    if not minimum <= result <= maximum:
+        raise ConfigError(f"{key} 超出允许范围 {minimum}..{maximum}。")
+    return result
+
+
+def absolute_path(value: str, key: str) -> Path:
+    # Keeping deployment paths simple also prevents systemd specifier injection.
+    if not PATH_RE.fullmatch(value) or ".." in Path(value).parts:
+        raise ConfigError(f"{key} 必须是无空格、无特殊字符的绝对路径。")
+    path = Path(value)
+    if path == Path("/"):
+        raise ConfigError(f"{key} 不能是根目录。")
+    return path
+
+
+@dataclass(frozen=True)
+class Settings:
+    token: str
+    allowed: frozenset[int]
+    agy: Path
+    home: Path
+    workspace: Path
+    timeout: int = 900
+    max_prompt: int = 12000
+    max_output: int = 1048576
+    max_reply: int = 30000
+    skip_permissions: bool = True
+    state_dir: Path = Path("/var/lib/agy-telegram-remote")
+    retention_days: int = 7
+
+    @classmethod
+    def from_mapping(cls, original: Mapping[str, str]) -> "Settings":
+        values = DEFAULTS | dict(original)
+        token = values.get("TELEGRAM_BOT_TOKEN", "")
+        if not TOKEN_RE.fullmatch(token):
+            raise ConfigError("Telegram Bot Token 格式不正确。")
+        ids = values.get("ALLOWED_USER_IDS", "").split(",")
+        if not 1 <= len(ids) <= 32 or any(not re.fullmatch(r"[0-9]+", x.strip()) for x in ids):
+            raise ConfigError("白名单必须包含 1..32 个以逗号分隔的数字用户 ID。")
+        allowed = frozenset(int(x.strip()) for x in ids)
+        if any(not 0 < uid < 2**53 for uid in allowed):
+            raise ConfigError("Telegram 数字 ID 超出范围。")
+        permission = values["AGY_SKIP_PERMISSIONS"].strip().lower()
+        if permission not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+            raise ConfigError("AGY_SKIP_PERMISSIONS 必须是 true 或 false。")
+        work = absolute_path(values["AGY_WORKSPACE"], "AGY_WORKSPACE")
+        base = Path("/srv/agy-workspace")
+        if work != base and base not in work.parents:
+            raise ConfigError("工作目录必须在 /srv/agy-workspace 内。")
+        state = absolute_path(values["STATE_DIR"], "STATE_DIR")
+        state_base = Path("/var/lib/agy-telegram-remote")
+        if state != state_base and state_base not in state.parents:
+            raise ConfigError("STATE_DIR 必须在 /var/lib/agy-telegram-remote 内。")
+        return cls(
+            token=token, allowed=allowed,
+            agy=absolute_path(values["AGY_PATH"], "AGY_PATH"),
+            home=absolute_path(values["AGY_HOME"], "AGY_HOME"),
+            workspace=work,
+            timeout=integer(values, "AGY_TIMEOUT_SECONDS", 10, 86400),
+            max_prompt=integer(values, "MAX_PROMPT_CHARS", 1, 100000),
+            max_output=integer(values, "MAX_OUTPUT_BYTES", 1024, 16777216),
+            max_reply=integer(values, "MAX_REPLY_CHARS", 1000, 100000),
+            skip_permissions=permission in {"true", "1", "yes", "on"},
+            state_dir=state,
+            retention_days=integer(values, "RESULT_RETENTION_DAYS", 1, 30),
+        )
+
+    @classmethod
+    def load(cls, path: Path) -> "Settings":
+        return cls.from_mapping(parse_env(read_private_text(path)))
+
+
+def merged_config(old: Mapping[str, str], token: str, ids: str,
+                  home: str, enable_auto: bool = False) -> dict[str, str]:
+    """Fresh installs auto-approve; upgrades preserve old security choices."""
+    values = DEFAULTS | {key: value for key, value in old.items() if key in KEYS}
+    if old and "AGY_SKIP_PERMISSIONS" not in old:
+        values["AGY_SKIP_PERMISSIONS"] = "false"
+    if not old.get("AGY_PATH"):
+        values["AGY_PATH"] = home + "/.local/bin/agy"
+    values["AGY_HOME"] = home
+    if token:
+        values["TELEGRAM_BOT_TOKEN"] = token
+    if ids:
+        values["ALLOWED_USER_IDS"] = ids
+    if enable_auto:
+        values["AGY_SKIP_PERMISSIONS"] = "true"
+    Settings.from_mapping(values)
+    return values
+
+
+def serialize_env(values: Mapping[str, str]) -> str:
+    Settings.from_mapping(values)
+    # All accepted values are single-line; shlex.quote does not execute anything.
+    order = ["TELEGRAM_BOT_TOKEN", "ALLOWED_USER_IDS", *DEFAULTS]
+    return "# Managed configuration; never commit this file.\n" + "".join(
+        f"{key}={shlex.quote(values[key])}\n" for key in order
+    )
+
+
+def check_no_symlink(path: Path) -> None:
+    """Check each existing component; installer also controls parent ownership."""
+    for item in [*reversed(path.parents), path]:
+        if item.is_symlink():
+            raise ConfigError("部署路径包含符号链接，已停止。")

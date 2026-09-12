@@ -1,283 +1,220 @@
 > **TG 频道：[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**
 >
-> 用于发布版本更新、使用技巧与公告。欢迎各位大佬进群交流 → [点击加入 Xiaohei的秘密基地](https://t.me/xiaoheidemimi)
+> 发布版本更新、使用技巧与公告。[进入社区交流](https://t.me/xiaoheidemimi)
 
-# Antigravity Telegram Remote | Antigravity Telegram 远程控制工具
+# Antigravity Telegram Remote
 
-把 Telegram 私聊作为你自己服务器上 Google Antigravity CLI（agy）的远程入口：发送任务，服务器在专用工作目录执行，再把结果返回私聊。
+把 Telegram 私聊作为自己服务器上 Google Antigravity CLI（agy）的远程入口：发送任务，在固定工作目录运行，再把最终结果发回私聊。
 
-> **使用前说明**
+**三个安装阶段：Bot Token → Telegram 数字 ID → Google 授权。** 自动创建工作目录、安装依赖和 agy、设置运行账户。全新安装默认自动审批；普通更新尊重旧配置。
+
+社区项目，与 Google、Telegram 没有官方关联。只部署到你拥有或获授权的服务器、Bot 和工作目录。
+
+> **推荐服务器（推广链接）：[搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**
+
+## 安装前必须知道
+
+自动审批意味着白名单用户可让 agy 执行命令、修改文件。非 root 账户、专用目录和 systemd 加固**不是完整沙箱**，也不是对恶意白名单用户的凭据隔离。仅允许自己或完全信任的人使用，建议使用专用 VPS。详见 [SECURITY.md](SECURITY.md)。
+
+程序不接收群聊任务；没有 Web 后台、数据库、Redis 或额外入站端口。Python 部分只依赖 Python 3.10+ 标准库，不需要 `pip`、虚拟环境、`python-telegram-bot` 或 `python-dotenv`。Google agy 二进制是单独安装的运行依赖，不包含在仓库里。
+
+## 支持环境
+
+Debian 12 及以上，或 Ubuntu 22.04 及以上；必须有可用的 systemd、root 或 sudo 权限，以及能连接 GitHub、Google 与 Telegram 的网络。不支持 Alpine、无 systemd 的普通容器，也不需要域名或 Nginx。
+
+准备自己的 BotFather Token、自己的 Telegram 数字用户 ID、Google 账号和可打开授权链接的浏览器。不要把 Token、授权链接、授权码、服务器私钥或真实配置上传到 GitHub。
+
+## 三步安装
+
+在可交互的 SSH 终端执行，**先下载，再用 bash 运行**：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh
+bash install.sh
+```
+
+不要使用 `curl ... | bash`：本项目向导需要终端输入。安装脚本会读取 GitHub 上当前 `main` 并显示使用的精确提交号；先审阅代码再以特权账户运行。为固定已审阅的版本，可使用 `bash install.sh --ref 完整提交SHA`。
+
+界面示意：
+
+```text
+=============================================
+ Antigravity Telegram Remote 极简一键安装向导
+=============================================
+
+步骤 1/3：请输入 Telegram Bot Token：
+> 输入隐藏
+
+步骤 2/3：请输入 Telegram 数字 ID：
 >
-> - 仅部署在你拥有或已获明确授权的服务器、Telegram Bot 与工作目录中。
-> - Bot Token、Google 登录凭据与工作目录内容由你自己保管；不要发送给他人，也不要提交到 GitHub。
-> - 此项目不监听群聊。只有配置在白名单内的数字 Telegram ID 才能提交任务。
-> - agy 可读写工作目录、调用工具；是否允许自动批准工具权限由安装器单独询问。
-> - 社区维护，与 Google、Telegram 没有官方关联。
 
-> **推荐服务器（推广链接）：[搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**  
-> 还没有 Linux 服务器？👉 **[点这里前往搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**，再按自己的地区、预算和线路需求选择。
+自动准备运行账户、/srv/agy-workspace、依赖与 agy。
 
-## 它是怎么工作的
+步骤 3/3：Google 账号授权
+已有有效授权自动复用。
+否则打开授权链接 → 登录 → 粘贴授权码。
+进入 agy 主界面后输入 /exit 返回安装器。
 
-~~~text
-你在 Telegram 私聊发送任务
-          ↓
-Bot 检查是否为私聊、是否在数字 ID 白名单中
-          ↓
-受限账户 agy-tg 在专用工作目录启动 agy
-          ↓
-agy 输出结果；程序将结果发回 Telegram 私聊
-~~~
+验证 agy 回复、Telegram 接口及服务初始化……
 
-Telegram 只是远程控制入口，真正执行任务的是服务器上的 agy。每条 Telegram 任务都会启动一次独立的 agy headless 运行；默认不保留上下文会话。
+🎉 安装成功！服务已启动。
+```
 
-## 部署前准备
+这是三个安装阶段，不是承诺 Google 或 agy 自身永远只有三次输入。首次授权可能出现 agy 自身的条款或信任提示。安装器没有虚构“只登录后立即退出”的命令，也不自动粘贴授权码。
 
-| 需要准备 | 说明 |
-|---|---|
-| Debian 12 或 Ubuntu 22.04+ 服务器 | 可用 root 或拥有 sudo 权限的普通用户登录 |
-| Telegram Bot Token | 在 Telegram 的 @BotFather 创建 Bot 后取得 |
-| 自己的 Telegram 数字 ID | 纯数字，不是 @用户名、手机号或群 ID |
-| Google 账号 | 用于在服务器上完成一次 agy 登录授权 |
-| 一台自己的电脑或手机浏览器 | 用来打开 agy 在 SSH 中显示的一次性 Google 授权链接 |
+安装器会自动执行以下工作：
 
-安装前请先准备好自己的 Telegram 数字 ID。你可以使用自己信任的 Telegram ID 查询方式取得；整个过程中只需要填入数字 ID，**绝不要把 Bot Token 发给任何查询机器人或他人。**
+- 新建不带 sudo/额外组权限的 `agy-tg` 用户；创建默认工作目录并检查路径。
+- 把**程序代码放在 root 所有的发布目录**，使用系统 `/usr/bin/python3`，不再执行旧用户可写虚拟环境中的解释器。
+- 创建候选配置，运行离线测试和 Telegram 检查，再停止旧服务，授权并执行 agy 自检。
+- 自检与普通任务共用 `agy_runner.py`，统一 `--output-format json`、账户、HOME、工作目录及权限参数；自检超时单独设为 90 秒。
+- 备份旧配置、旧 unit 和旧程序入口，切换发布；必须通过实际 Bot 初始化检查才显示成功。切换失败会尝试恢复旧入口/配置/unit。
 
-本项目使用 Telegram 长轮询，不需要域名、Nginx、Webhook，也不需要为 Bot 额外开放 HTTP 端口。
+首次安装中途取消可能已安装系统依赖或创建账户；不会谎称所有系统改动都撤销。更新会停止旧服务中的任务，先用 `/status` 检查。不要一边手工运行 agy，一边更新。
 
-## 从 0 开始一键安装
+## 安装后验证
 
-先 SSH 登录服务器。root 和普通 sudo 用户都可以运行下面命令：
-
-~~~bash
-curl -fsSLO https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh && bash install.sh
-~~~
-
-这条命令会先下载脚本；下载失败时不会假装安装成功。
-
-### 先选择操作
-
-启动脚本后输入 `1` 进入安装或更新；输入 `2` 会进入卸载流程。首次部署请选择 `1`。
-
-### 选择安装后，安装器会逐步询问
-
-1. Telegram Bot Token（输入时不显示）
-2. 允许使用工具的 Telegram 数字 ID
-3. 专用工作目录  
-   直接回车默认使用 /srv/agy-workspace；为避免误改系统目录，只允许该目录或其子目录。
-4. agy 任务权限模式  
-   默认安全模式；只有输入 YES 才会让 agy 自动批准命令、文件等所有工具权限。
-5. 是否按 Google 官方方式安装 agy
-6. Google OAuth 授权
-
-安装器会自动完成：
-
-- 安装 Git、Python、虚拟环境和项目依赖
-- 创建不具备 sudo 权限的受限账户 agy-tg
-- 在 /opt/agy-telegram-remote 部署项目
-- 检查 Python 语法和 Bot Token 是否真实可用
-- 配置并启动 systemd 服务
-- 检查服务是否真的处于运行状态；失败时直接显示最近日志
-
-不需要自行编译 agy 或 Python 项目。
-
-## Google OAuth：在 SSH 中完成
-
-第 6 步会在**当前 SSH 终端**启动 agy。Google 的远程 SSH 登录流程会显示一次性授权链接：
-
-1. 复制 SSH 终端显示的授权链接。
-2. 在你自己的电脑或手机浏览器打开链接，登录 Google 账号并允许授权。
-3. 浏览器会显示一次性授权码。
-4. 将授权码粘贴回同一个 SSH 终端中 agy 的提示处。
-5. 授权完成后退出 agy，回到安装器输入 YES。
-6. 安装器会自动发送一条只读测试，确认 agy 登录确实可用，然后才启动 Telegram 服务。
-
-不要把授权链接或授权码发给别人，也不要把它们写到 GitHub。
-
-Google 官方参考：
-
-- [安装与 SSH 授权流程](https://antigravity.google/docs/cli/install/)
-- [headless 模式与输出格式](https://antigravity.google/docs/cli/headless/)
-
-## 安装后先验证
-
-安装完成后，先看服务状态：
-
-~~~bash
-sudo systemctl status agy-telegram-remote
-~~~
-
-显示 active (running) 后，私聊你的 Bot，发送：
-
-~~~text
-/start
-~~~
-
-然后发送一个只读任务，例如：
-
-~~~text
-列出当前工作目录中的文件名，并说明每个文件的用途。不要修改任何文件，也不要执行网络请求。
-~~~
-
-成功时会先看到“任务已接收”，完成后收到结果。
-
-若需要查看日志：
-
-~~~bash
-sudo journalctl -u agy-telegram-remote -f
-~~~
-
-## Telegram 使用方法
-
-只在私聊中使用。支持的控制命令：
-
-| 命令 | 作用 |
-|---|---|
-| /start 或 /help | 显示简短帮助 |
-| /id | 显示自己的 Telegram 数字 ID；此命令仅限私聊 |
-| /status | 查看自己的任务是否运行中 |
-| /cancel | 请求停止自己的当前任务 |
-
-直接发送普通文字就是任务。例如：
-
-~~~text
-查看当前项目的 README，列出需要改进的地方。先不要修改文件。
-~~~
-
-~~~text
-运行项目测试，告诉我失败原因和建议。先不要改代码。
-~~~
-
-同一个共享工作目录一次只允许运行一个 agy 任务：同一用户重复发送会被拒绝，其他白名单用户会收到“工作目录忙碌”提示，从而避免同时读写冲突。运行期间发送 /cancel 会停止 agy 及其任务进程组。服务重启时会丢弃积压消息，避免旧任务在你不知情时重新执行。
-
-为避免某条任务输出过大拖垮服务或刷屏，程序最多保留 agy 输出的最后 1 MiB，并最多回传 30,000 个字符；超过部分会明确提示已截断。
-
-## 权限模式：为什么有时命令没有执行
-
-agy 的 headless 模式无法弹出交互式确认。默认权限策略会允许工作目录内的常见文件操作，但可能拒绝 shell 命令等需要确认的工具；这种拒绝可能仍以成功退出，只在诊断信息中提示。
-
-安装器默认将以下配置设为 false：
-
-~~~dotenv
-AGY_SKIP_PERMISSIONS=false
-~~~
-
-这是推荐起点。如果你已经确认：
-
-- Bot 只有自己或完全信任的人可以私聊；
-- 工作目录是专用目录，没有敏感文件；
-- agy 使用的是受限账户 agy-tg；
-- 你明确需要让 agy 自动执行命令或修改文件；
-
-才可编辑配置：
-
-~~~bash
-sudo nano /opt/agy-telegram-remote/.env
-~~~
-
-将它改为：
-
-~~~dotenv
-AGY_SKIP_PERMISSIONS=true
-~~~
-
-然后重启服务：
-
-~~~bash
-sudo systemctl restart agy-telegram-remote
-~~~
-
-开启后，白名单用户发来的任务会携带 agy 的自动批准权限参数。它不是全服务器 root 权限，但仍可能读写 agy-tg 可访问的内容、修改工作目录并执行命令，所以请谨慎使用。
-
-## 常见问题排查
-
-### 一开始就提示 root 或 sudo 相关错误
-
-新版安装器已同时支持 root 和普通 sudo 用户：
-
-- 你用 root 登录：直接运行安装命令即可。
-- 你用普通用户登录：该用户需要可用的 sudo 权限。
-
-服务本身和 agy 不会以 root 运行。
-
-### 提示 agy 未找到或授权测试失败
-
-先确认二进制是否存在：
-
-~~~bash
-sudo -u agy-tg -H /home/agy-tg/.local/bin/agy --version
-~~~
-
-再以受限账户手动进入工作目录测试：
-
-~~~bash
-sudo -u agy-tg -H bash -lc 'cd /srv/agy-workspace && /home/agy-tg/.local/bin/agy'
-~~~
-
-如果这里也无法完成登录，问题在 agy 安装或 Google 授权；重新运行安装器即可再次走授权流程。
-
-### Bot 不回复，或服务没有 active (running)
-
-~~~bash
+```bash
 sudo systemctl status agy-telegram-remote --no-pager
-sudo journalctl -u agy-telegram-remote -n 100 --no-pager
-~~~
+sudo journalctl -u agy-telegram-remote -n 80 --no-pager
+```
 
-重点检查：
+私聊 Bot，依次发送：
 
-- Bot Token 是否来自正确的 BotFather Bot；
-- 数字 Telegram ID 是否填对；
-- /opt/agy-telegram-remote/.env 是否仍是 agy-tg 所有；
-- agy 路径是否为 /home/agy-tg/.local/bin/agy。
+```text
+/start
+```
 
-### Bot 回复任务完成，但 agy 没有执行命令
+```text
+只回复“连接成功”，不要使用工具或修改任何文件。
+```
 
-检查 Telegram 返回信息是否提到权限策略拒绝。默认模式下这是预期保护。确认白名单和专用目录安全后，可按上面的“权限模式”章节将 AGY_SKIP_PERMISSIONS 改为 true 并重启服务。
+再用一个你可核对的只读任务检查实际工作目录和工具能力。最后发送 `/last`，应只取回同一个任务编号的结果，不启动新任务。
 
-### 想更新项目
+**安装成功不等于任意未来任务都一定成功。** 网络、配额、授权、模型行为和上游协议仍可能变化；详见 [测试及真实环境验收](docs/TESTING.md)。
 
-重新运行一键安装命令，菜单选择 `1` 即可。脚本会使用 Git 快进更新；如果你手动修改过 /opt/agy-telegram-remote 中的项目文件，先备份或提交你的改动，再更新。
+## 使用方法
 
-## 一键卸载
+| 命令 | 行为 |
+|---|---|
+| 普通文字 | 启动一次独立 agy 任务；不自动继承上一条的对话上下文 |
+| `/status` | 查看自己的任务与工作目录占用情况 |
+| `/cancel` | 请求取消自己的任务并回收该任务的进程组 |
+| `/last` | 取回本人最近的结果，不执行 agy |
+| `/id` | 在私聊显示自己的数字 ID |
+| `/start`、`/help` | 显示帮助 |
 
-不再使用时，在 SSH 终端重新运行同一条命令：
+共享工作目录同一时间只有一个任务，不排队。开始执行前先保存任务记录并尝试发送确认；确认发送失败就不启动 agy。完成后先保存结果，再回传 Telegram。只有明确的 Telegram `429` 拒绝会做有限的**消息投递重试**，不会因此再次执行任务。
 
-~~~bash
-curl -fsSLO https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh && bash install.sh
-~~~
+每个白名单用户最多保存一份最近结果，默认保存 7 天；启动、提交任务和运行中定期清理过期结果。`/last` 的界面过滤不是不同白名单用户之间的操作系统隔离——所有用户必须互信。
 
-在菜单输入 `2`，再按提示输入 `UNINSTALL`。默认卸载会停止并删除：
+服务重启会丢弃此前积压的 Telegram 更新，不自动重新执行中断任务。更新水位在分派前写入磁盘，以避免消息重新投递造成重复操作；崩溃窗口内可能丢掉一条任务，因此**不是 exactly-once 或可靠任务队列**。不要把它用于必须精确一次执行的支付、删除生产数据等高风险流程。
 
-- systemd 服务 `agy-telegram-remote`
-- 程序目录 `/opt/agy-telegram-remote`（包括其中的 Bot Token 配置）
+## “没有最终回复”现在如何处理
 
-默认**保留** Telegram Bot、agy、Google 登录状态、受限账户 `agy-tg` 与工作目录 `/srv/agy-workspace`，方便以后重新安装；卸载前请自行备份需要的项目文件。
+只有“正常退出 + 完整 JSON 对象 + `status=SUCCESS` + 非空文本 `response`”才作为正常回答处理。空回复、异常状态、缺少字段、损坏 JSON、输出超限、取消及超时分别处理。
 
-只有第二次明确输入 `PURGE` 才会彻底删除 `/srv/agy-workspace`、`agy-tg` 账户及其 home 中可能保存的 agy / Google 登录状态。脚本会先检查该账户是否仍有进程，有残留时不会强行删除。无论哪种卸载方式，都不会删除 BotFather 中的 Telegram Bot 本身。
+`SUCCESS` 但文本为空时，提示“缺少最终回复，需要核对”，不会宣称业务任务已经完成，也不会要求直接重发原任务。模型可能已经修改了文件，先检查 `/last` 和工作目录。
 
-## 项目结构
+不会把 JSON 碎片、中途进度或未经识别的结构化输出当作最终答案，也不会通过换参数再执行任务来“补救”。stderr 只用于有限的错误分类，不把原始敏感诊断发到聊天或写进普通日志。配额/认证/网络分类是提示性判断，不是完整的上游错误协议。
 
-~~~text
-agy-telegram-remote/
-├── .env.example
-├── .gitignore
-├── README.md
-├── bot.py
-├── install.sh
-└── requirements.txt
-~~~
+## 配置和目录
 
-真实 Token、Google 登录凭据、服务器地址、私钥、日志和工作目录内容都不应提交到仓库。
+| 路径 | 用途 |
+|---|---|
+| `/etc/agy-telegram-remote/config.env` | 真实配置，`root:agy-tg`，`0640`；不要上传 |
+| `/opt/agy-telegram-remote` | 当前 root 管理的程序发布入口 |
+| `/opt/agy-telegram-remote-releases/` | root 所有的程序发布目录 |
+| `/home/agy-tg` | agy 安装、缓存与 Google 登录；不要上传 |
+| `/srv/agy-workspace` | 默认工作目录，或升级时保留的原有子目录 |
+| `/var/lib/agy-telegram-remote` | 私有任务记录及更新水位 |
+| `/run/agy-telegram-remote/ready.json` | 当前服务初始化就绪标志 |
+| `/var/backups/agy-telegram-remote/` | root 私有的升级/回退备份，可能含旧凭据；不要上传 |
 
-## 致谢
+支持的配置项见 [.env.example](.env.example)。只解析有限 dotenv 语法，不执行 `.env`，不展开 `$变量` 或命令替换。部署目录不接受空格、`%`、路径穿越等特殊形式；不支持的旧配置会明确报错，不静默丢弃。
 
-本项目参考并改造自 [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot)。
+默认任务超时 900 秒。stdout 最多保留 1 MiB，stderr 最多 256 KiB；任一超限即停止该任务并报告超限，不解析截断 JSON。默认最多保存/回传 30,000 个正文字符；超出会明确标记，`/last` 也只能取回已保存的截断副本。**不存在一份自动保存的无限量“完整日志”。**
 
-感谢原项目作者 [@whypuss](https://github.com/whypuss) 的开源分享与贡献。
+修改配置后重启服务：
 
----
+```bash
+sudoedit /etc/agy-telegram-remote/config.env
+sudo systemctl restart agy-telegram-remote
+```
 
-> **推荐服务器（推广链接）：[搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**  
-> 👉 **[点这里前往搬瓦工，选择适合你的服务器](https://bandwagonhost.com/aff.php?aff=80815)**
+取消/超时不撤销已发生的文件修改。程序不支持通过任务长期留存后台守护进程；详见安全文档中的进程组边界。
 
-> **TG 社区：欢迎各位大佬进群交流 → [点击加入 Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**
+## 更新和从旧版迁移
+
+重新下载安装器后运行：
+
+```bash
+bash install.sh
+```
+
+第 1、2 步直接回车可保留 Token 和原白名单。普通升级保留工作目录、限额、权限开关与登录状态；不会把原本 `false` 的自动审批选项偷偷改成 `true`。旧配置没有该字段时按旧版的安全默认 `false` 保留。
+
+你明确要把旧安装也切换为自动审批时使用：
+
+```bash
+bash install.sh --enable-auto-approve
+```
+
+需要重新进入 Google 授权时使用：
+
+```bash
+bash install.sh --reauth
+```
+
+更多迁移、回退及备份说明见 [docs/MIGRATION.md](docs/MIGRATION.md)。
+
+## 卸载
+
+默认只移除服务，**保留程序和全部数据**，不再显示开头的安装/卸载菜单：
+
+```bash
+bash install.sh --uninstall
+```
+
+输入 `UNINSTALL` 确认。彻底清理必须显式传入 `--purge` 并再输入 `PURGE`：
+
+```bash
+bash install.sh --uninstall --purge
+```
+
+彻底清理会删除程序、配置、结果、工作目录、备份和 `agy-tg` 账户及 home；运行账户仍有进程时拒绝清理。不会删除 BotFather 中的 Bot。本版本的默认卸载比旧版更保守，保留程序是有意行为。
+
+## 常见问题
+
+**Bot Token 检查失败**：核对 Token 与网络；不要把 Token 发到工单或公开群。
+
+**提示已有 webhook**：本项目使用长轮询。请先确认该 Bot 没被其他系统占用，再人工移除 webhook 或换专用 Bot；安装器不会擅自删除别处的 webhook。
+
+**Telegram 409**：通常要检查是否还有另一个轮询实例。项目防止同一状态目录的重复本地实例，但无法阻止另一台服务器用同一个 Token。
+
+**运行目录不属于 agy-tg 或包含链接**：安装器不会递归更改未知目录所有权。先备份、核对现有目录，不要盲目执行递归 `chown`。
+
+**新任务被暂停**：进程清理或结果持久化未确认完成。先检查日志、磁盘空间和权限，再重启服务；不要直接重复原任务。
+
+**服务初始化失败**：查看 `journalctl`。授权、配额和网络是不同问题。仅在确实需要重新授权时使用 `--reauth`。
+
+## 开发与测试
+
+```bash
+bash scripts/verify.sh
+```
+
+没有运行时 pip 依赖。离线测试使用伪 agy 可执行文件和回环地址上的模拟 Telegram HTTP 服务，不需要真实 Token 或 Google 凭据。测试中出现的 Token 是构造的假值。
+
+测试覆盖、已知边界与验收步骤见 [docs/TESTING.md](docs/TESTING.md)。GitHub Actions 配置位于 `.github/workflows/tests.yml`；创建了配置不等于 CI 已经在远程执行通过。
+
+## 官方参考与致谢
+
+- [Google agy 安装与 SSH 授权](https://antigravity.google/docs/cli/install/)
+- [Google agy headless、JSON 和权限参数](https://antigravity.google/docs/cli/headless/)
+- [Telegram Bot API](https://core.telegram.org/bots/api)
+
+本项目最初参考并改造自 [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot)，感谢原作者 [@whypuss](https://github.com/whypuss)。
+
+> **推荐服务器（推广链接）：[搬瓦工](https://bandwagonhost.com/aff.php?aff=80815)**
+> **TG 社区：[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**

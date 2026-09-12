@@ -1,0 +1,98 @@
+"""Small Telegram Bot API client; no token-bearing URLs are logged."""
+from __future__ import annotations
+
+import asyncio
+import json
+from http.client import HTTPException
+import socket
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+
+class TelegramError(Exception):
+    def __init__(self, code: int = 0, retry_after: int = 0):
+        super().__init__(f"Telegram API error ({code or 'network/protocol'})")
+        self.code = code
+        self.retry_after = retry_after
+
+
+class TelegramAPI:
+    def __init__(self, token: str, *, base_url: str = "https://api.telegram.org",
+                 request_timeout: float = 25.0):
+        # base_url injection is only used by offline tests, never configuration.
+        self._endpoint = f"{base_url.rstrip('/')}/bot{token}/"
+        self.request_timeout = request_timeout
+
+    def _request(self, method: str, payload: dict) -> object:
+        request = Request(
+            self._endpoint + method,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        http_code = 0
+        try:
+            try:
+                response = urlopen(request, timeout=self.request_timeout)
+            except HTTPError as error:
+                http_code = error.code
+                response = error
+            with response:
+                raw = response.read(2097153)
+            if len(raw) > 2097152:
+                raise TelegramError(http_code)
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                raise TelegramError(http_code)
+            if value.get("ok") is not True:
+                code = value.get("error_code", http_code)
+                parameters = value.get("parameters")
+                retry = parameters.get("retry_after", 0) if isinstance(parameters, dict) else 0
+                raise TelegramError(
+                    code if type(code) is int else 0,
+                    min(retry, 86400) if type(retry) is int and retry > 0 else 0,
+                )
+            if http_code or "result" not in value:
+                raise TelegramError(http_code)
+            return value["result"]
+        except TelegramError:
+            raise
+        except (URLError, OSError, socket.timeout, ValueError, HTTPException, RecursionError):
+            # The original exception can include the token-bearing request URL.
+            raise TelegramError() from None
+
+    async def call(self, method: str, **payload) -> object:
+        return await asyncio.to_thread(self._request, method, payload)
+
+    async def send(self, chat_id: int, text: str) -> None:
+        # Retry ONLY a definite 429 rejection, not an ambiguous network failure.
+        for attempt in range(3):
+            try:
+                await self.call("sendMessage", chat_id=chat_id, text=text,
+                                link_preview_options={"is_disabled": True})
+                return
+            except TelegramError as error:
+                if error.code != 429 or not 0 < error.retry_after <= 10 or attempt == 2:
+                    raise
+                await asyncio.sleep(error.retry_after)
+
+
+def chunks_utf16(text: str, units: int = 3500) -> list[str]:
+    """Never split a Python code point; account for Telegram's UTF-16 lengths."""
+    if units < 2:
+        raise ValueError("Chunk limit is too small")
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for char in text:
+        # Replace invalid lone surrogates rather than failing JSON UTF-8 encoding.
+        if 0xD800 <= ord(char) <= 0xDFFF:
+            char = "\ufffd"
+        length = 2 if ord(char) > 0xFFFF else 1
+        if size + length > units:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(char)
+        size += length
+    if current:
+        chunks.append("".join(current))
+    return chunks
