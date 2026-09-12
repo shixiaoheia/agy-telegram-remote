@@ -47,9 +47,11 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(result.returncode == 0, supported)
 
     def test_service_hardening_and_runtime(self):
-        unit = service_unit(Path("/home/agy-tg"), Path("/srv/agy-workspace"),
+        unit = service_unit(Path("/root"), Path("/root"),
                             Path("/var/lib/agy-telegram-remote"))
-        self.assertIn("User=agy-tg", unit)
+        self.assertIn("User=root", unit)
+        self.assertIn("Group=root", unit)
+        self.assertIn("ProtectHome=no", unit)
         self.assertIn("/usr/bin/python3 -E -s -B", unit)
         self.assertIn("NoNewPrivileges=yes", unit)
         self.assertIn("KillMode=control-group", unit)
@@ -59,7 +61,7 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("TELEGRAM_BOT_TOKEN", unit)
 
     def test_root_mode_service_unit(self):
-        unit = service_unit(Path("/root"), Path("/srv/agy-workspace"),
+        unit = service_unit(Path("/root"), Path("/root"),
                             Path("/var/lib/agy-telegram-remote"))
         self.assertIn("User=root", unit)
         self.assertIn("Group=root", unit)
@@ -88,7 +90,7 @@ class InstallerTests(unittest.TestCase):
             dest = Path(temp) / "candidate"
             dest.touch()
             argv = ["manage.py", "prepare-config", "--output", str(dest),
-                    "--home", "/home/agy-tg"]
+                    "--home", "/root"]
             with patch("sys.argv", argv), patch("getpass.getpass", return_value=config_values()["TELEGRAM_BOT_TOKEN"]) as gp, \
                  patch("builtins.input", return_value="12345") as inp, \
                  contextlib.redirect_stdout(io.StringIO()):
@@ -101,19 +103,19 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             old, dest = Path(temp) / "old", Path(temp) / "candidate"
             old.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
-                "AGY_WORKSPACE": "/srv/agy-workspace/project",
+                "AGY_WORKSPACE": "/root/project",
                 "AGY_SKIP_PERMISSIONS": "false", "AGY_TIMEOUT_SECONDS": "321",
             }).items()))
             dest.touch()
             argv = ["manage.py", "prepare-config", "--old", str(old),
-                    "--output", str(dest), "--home", "/home/agy-tg"]
+                    "--output", str(dest), "--home", "/root"]
             with patch("sys.argv", argv), patch("getpass.getpass", return_value=""), \
                  patch("builtins.input", return_value=""), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
             value = Settings.load(dest)
             self.assertFalse(value.skip_permissions)
             self.assertEqual(value.timeout, 321)
-            self.assertEqual(value.workspace, Path("/srv/agy-workspace/project"))
+            self.assertEqual(value.workspace, Path("/root/project"))
 
     def test_rollback_restores_files_in_temporary_directory(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -161,113 +163,12 @@ rollback
             self.assertFalse((base / "app").is_symlink())
             self.assertEqual((base / "app/file").read_text(), "old code")
 
-    def test_service_account_flags_in_installer(self):
+    def test_root_mode_defaults_in_installer(self):
         script = (ROOT / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("adduser --system --group", script)
-        self.assertIn('--home "$APP_HOME"', script)
-        self.assertIn('--shell /bin/bash', script)
-        self.assertNotIn("--disabled-password", script)
-
-    def test_ensure_service_account_creates_new_system_user(self):
-        code = r'''
-source "$1"
-called_adduser=()
-id() {
-    if [[ "$1" == "agy-tg" ]]; then
-        if [[ -n "${USER_CREATED:-}" ]]; then return 0; else return 1; fi
-    elif [[ "$1" == "-gn" ]]; then
-        echo "agy-tg"
-    elif [[ "$1" == "-u" ]]; then
-        echo "105"
-    elif [[ "$1" == "-Gn" ]]; then
-        echo "agy-tg"
-    fi
-}
-adduser() {
-    called_adduser=("$@")
-    USER_CREATED=1
-}
-getent() {
-    echo "agy-tg:x:105:105::/home/agy-tg:/bin/bash"
-}
-ensure_service_account
-echo "ARGS: ${called_adduser[*]}"
-'''
-        result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh")],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn("--system", result.stdout)
-        self.assertIn("--group", result.stdout)
-        self.assertIn("--home /home/agy-tg", result.stdout)
-        self.assertIn("--shell /bin/bash", result.stdout)
-        self.assertIn("agy-tg", result.stdout)
-
-    def test_ensure_service_account_preserves_existing_user_uid(self):
-        code = r'''
-source "$1"
-called_adduser=0
-id() {
-    if [[ "$1" == "agy-tg" ]]; then
-        return 0
-    elif [[ "$1" == "-gn" ]]; then
-        echo "agy-tg"
-    elif [[ "$1" == "-u" ]]; then
-        echo "105"
-    elif [[ "$1" == "-Gn" ]]; then
-        echo "agy-tg"
-    fi
-}
-adduser() {
-    called_adduser=1
-}
-getent() {
-    echo "agy-tg:x:105:105::/home/agy-tg:/bin/bash"
-}
-ensure_service_account
-echo "CALLED: $called_adduser"
-echo "UID: $(id -u agy-tg)"
-'''
-        result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh")],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn("CALLED: 0", result.stdout)
-        self.assertIn("UID: 105", result.stdout)
-
-    def test_ensure_service_account_rejects_supplementary_groups_and_prints_list(self):
-        for groups, expect_hint in [
-            ("agy-tg users", True),
-            ("users agy-tg", True),
-            ("agy-tg sudo", False),
-            ("agy-tg users sudo", False),
-            ("agy-tg docker", False),
-        ]:
-            with self.subTest(groups=groups, expect_hint=expect_hint):
-                code = r'''
-source "$1"
-id() {
-    if [[ "$1" == "agy-tg" ]]; then
-        return 0
-    elif [[ "$1" == "-gn" ]]; then
-        echo "agy-tg"
-    elif [[ "$1" == "-u" ]]; then
-        echo "105"
-    elif [[ "$1" == "-Gn" ]]; then
-        echo "''' + groups + r'''"
-    fi
-}
-getent() {
-    echo "agy-tg:x:105:105::/home/agy-tg:/bin/bash"
-}
-ensure_service_account
-'''
-                result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh")],
-                                        capture_output=True, text=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(f"实际组：{groups}", result.stderr)
-                if expect_hint:
-                    self.assertIn("gpasswd -d agy-tg users", result.stderr)
-                else:
-                    self.assertNotIn("gpasswd -d agy-tg users", result.stderr)
+        self.assertIn("APP_USER='root'", script)
+        self.assertIn("APP_HOME=/root", script)
+        self.assertNotIn("ensure_service_account", script)
+        self.assertNotIn("userdel", script)
 
     def test_account_script_refuses_without_explicit_isolation(self):
         script = str(ROOT / "scripts/test_account_debian12.sh")
@@ -291,10 +192,8 @@ ensure_service_account
 
     def test_account_script_safety_and_scoped_cleanup(self):
         content = (ROOT / "scripts/test_account_debian12.sh").read_text(encoding="utf-8")
-        self.assertIn('TEST_USER="test-agy-${RAND_SUFFIX}"', content)
-        self.assertIn('[[ "$TEST_USER" == "agy-tg" || "$TEST_HOME" == "/home/agy-tg" ]]', content)
-        self.assertIn('"$CREATED_USER" =~ ^test-agy-', content)
-        self.assertNotIn('userdel -r "$APP_USER" 2>/dev/null || userdel "$APP_USER"', content)
+        self.assertIn("Test 1: Verify Debian 12 OS support check", content)
+        self.assertIn("Test 2: Verify Root mode defaults", content)
 
     def test_deploy_lock_mutual_exclusion(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -398,12 +297,7 @@ class SmokeTests(unittest.IsolatedAsyncioTestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertNotEqual(await smoke(config), 0)
 
-    async def test_smoke_refuses_root(self):
-        with tempfile.TemporaryDirectory() as temp:
-            with patch("manage.os.geteuid", return_value=0), self.assertRaises(ConfigError):
-                await smoke(settings_at(Path(temp)))
-
-    async def test_smoke_allows_root_when_specified(self):
+    async def test_smoke_allows_root_by_default(self):
         with tempfile.TemporaryDirectory() as temp:
             config = settings_at(Path(temp))
             class MockRunner:
@@ -413,4 +307,4 @@ class SmokeTests(unittest.IsolatedAsyncioTestCase):
                     return Result("success", text="AGY ready.")
             with patch("manage.os.geteuid", return_value=0), patch("manage.Runner", MockRunner), \
                  contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(await smoke(config, allow_root=True), 0)
+                self.assertEqual(await smoke(config), 0)

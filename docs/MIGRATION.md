@@ -17,7 +17,7 @@
 ## ⚙️ 更新执行顺序
 
 1. 新的 root 所有目录下载选定提交；检查所有必需文件，收集/保留配置。
-2. 以受限账户运行离线测试，验证 Telegram Token，检查没有活动 webhook。
+2. 运行离线测试，验证 Telegram Token，检查没有活动 webhook。
 3. 保存旧配置、unit 和服务状态，停止旧服务。正在执行的任务会被停止，不会自动重跑。
 4. 安装缺失的 agy，复用或完成 Google 授权，用同一 Runner 做请求固定文字回复的自检（不单独降权）。
 5. 将旧普通程序目录保留到 root 私有备份位置，切换新入口、配置与 unit。
@@ -60,12 +60,12 @@ bash install.sh --ref 完整提交SHA
 
 新版程序升级后将自动加载上述私有文件（`0600` 权限保护），老用户无感知无缝过渡。
 
-## 👑 模式迁移（标准沙箱模式 ↔ Root 极简模式）
+## 👑 极简纯 Root 运行模式
 
-- **从标准沙箱迁移到 Root 模式**：
-  执行 `bash install.sh --root`，安装器将自动把 systemd 服务账户切换为 `root:root`，HOME 调整为 `/root`，工作区调整为 `/root`，同时保留原配置与 Token。
-- **从 Root 模式切回标准沙箱模式**：
-  执行 `bash install.sh`（或 `bash install.sh --install`），安装器将重新创建/审计 `agy-tg` 账户，恢复受限工作空间与 `ProtectHome=read-only` 策略。
+项目现已全面精简为纯 Root 模式，专为个人独立 VPS 设计：
+- 升级安装时自动将 systemd 服务账户切换为 `root:root`，HOME 设为 `/root`，工作区设为 `/root`，并完整继承保留原配置、Token 与持久化状态；
+- 无需在宿主机上维护多余的独立非特权账户；
+- 彻底避免因多用户权限隔离导致无法直接读写管理宿主机 `/root` 工作区文件的问题。
 
 ## 🗑️ 卸载语义变化
 

@@ -211,7 +211,7 @@ class WizardOrderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             dest = Path(temp) / "candidate"
             dest.touch()
-            args = argparse.Namespace(old=None, output=dest, home="/home/agy-tg", enable_auto=False)
+            args = argparse.Namespace(old=None, output=dest, home="/root", enable_auto=False)
             output = io.StringIO()
             completed = []
             fixture_token = "123456:" + "x" * 32
@@ -241,7 +241,7 @@ class WizardOrderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             dest = Path(temp) / "candidate"
             dest.touch()
-            argv = ["manage.py", "prepare-config", "--output", str(dest), "--home", "/home/agy-tg"]
+            argv = ["manage.py", "prepare-config", "--output", str(dest), "--home", "/root"]
             output = io.StringIO()
             with patch("sys.argv", argv), patch("getpass.getpass", side_effect=EOFError), \
                     patch("builtins.input") as second, contextlib.redirect_stdout(output), \

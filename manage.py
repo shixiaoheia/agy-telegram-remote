@@ -20,9 +20,9 @@ from telegram_api import TelegramAPI, TelegramError
 
 def service_unit(home: Path, workspace: Path, state: Path, user: str | None = None) -> str:
     # Paths have already passed Settings validation (no whitespace/%/newlines).
-    run_user = user or ("root" if home == Path("/root") else "agy-tg")
-    run_group = run_user
-    protect_home = "no" if run_user == "root" else "read-only"
+    run_user = "root"
+    run_group = "root"
+    protect_home = "no"
     return f"""[Unit]
 Description=Antigravity Telegram Remote
 Wants=network-online.target
@@ -73,7 +73,8 @@ def prepare_config(args: argparse.Namespace) -> int:
     if old.get("ALLOWED_USER_IDS"):
         print("直接回车保留已有白名单。")
     ids = input("> ").strip()
-    values = merged_config(old, token.strip(), ids, args.home, args.enable_auto)
+    home = getattr(args, "home", "/root") or "/root"
+    values = merged_config(old, token.strip(), ids, home, args.enable_auto)
     settings = Settings.from_mapping(values)
     for path in (settings.workspace, settings.home, settings.state_dir):
         check_no_symlink(path)
@@ -90,9 +91,7 @@ def prepare_config(args: argparse.Namespace) -> int:
     return 0
 
 
-async def smoke(settings: Settings, allow_root: bool = False) -> int:
-    if os.geteuid() == 0 and not allow_root and settings.home != Path("/root"):
-        raise ConfigError("自检必须以 agy-tg 运行，不允许 root。")
+async def smoke(settings: Settings, allow_root: bool = True) -> int:
     result = await Runner(replace(settings, timeout=90)).run(SMOKE_PROMPT, asyncio.Event())
     if result.outcome == "success" and result.text.strip() == "AGY ready.":
         print("AGY_SMOKE_OK")
@@ -129,7 +128,7 @@ def main() -> int:
     prepare = sub.add_parser("prepare-config")
     prepare.add_argument("--old", type=Path)
     prepare.add_argument("--output", type=Path, required=True)
-    prepare.add_argument("--home", required=True)
+    prepare.add_argument("--home", default="/root", nargs="?")
     prepare.add_argument("--enable-auto", action="store_true")
     for command in ("fields", "smoke", "check-token", "unit", "check-local"):
         child = sub.add_parser(command)

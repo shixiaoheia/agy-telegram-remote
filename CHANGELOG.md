@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — pure Root mode architecture consolidation and installer fix
+
+- **全面精简为纯 Root 模式架构（Pure Root Architecture）**（`install.sh`、`settings.py`、`manage.py`、`.env.example`）：
+  - 响应单机个人 VPS 用户极简部署诉求，彻底移除历史多用户非特权账户（`agy-tg`）及其配置逻辑；
+  - 默认运行账户固定为 `root:root`，主目录 `HOME=/root`，默认工作区 `AGY_WORKSPACE=/root`；
+  - `manage.py` systemd unit 默认配置 `User=root`、`Group=root`、`ProtectHome=no`，`smoke` 自检自适应支持 root 环境；
+  - `settings.py` 强化工作区安全校验，将工作目录限制严格约束在 `/root` 范围内，禁止逃逸；
+  - 卸载清理防御加固：彻底阻断 `--purge` 对 `/root` 目录与 `root` 账户的任何删除操作，绝对保障宿主机个人数据安全。
+- **安装器关键进程检查缺陷修复（Installer Process Check Fix）**（`install.sh`）：
+  - 修复以 root 模式部署时执行 `pgrep -u root` 错误匹配系统后台进程（如 systemd PID 1、sshd、journald 等）导致安装无条件中断报错的缺陷；
+  - 精确调整为 `pgrep -f '/opt/agy-telegram-remote/bot.py'`，仅匹配旧版残留的本服务进程，杜绝误杀与安装阻塞。
+- **测试套件与自动化验证更新（Test Suite Updates）**（`tests/`、`scripts/test_account_debian12.sh`）：
+  - 更新 `scripts/test_account_debian12.sh`，转为验证 Debian 12 Root 模式运行环境；
+  - 更新 `test_settings.py`、`test_installer.py`、`test_install_menu.py` 适配纯 Root 模式配置与菜单项；
+  - 全套 172 项自动化断言测试在 `umask 022` 与 `umask 077` 环境下 100% 通过。
+- **文档全量核对与同步更新（Documentation Sync）**（`README.md`、`docs/`、`SECURITY.md`）：
+  - 全面更新 `README.md`、`docs/INSTALL_MENU.md`、`docs/MIGRATION.md`、`docs/TESTING.md` 与 `SECURITY.md`，移除已废弃的非特权沙箱账户说明，准确描述纯 Root 架构设计与安全边界。
+
 ## Unreleased — comprehensive documentation overhaul, system monitoring, workspace browsing, dynamic whitelist, engine effort & mode controls
 
 - **全量安装体验与一键命令清晰化（Installation UX Polish）**（`install.sh`、`README.md`、`docs/INSTALL_MENU.md`）：

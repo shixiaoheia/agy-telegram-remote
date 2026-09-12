@@ -25,29 +25,28 @@ CI 现在对每个 Python 版本分别运行常规测试和 `umask 077` 测试�
 `chmod(0o755)` 并核对权限，再断言 Store 拒绝该目录。不要为了通过测试关闭
 Store 的权限检查、降低安装器 umask 或跳过安装自检。
 
-本地测试不运行安装器主流程，不调用真实 Google 或 Telegram，不创建系统用户，不删除系统目录。会创建临时文件、短生命周期测试进程及仅绑定回环地址的 HTTP 服务。安装器中的同一离线测试以 `agy-tg` 执行。
+本地测试不运行安装器主流程，不调用真实 Google 或 Telegram，不创建系统用户，不删除系统目录。会创建临时文件、短生命周期测试进程及仅绑定回环地址的 HTTP 服务。安装器中的离线测试直接在当前环境中安全执行。
 
 ## 自动化覆盖
 
 | 测试文件 | 主要覆盖 |
 |---|---|
-| `test_settings.py` | 默认值、旧配置保留、显式自动审批、无 shell 展开、危险路径/链接/FIFO/大小限制、可选默认模型配置、快捷别名解析与格式校验 |
+| `test_settings.py` | 默认值（`/root` 工作区与 home）、旧配置保留、显式自动审批、无 shell 展开、危险路径/链接/FIFO/大小限制、可选默认模型配置、快捷别名解析与格式校验 |
 | `test_runner.py` | 严格 JSON、空回复、错误状态、Unicode、输出上限、真实 Linux 进程组、取消/超时/派生进程、--model 命令行参数构建与透传、Token 用量解析、--conversation 会话参数构建与透传、--effort 思考深度与 --mode 执行模式构建与透传 |
 | `test_store.py` | 私有权限、限长、过期、用户路由、凭据替换、崩溃记录、更新水位和实例锁、用户模型偏好落盘/重置/维护清理、连续会话 ID 维护与重置、用户累计 Token 用量统计与维护清理、用户 effort/mode 偏好落盘与维护清理、动态白名单落盘与合并 |
 | `test_bot.py` | 白名单、群聊拦截、工作目录互斥、准备/运行取消、投递失败、`/last`、重复更新、初次轮询就绪判定、退出撤销就绪标志、`update_id` 防重放、`/model` 全量官方 14 种模型查询、别名解析与切换、执行耗时显示、当前模型高亮、工作空间磁盘汇报与长消息分页指示、Telegram Inline Keyboard 行内按钮下发、callback_query 回调处理与 Toast 提示、连续会话上下文记忆与自动透传、`/new` 与 `/reset` 重置会话、`/usage` 会话与累计 Token 报表、Antigravity 优雅卡片式排版与分割线渲染、`/sys` 实时系统与进程监控、`/effort` 与 `/mode` 交互与透传、`/whitelist` 动态增删管理、`/ls` 文件浏览与防穿越、`/restart` 权限与空闲槽位重载 |
 | `test_telegram_api.py` | 本地真实 HTTP 请求、429、网络/协议错误、UTF-16 分段、完整离线回传链路、reply_markup 行内键盘序列化透传、answerCallbackQuery 响应 |
-| `test_installer.py` | Bash 语法、OS 版本门槛、系统服务账户创建参数、已有 UID 保持、附加组拒绝与名单展示、两个配置输入、生成 unit、配置保留、临时目录内的真实回退函数、自检分类、部署排他互斥锁、测试脚本误用与隔离防护、Root 模式 service unit 生成与 Root smoke 测试放行 |
-| `test_install_menu.py` | 菜单选项（安装/卸载/退出）、EOF与错误输入重试、--install与命令行快捷方式跳过菜单、sudo模式透传、三步向导顺序性（第一步等待/取消不进入第二步） |
+| `test_installer.py` | Bash 语法、OS 版本门槛、Root 模式 service unit 生成、残余进程安全检测（阻断旧 bot 进程而不影响系统 root 进程）、两个配置输入、配置保留、临时目录内的真实回退函数、自检分类、部署排他互斥锁、测试脚本误用与隔离防护、Root 模式 smoke 测试放行 |
+| `test_install_menu.py` | 菜单选项（安装/卸载/退出）、EOF与错误输入重试、--install与命令行快捷方式跳过菜单、三步向导顺序性（第一步等待/取消不进入第二步） |
 
-### Debian 12 一次性环境账户创建测试与防误用
+### Debian 12 一次性环境 Root 模式验证与防误用
 
-为验证真实的系统账户创建命令（`adduser --system --group`）在 Debian 12 环境下的表现，项目提供了 `scripts/test_account_debian12.sh`，并在 GitHub Actions CI 中通过 `container: debian:12` 自动化执行：
+为验证真实的安装脚本环境（Debian 12 + Root 模式），项目提供了 `scripts/test_account_debian12.sh`，并在 GitHub Actions CI 中通过 `container: debian:12` 自动化执行：
 - **防误用与隔离门槛**：必须同时传入 `--confirm-isolated-environment` 且设置环境变量 `AGY_TEST_ISOLATED_CONTAINER=1`，否则直接拒绝执行，避免在主机或生产 VPS 误跑；
-- **随机资源隔离**：测试使用随机账户名 `test-agy-${RAND_SUFFIX}` 与 `/home/${TEST_USER}`，严禁使用生产账户 `agy-tg` 或 `/home/agy-tg`；在创建前若发现同名资源已存在立即中止报错；
-- **严格退出清理**：通过 `trap EXIT` 精确追踪并清理本次测试创建的用户、主组、测试附加组与临时家目录，杜绝无差别删除或盲目 `|| true`；
-- **行为验证**：验证新建服务账户仅属于自身同名组，不附带 Debian 默认的 `users` 附加组，UID >= 100 且 home 正确；验证重复执行时复用已有账户并保持 UID；验证附加组存在时阻断并提示。
+- **环境验证**：验证 Debian 12 操作系统版本识别，验证纯 Root 模式下的运行账户（`APP_USER=root`）与主目录（`APP_HOME=/root`）配置，验证 `as_user` 环境变量传递，验证 `install.sh --help` 正确输出；
+- **无破坏性操作**：测试在隔离容器中仅进行环境变量与状态验证，不破坏系统文件。
 
-注意：本地离线单元测试通过模拟函数与环境门禁覆盖上述逻辑（共 176 项离线测试全部通过），不在本地服务器上实际创建或修改真实用户。
+注意：本地离线单元测试通过模拟函数与环境门禁覆盖上述逻辑（共 172 项离线测试全部通过），不在本地服务器上实际修改系统服务。
 
 ### Telegram update_id 边界与防重放机制（待验证项）
 
@@ -145,8 +144,10 @@ Store 的权限检查、降低安装器 umask 或跳过安装自检。
   - 仅主管理员可用；
   - `test_bot` 验证当 `self.slot` 处于任务执行中时强阻断重启，防止掐断长任务；空闲时放行并就地触发 `os.execv`。
 
-## Root 极简部署模式回归（--root 与 --allow-root）
+## 👑 纯 Root 极简部署模式回归
 
-- `test_installer` 验证 `--root` 参数生成以 `root:root` 运行、`ProtectHome=no` 的 systemd unit；
-- 验证 `smoke` 自检测试在携带 `--allow-root` 参数时放行 root 执行，未携带时维持拒绝策略；
-- 保证个人独立 VPS 用户免除多用户配置困扰，同时不放宽生产级默认安装模式的安全审计。
+- `test_installer` 验证生成以 `root:root` 运行、`ProtectHome=no` 的 systemd unit；
+- 验证安装器检查残余进程时精准匹配 `/opt/agy-telegram-remote/bot.py`，避免误将系统级 root 进程当作冲突；
+- 验证 `manage.py smoke` 自检测试在 root 权限下正常执行；
+- 验证卸载安全逻辑，即使传入 `--purge` 也绝对禁止删除 `/root` 或执行 `userdel root`；
+- 为个人独立 VPS 用户提供极简可靠的 Root 运行环境。

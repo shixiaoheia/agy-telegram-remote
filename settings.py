@@ -63,9 +63,9 @@ def resolve_model(name: str) -> str:
 
 
 DEFAULTS = {
-    "AGY_PATH": "/home/agy-tg/.local/bin/agy",
-    "AGY_HOME": "/home/agy-tg",
-    "AGY_WORKSPACE": "/srv/agy-workspace",
+    "AGY_PATH": "/root/.local/bin/agy",
+    "AGY_HOME": "/root",
+    "AGY_WORKSPACE": "/root",
     "AGY_TIMEOUT_SECONDS": "900",
     "MAX_PROMPT_CHARS": "12000",
     "MAX_OUTPUT_BYTES": "1048576",
@@ -185,9 +185,9 @@ class Settings:
         if permission not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
             raise ConfigError("AGY_SKIP_PERMISSIONS 必须是 true 或 false。")
         work = absolute_path(values["AGY_WORKSPACE"], "AGY_WORKSPACE")
-        base = Path("/srv/agy-workspace")
+        base = Path("/root")
         if work != base and base not in work.parents:
-            raise ConfigError("工作目录必须在 /srv/agy-workspace 内。")
+            raise ConfigError("工作目录必须在 /root 内。")
         state = absolute_path(values["STATE_DIR"], "STATE_DIR")
         state_base = Path("/var/lib/agy-telegram-remote")
         if state != state_base and state_base not in state.parents:
@@ -216,7 +216,7 @@ class Settings:
 
 
 def merged_config(old: Mapping[str, str], token: str, ids: str,
-                  home: str, enable_auto: bool = False) -> dict[str, str]:
+                  home: str = "/root", enable_auto: bool = False) -> dict[str, str]:
     """Fresh installs auto-approve; upgrades preserve old security choices."""
     values = DEFAULTS | {key: value for key, value in old.items() if key in KEYS}
     if old and "AGY_SKIP_PERMISSIONS" not in old:
@@ -224,6 +224,8 @@ def merged_config(old: Mapping[str, str], token: str, ids: str,
     if not old.get("AGY_PATH"):
         values["AGY_PATH"] = home + "/.local/bin/agy"
     values["AGY_HOME"] = home
+    if not old.get("AGY_WORKSPACE"):
+        values["AGY_WORKSPACE"] = home
     if token:
         values["TELEGRAM_BOT_TOKEN"] = token
     if ids:

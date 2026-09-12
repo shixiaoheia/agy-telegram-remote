@@ -41,10 +41,10 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 ```mermaid
 flowchart LR
-    User([📱 Telegram 私聊]) <-->|HTTPS TLS / 严格白名单| Bot([🤖 agy-telegram-remote\n专有系统账户 agy-tg])
+    User([📱 Telegram 私聊]) <-->|HTTPS TLS / 严格白名单| Bot([🤖 agy-telegram-remote\n运行账户: root])
     Bot <-->|JSON Headless 规范交互| CLI([⚙️ Google agy CLI])
     CLI <-->|安全 API 交互| Cloud([☁️ Google AI / Antigravity 算力])
-    CLI <-->|受限读写沙箱| WorkDir[📁 /srv/agy-workspace]
+    CLI <-->|核心工作区读写| WorkDir[📁 /root]
 ```
 
 ### 💬 交互效果演示
@@ -77,9 +77,9 @@ flowchart LR
 ━━━━━━━━━━━━━━━━━━━━
 • 🤖 调用模型：gemini-3.8-flash-high
 • 🧠 上下文：全新独立会话
-• 📁 工作目录：/srv/agy-workspace
+• 📁 工作目录：/root
 ━━━━━━━━━━━━━━━━━━━━
-正在受控沙箱中执行，请稍候...
+正在执行任务，请稍候...
 
 🤖 Antigravity Remote：
 ✅ 任务执行完毕 ｜ ⏱️ 11.8s ｜ gemini-3.8-flash-high
@@ -101,9 +101,9 @@ flowchart LR
 ━━━━━━━━━━━━━━━━━━━━
 • 🤖 调用模型：gemini-3.8-flash-high
 • 🧠 上下文：已关联上下文 (第 2 轮)
-• 📁 工作目录：/srv/agy-workspace
+• 📁 工作目录：/root
 ━━━━━━━━━━━━━━━━━━━━
-正在受控沙箱中执行，请稍候...
+正在执行任务，请稍候...
 
 👤 你：
 /usage
@@ -142,7 +142,7 @@ flowchart LR
 /ls
 
 🤖 Antigravity Remote：
-📁 工作空间文件速览 ｜ `/srv/agy-workspace`
+📁 工作空间文件速览 ｜ `/root`
 ━━━━━━━━━━━━━━━━━━━━
 📁 `docs/` ｜ 09-12 21:40
 🐍 `stream_processor.py` (4.2 KB) ｜ 09-12 21:38
@@ -175,12 +175,13 @@ flowchart LR
 - 👥 **动态白名单管理与安全热重载（`/whitelist` & `/restart`）**：
   - 管理员可在私聊中直接使用 `/whitelist add/remove` 动态增删白名单用户，无需修改配置文件；
   - 管理员专用 `/restart` 命令支持平滑就地热重载（仅在任务空闲时放行），零停机加载最新代码与环境。
-- 👑 **支持单机 VPS 极简 Root 运行模式（`--root`）**：
-  - 既支持生产级最小权限专有账户 `agy-tg` 沙箱，也支持使用 `--root` 参数直接以 root 账户运行；
-  - 专为个人 VPS（如无多用户需求的独立主机）提供最省心的免折腾体验。
-- 🛡️ **严格安全边界与权限沙箱**：
+- 👑 **原生单机 VPS 极简 Root 架构**：
+  - 直接以系统 `root` 账户部署并常驻运行后台守护进程，零多余辅助账户；
+  - 核心工作区与凭据直接坐落于 `/root`，省去跨账户权限调试与多租户限制，专为个人 VPS 提供最省心的免折腾体验。
+- 🛡️ **严格安全边界与防护控制**：
   - **白名单机制**：严格拒绝群聊，仅允许预设数字 ID 的白名单私聊用户访问；
-  - **符号链接防护与防穿越**：工作目录与状态文件均开启强制正则检查与符号链接拦截。
+  - **路径规范化与防遍历**：工作目录与状态文件均开启强制正则检查与符号链接拦截；
+  - **Token 与凭据私有保护**：配置文件与动态偏好数据严格以 `0600` root 权限落盘，日志脱敏。
 - ⚡ **零第三方依赖**：
   - 纯 Python 3.10+ 标准库（`asyncio` / `urllib.request` / `subprocess` / `json` 等）精心打造；
   - 无需 `pip` 安装，不依赖虚拟环境、Redis 或外部数据库，系统轻盈无负担。
@@ -520,31 +521,24 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 
 ---
 
-## 👑 单机 VPS 极简 Root 部署模式（`--root`）
+## 👑 原生单机 VPS 极简 Root 架构设计
 
-为了满足广大个人独立服务器用户“免除多账户切换、直接在系统环境管理 VPS”的强烈诉求，本项目深度支持**极简 Root 模式**：
+为了满足广大个人独立服务器用户“免除多账户切换、直接在系统环境管理 VPS”的强烈诉求，本项目全面采用**原生极简 Root 架构**：
 
-### 🆚 部署模式全维度对比
+- **零多余系统账户**：不触碰系统用户表，不创建冗余受限用户，杜绝附加组安全审计冲突；
+- **全盘调度与极简运维**：工作目录默认为 `/root`，用户可通过 Telegram 轻松调度 `agy` 进行全盘脚本管理、系统环境调优与代码重构；
+- **systemd 原生集成**：守护进程配置 `ProtectHome=no`，保障 `agy` 对 `/root` 空间的正常读写，同时保持 `ProtectSystem=strict` 与 `NoNewPrivileges=yes` 基础安全加固；
+- **凭据集中管理**：Google 授权凭据与 CLI 工具统一位于 `/root` 下，避免跨用户凭据同步失败。
 
-| 对比维度 | 🛡️ 标准安全沙箱模式（默认） | 👑 极简 Root 模式（`--root`） |
-| :--- | :--- | :--- |
-| **适用人群与场景** | 多人合租 VPS、公用服务器、强安全隔离需求 | **个人独立 VPS**、专属测试机、单人极简运维 |
-| **守护进程运行账户** | 专有系统受限账户 `agy-tg:agy-tg`（剥离一切特权组） | 直接以 `root:root` 运行 |
-| **默认工作空间目录** | 独立受限目录 `/srv/agy-workspace` | 直接使用 `/root` 目录 |
-| **Google 授权凭据目录** | `/home/agy-tg` | `/root` |
-| **systemd 安全策略** | `ProtectHome=read-only`、严格路径白名单隔离 | `ProtectHome=no`，允许管理全盘 |
-| **安装与启动命令** | `bash install.sh` | `bash install.sh --root` |
-| **账户管理复杂度** | 自动创建 `agy-tg` 账户，受附加组安全审计约束 | **零多余账户**，不碰系统账户表，免折腾 |
-
-### 🚀 Root 模式安装命令
+### 🚀 一键直装与管理
 
 在拥有 root 权限的终端中执行：
 
 ```bash
-bash install.sh --root
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
 ```
 
-安装向导将直接以 root 账户部署后台守护进程，省去一切多系统用户权限调试。可在任何时候通过 `bash install.sh` 管理菜单平滑更新。
+安装向导将直接以 root 账户部署后台守护进程，省去一切多系统用户权限调试。可在任何时候通过 `bash install.sh` 管理菜单平滑更新或卸载。
 
 ---
 
@@ -554,12 +548,11 @@ bash install.sh --root
 
 | 路径 | 权限模式 | 作用说明 |
 | :--- | :--- | :--- |
-| `/etc/agy-telegram-remote/config.env` | `root:agy-tg` (0640) | 核心生产配置文件（含 Token、白名单），严禁对外泄露 |
+| `/etc/agy-telegram-remote/config.env` | `root:root` (0600) | 核心生产配置文件（含 Token、白名单），root 私有保护，严禁对外泄露 |
 | `/opt/agy-telegram-remote` | `root:root` (0755) | 当前 root 管理的程序发布软链入口 |
 | `/opt/agy-telegram-remote-releases/` | `root:root` (0755) | 程序历史与当前版本发布目录 |
-| `/srv/agy-workspace` | `agy-tg:agy-tg` (0700) | 核心任务工作目录（所有任务执行时默认以此目录为根） |
-| `/home/agy-tg` | `agy-tg:agy-tg` (0700) | `agy-tg` 账户 HOME、agy 核心二进制与 Google 授权凭据目录 |
-| `/var/lib/agy-telegram-remote/` | `agy-tg:agy-tg` (0700) | 持久化状态根目录（包含各独立用户状态落盘文件） |
+| `/root` | `root:root` (0700) | 核心任务工作目录、HOME 与 Google 授权凭据目录 |
+| `/var/lib/agy-telegram-remote/` | `root:root` (0700) | 持久化状态根目录（包含各独立用户状态落盘文件） |
 | ├── `whitelist.json` | `0600` | 动态授权白名单存储文件 |
 | ├── `model-{user_id}.json` | `0600` | 用户独立的 AI 模型偏好文件 |
 | ├── `effort-{user_id}.json` | `0600` | 用户独立的思考深度偏好文件 |
@@ -577,8 +570,8 @@ bash install.sh --root
 | :--- | :--- | :--- |
 | `TELEGRAM_BOT_TOKEN` | 字符串 (必填) | Telegram Bot API 访问凭据，通过 [@BotFather](https://t.me/BotFather) 申请 |
 | `ALLOWED_USER_IDS` | 逗号分隔整数 (必填) | 静态授权数字 ID 列表；首个 ID 为**主管理员（👑）**，享管理指令与防踢保护 |
-| `AGY_PATH` | 绝对路径 | Google agy 二进制路径（默认为 `/home/agy-tg/.local/bin/agy`） |
-| `AGY_WORKSPACE` | 绝对路径 | 任务工作区根目录（默认为 `/srv/agy-workspace`） |
+| `AGY_PATH` | 绝对路径 | Google agy 二进制路径（默认为 `/root/.local/bin/agy`） |
+| `AGY_WORKSPACE` | 绝对路径 | 任务工作区根目录（默认为 `/root`） |
 | `AGY_TIMEOUT_SECONDS` | 整数 (默认 `900`) | 单个任务执行的最大超时时间（秒），超时自动触发 SIGTERM/SIGKILL 中止 |
 | `AGY_SKIP_PERMISSIONS` | 布尔值 (默认 `true`) | 是否跳过 CLI 工具审批交互弹窗；无头运行环境下必须开启以防止挂起假死 |
 | `AGY_MODEL` | 字符串 (可选) | 全局缺省 AI 模型标识符（用户私聊发送 `/model` 可独立覆盖此默认项） |
@@ -632,20 +625,19 @@ bash install.sh --uninstall
 bash install.sh --uninstall --purge
 ```
 > [!CAUTION]
-> 彻底清理模式将永久删除代码发布目录、全部配置与任务记录、工作目录、备份文件以及专有运行账户 `agy-tg`。此操作需要额外输入 `PURGE` 二次确认。
+> 彻底清理模式将永久删除代码发布目录、全部配置与任务记录、状态库及备份文件。为保护系统安全，/root 个人目录与工作空间数据将完整保留。此操作需要额外输入 `PURGE` 二次确认。
 
 ---
 
 ## ❓ 常见问题排查（FAQ）
 
 <details>
-<summary><b>🔴 报错：检测到账户存在多余附加组权限（如 users 组）？</b></summary>
+<summary><b>👑 为什么采用纯 Root 模式？会不会有系统安全隐患？</b></summary>
 
-- **原因**：部分 Debian 12 / Ubuntu 系统的默认安全策略会在创建账户时附加 `users` 组，安装器内置的权限合规检查会拦截该行为，以防权限扩散。
-- **解决办法**：若管理员确认该账户确为本项目专用，执行以下命令移除非特权附加组即可继续安装：
-  ```bash
-  sudo gpasswd -d agy-tg users
-  ```
+- **设计考量**：
+  1. 绝大多数云端 VPS 均为用户独立个人独享主机，专有普通用户容易引入附加组权限审计冲突、无法访问全盘等繁琐问题；
+  2. 采用纯 Root 模式消除了多用户权限壁垒，让 `agy` 拥有完整的系统自动化运维与排障能力；
+  3. 系统核心配置与动态数据均以 `0600` root 私有权限落盘，配合严格白名单私聊鉴权机制，杜绝外来未授权访问。
 </details>
 
 <details>
@@ -675,11 +667,10 @@ bash install.sh --uninstall --purge
 </details>
 
 <details>
-<summary><b>👑 如何判断我是否需要使用 --root 模式？</b></summary>
+<summary><b>⚡ 如果只想让 agy 在特定子目录下工作，如何配置？</b></summary>
 
-- **选型建议**：
-  - 如果服务器是你的**个人独享 VPS**，无需考虑多租户隔离，且你希望 `agy` 拥有更高权限管理全盘（工作目录为 `/root`），直接使用 `bash install.sh --root` 是最省心免折腾的选择；
-  - 如果你的服务器需要部署其他生产服务、或者对多用户权限有严格要求，推荐使用默认的标准沙箱模式（以专有受限账户 `agy-tg` 运行）。
+- **配置方法**：
+  - 默认工作空间为 `/root`；若需指定在特定子目录（例如 `/root/workspace`），只需编辑 `/etc/agy-telegram-remote/config.env` 中的 `AGY_WORKSPACE` 参数，然后发送 `/restart` 即可生效。
 </details>
 
 <details>
@@ -727,8 +718,8 @@ bash install.sh --uninstall --purge
 
 为保证服务器与数据的绝对安全，使用前请了解以下设计边界：
 
-1. **最小权限与多模式选择**：程序默认以专有非特权账户 `agy-tg` 运行后台守护进程，剥离所有非必要附加组和提权能力；单机独享用户亦可按需指定 `--root` 模式极简部署。
-2. **工作目录边界与防提权**：建议将 `agy` 限制在专用 VPS 或独立工作目录内。非 root 运行与目录隔离能抵御绝大多数越权，但不等同于内核级绝对容器隔离，请勿将敏感生产数据存放在同一系统内。
+1. **原生 Root 模式与私有权限落盘**：程序专为单机 VPS 设计，直接以 root 账户常驻运行；所有配置文件、持久化状态库均强制设置为 `0600` root 专用权限，严禁全局可读。
+2. **工作目录边界与路径安全**：工作目录默认为 `/root`（或用户自定义子路径），内置严格防目录遍历与非法符号链接校验，防止越权读写外部敏感文件。
 3. **白名单防线**：任何未在配置白名单中的 Telegram 用户发送的消息均会被静默丢弃，群聊消息一律直接忽略。
 4. **单任务互斥执行**：共享工作目录下同一时刻仅允许运行一个任务，杜绝并发竞争写引发的文件冲突。
 
@@ -738,7 +729,7 @@ bash install.sh --uninstall --purge
 
 ## 🧪 开发者与测试验证
 
-本项目包含完备的离线自动化测试套件（含 176 项全面断言测试），覆盖语法、沙箱权限、参数注入防御、状态持久化、会话记忆、Token 用量解析、系统监控、白名单运维与行内键盘切换：
+本项目包含完备的离线自动化测试套件（含 172 项全面断言测试），覆盖语法、沙箱权限、参数注入防御、状态持久化、会话记忆、Token 用量解析、系统监控、白名单运维与行内键盘切换：
 
 ```bash
 # 运行离线测试套件（零外部依赖，使用模拟 Telegram 与虚拟 agy）

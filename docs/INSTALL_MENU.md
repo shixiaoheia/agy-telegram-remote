@@ -15,7 +15,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 =============================================
  Antigravity Telegram Remote 管理菜单
 =============================================
-  1) 安装 / 更新 (标准沙箱模式；如需 Root 模式请退出执行 bash install.sh --root)
+  1) 安装 / 更新 (极简 Root 模式)
   2) 卸载服务
   0) 退出
 
@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 输入 `2` 进入原有卸载流程，不会出现安装三步，也不会询问 Bot Token。
 仍需输入 `UNINSTALL` 明确确认。普通卸载只移除服务，保留程序、配置、工作目录和授权。
-本次没有新增、放宽或自动触发彻底清理。
+彻底卸载 (`--uninstall --purge`) 会清理程序发布版本与配置，但受最高安全防护，**绝对不会删除或清空宿主机 `/root` 用户主目录及用户文件**。
 
 输入 `0` 或在菜单等待输入时结束输入（EOF），在提权、获取部署锁、
 安装依赖及其他安装/卸载操作之前退出。空输入或非法选项只重新提示，不默认安装或删除。
@@ -51,25 +51,24 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 | 命令 | 行为 |
 |---|---|
 | `bash install.sh` | 显示管理菜单 |
-| `bash install.sh --install` | 直接进入安装/更新，不再显示管理菜单 |
-| `bash install.sh --root` | 直接以 root 账户安装/更新与运行后台守护进程，省去多系统用户隔离（个人 VPS 极简模式） |
+| `bash install.sh --install` | 直接进入安装/更新（Root 模式），不再显示管理菜单 |
+| `bash install.sh --root` | 兼容参数，直接进入安装/更新（Root 模式） |
 | `bash install.sh --enable-auto-approve` | 按原含义直接安装/更新，并明确启用自动审批 |
 | `bash install.sh --reauth` | 按原含义直接安装/更新，重新授权 |
 | `bash install.sh --ref COMMIT_OR_BRANCH` | 按原含义直接安装选定版本 |
 | `bash install.sh --uninstall` | 直接进入卸载确认 |
-| `bash install.sh --uninstall --purge` | 保留原来的两次确认与彻底清理限制 |
+| `bash install.sh --uninstall --purge` | 保留原来的两次确认与彻底清理限制（保护 /root 安全） |
 | `bash install.sh --help` | 只显示帮助，不显示菜单、不获取部署锁 |
 
-没有 sudo 权限的运行账户不能用来安装。普通管理账户选择模式后，
-安装器在提权重启时携带所选模式，避免重复显示菜单。
+非 root 用户运行安装器时会自动尝试 `sudo` 提权。
 
-### 👑 Root 极简部署模式说明
+### 👑 极简 Root 部署模式说明
 
-使用 `bash install.sh --root` 时：
+本版本针对个人独立 VPS 精简为纯 Root 部署模式：
 1. 运行账户直接指定为 `root:root`，HOME 目录为 `/root`；
 2. 守护进程 systemd unit 中的 `ProtectHome` 策略调整为 `no`，以便直接访问管理宿主机 `/root` 工作区；
-3. smoke 自检测试自动携带 `--allow-root` 参数通过权限校验；
-4. 升级时自动保留原配置、动态白名单及用户偏好，省去多系统用户切换与权限排查成本。
+3. smoke 自检测试直接在 root 环境下完成权限校验；
+4. 升级时自动保留原配置、动态白名单及用户偏好，杜绝多系统用户切换与权限冲突问题。
 
 ## 📦 改动范围说明
 

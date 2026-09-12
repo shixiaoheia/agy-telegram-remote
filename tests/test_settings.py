@@ -39,23 +39,23 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(Settings.from_mapping(config_values()).skip_permissions)
 
     def test_upgrade_preserves_safe_default_when_key_missing(self):
-        values = merged_config(config_values(), "", "", "/home/agy-tg")
+        values = merged_config(config_values(), "", "", "/root")
         self.assertEqual(values["AGY_SKIP_PERMISSIONS"], "false")
 
     def test_upgrade_preserves_existing_values(self):
         old = config_values() | {
-            "AGY_WORKSPACE": "/srv/agy-workspace/project", "AGY_TIMEOUT_SECONDS": "123",
+            "AGY_WORKSPACE": "/root/project", "AGY_TIMEOUT_SECONDS": "123",
             "AGY_SKIP_PERMISSIONS": "false", "MAX_REPLY_CHARS": "4500",
         }
-        settings = Settings.from_mapping(merged_config(old, "", "", "/home/agy-tg"))
+        settings = Settings.from_mapping(merged_config(old, "", "", "/root"))
         self.assertFalse(settings.skip_permissions)
         self.assertEqual(settings.timeout, 123)
         self.assertEqual(settings.max_reply, 4500)
-        self.assertEqual(str(settings.workspace), "/srv/agy-workspace/project")
+        self.assertEqual(str(settings.workspace), "/root/project")
 
     def test_explicit_upgrade_opt_in(self):
         old = config_values() | {"AGY_SKIP_PERMISSIONS": "false"}
-        new = merged_config(old, "", "", "/home/agy-tg", enable_auto=True)
+        new = merged_config(old, "", "", "/root", enable_auto=True)
         self.assertTrue(Settings.from_mapping(new).skip_permissions)
 
     def test_no_shell_expansion(self):
@@ -80,8 +80,9 @@ class ConfigurationTests(unittest.TestCase):
             {"AGY_SKIP_PERMISSIONS": "maybe"},
             {"AGY_TIMEOUT_SECONDS": "-1"}, {"MAX_OUTPUT_BYTES": "999999999"},
             {"AGY_WORKSPACE": "/"}, {"AGY_WORKSPACE": "/etc"},
-            {"AGY_WORKSPACE": "/srv/agy-workspace/../secret"},
-            {"AGY_WORKSPACE": "/srv/agy-workspace/%h"},
+            {"AGY_WORKSPACE": "/root/../secret"},
+            {"AGY_WORKSPACE": "/root/%h"},
+            {"AGY_WORKSPACE": "/srv/agy-workspace"},
             {"STATE_DIR": "/etc"}, {"AGY_HOME": "/root\nInject=1"},
         ]
         for item in invalid:
@@ -89,7 +90,7 @@ class ConfigurationTests(unittest.TestCase):
                 Settings.from_mapping(config_values() | item)
 
     def test_roundtrip_config(self):
-        values = merged_config({}, config_values()["TELEGRAM_BOT_TOKEN"], "12345", "/home/agy-tg")
+        values = merged_config({}, config_values()["TELEGRAM_BOT_TOKEN"], "12345", "/root")
         self.assertEqual(Settings.from_mapping(values), Settings.from_mapping(parse_env(serialize_env(values))))
 
     def test_symlink_file_rejected(self):

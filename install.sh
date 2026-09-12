@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Debian 12+ / Ubuntu 22.04+. Runtime code is root-owned; agy never runs as root.
+# Debian 12+ / Ubuntu 22.04+. Native Root mode on dedicated Linux VPS.
 set -Eeuo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
 
 APP=/opt/agy-telegram-remote
 RELEASES=/opt/agy-telegram-remote-releases
-APP_USER='agy-tg'
-APP_HOME=/home/agy-tg
-WORK_BASE=/srv/agy-workspace
+APP_USER='root'
+APP_HOME=/root
 CONFIG_DIR=/etc/agy-telegram-remote
 CONFIG=$CONFIG_DIR/config.env
 STATE_BASE=/var/lib/agy-telegram-remote
@@ -45,13 +44,13 @@ usage() {
 =============================================
 用法：
   bash install.sh                         显示管理菜单（安装/更新、卸载、退出）
-  bash install.sh --root                  👑 极简 Root 模式安装/更新（推荐个人独立 VPS，直接以 root 运行）
-  bash install.sh --install               🛡️ 标准沙箱模式安装/更新（专有系统账户 agy-tg，多用户隔离）
+  bash install.sh --install               👑 极简 Root 模式安装/更新（直接以 root 运行）
+  bash install.sh --root                  👑 极简 Root 模式安装/更新（快捷别名）
   bash install.sh --enable-auto-approve    更新时明确启用自动审批（跳过权限确认弹窗）
   bash install.sh --reauth                 重新进入 Google 账号授权流程
   bash install.sh --ref COMMIT_OR_BRANCH   安装指定 Git 提交 SHA 或分支
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
-  bash install.sh --uninstall --purge      彻底清理（需输入 PURGE 二次确认，清除所有数据与账户）
+  bash install.sh --uninstall --purge      彻底清理（需输入 PURGE 二次确认，清除部署与配置）
   bash install.sh --help                   显示此帮助说明
 EOF
 }
@@ -62,7 +61,7 @@ choose_operation() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 管理菜单'
   echo '============================================='
-  echo '  1) 安装 / 更新 (标准沙箱模式；如需 Root 模式请退出执行 bash install.sh --root)'
+  echo '  1) 安装 / 更新'
   echo '  2) 卸载服务'
   echo '  0) 退出'
   echo
@@ -131,42 +130,9 @@ user_dir() {
     fail "已有运行路径是符号链接：$path"
   fi
   if [[ -d "$path" ]]; then
-    if [[ "$APP_USER" != "root" ]]; then
-      [[ "$(stat -c %U "$path")" == "$APP_USER" ]] || fail "已有运行目录不属于 $APP_USER：$path"
-    fi
+    [[ "$(stat -c %u "$path")" == 0 ]] || fail "已有运行目录并非 root 所有：$path"
   else
-    install -d -o "$APP_USER" -g "$APP_USER" -m 0700 "$path"
-  fi
-}
-
-ensure_service_account() {
-  if [[ "$APP_USER" == "root" ]]; then
-    return 0
-  fi
-  if ! id "$APP_USER" >/dev/null 2>&1; then
-    adduser --system --group \
-      --home "$APP_HOME" \
-      --shell /bin/bash \
-      "$APP_USER"
-  fi
-  [[ "$(getent passwd "$APP_USER" | cut -d: -f6)" == "$APP_HOME" ]] || fail '已有账户 home 不符合预期。'
-  [[ "$(id -gn "$APP_USER")" == "$APP_USER" ]] || fail '已有账户主组异常。'
-  (( $(id -u "$APP_USER") >= 100 )) || fail '拒绝使用系统特权账户。'
-
-  local user_group_list all_groups supp_groups=()
-  user_group_list="$(id -Gn "$APP_USER")"
-  read -r -a all_groups <<<"$user_group_list"
-  for g in "${all_groups[@]}"; do
-    if [[ "$g" != "$APP_USER" ]]; then
-      supp_groups+=("$g")
-    fi
-  done
-  if (( ${#supp_groups[@]} > 0 )); then
-    if [[ "${#supp_groups[@]}" -eq 1 && "${supp_groups[0]}" == "users" ]]; then
-      echo "提示：若管理员确认 $APP_USER 账户为本项目专用，可由 root 执行：" >&2
-      echo "  gpasswd -d $APP_USER users" >&2
-    fi
-    fail "账户存在额外组权限（实际组：$user_group_list），请先人工核对。"
+    install -d -o root -g root -m 0700 "$path"
   fi
 }
 
@@ -186,17 +152,10 @@ acquire_deploy_lock() {
 }
 
 as_user() {
-  if [[ "$APP_USER" == "root" ]]; then
-    env -i \
-      HOME="$APP_HOME" USER="root" LOGNAME="root" \
-      PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
-      "$@"
-  else
-    runuser -u "$APP_USER" -- env -i \
-      HOME="$APP_HOME" USER="$APP_USER" LOGNAME="$APP_USER" \
-      PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
-      "$@"
-  fi
+  env -i \
+    HOME="$APP_HOME" USER="root" LOGNAME="root" \
+    PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
+    "$@"
 }
 
 rollback() {
@@ -267,23 +226,14 @@ uninstall() {
     return
   fi
   echo "彻底清理将删除：$APP、$RELEASES、$CONFIG_DIR、$STATE_BASE、$BACKUPS"
-  echo "以及 $WORK_BASE 和账户 $APP_USER 的 $APP_HOME。"
+  echo "注意：为保护系统安全，/root 个人目录与工作空间将完整保留。"
   read -r -p '确认永久删除上述数据请输入 PURGE： ' answer || exit 0
   [[ "$answer" == PURGE ]] || exit 0
-  if id "$APP_USER" >/dev/null 2>&1; then
-    [[ "$(getent passwd "$APP_USER" | cut -d: -f6)" == "$APP_HOME" ]] || fail '账户 home 异常。'
-    if pgrep -u "$APP_USER" >/dev/null; then
-      fail '运行账户仍有进程；未执行清理，请先人工结束这些进程。'
-    fi
-  fi
-  for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$WORK_BASE" "$APP_HOME"; do
+  for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS"; do
     [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
   done
-  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$WORK_BASE"
-  if id "$APP_USER" >/dev/null 2>&1; then
-    userdel -r "$APP_USER"
-  fi
-  echo '彻底清理完成；没有删除 BotFather 中的 Telegram Bot。'
+  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS"
+  echo '彻底清理完成；保留了 /root 工作区与 Google 登录凭据，未删除 BotFather 中的 Telegram Bot。'
 }
 
 main() {
@@ -292,12 +242,7 @@ main() {
   while (( $# )); do
     case "$1" in
       --help|-h) usage; return ;;
-      --install) MODE=install ;;
-      --root)
-        APP_USER='root'
-        APP_HOME='/root'
-        direct_install=1
-        ;;
+      --install|--root) MODE=install; direct_install=1 ;;
       --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
       --reauth) REAUTH=1; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
@@ -345,23 +290,18 @@ main() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 极简一键安装向导'
   echo '============================================='
-  if [[ "$APP_USER" == "root" ]]; then
-    echo '👑 运行模式：个人 VPS 极简 Root 模式（运行账户: root，工作目录: /root）'
-  else
-    echo '🛡️ 运行模式：生产级安全沙箱模式（运行账户: agy-tg，工作目录: /srv/agy-workspace）'
-  fi
+  echo '👑 运行模式：个人 VPS 极简 Root 模式（运行账户: root，工作目录: /root）'
   echo '⚡ 特性支持：默认开启自动审批（无头运行不挂起），仅供信任的白名单用户使用。'
   echo '📦 正在准备系统依赖与核心运行环境……'
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    python3 git curl ca-certificates procps util-linux adduser
+    python3 git curl ca-certificates procps util-linux
   /usr/bin/python3 -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
     || fail '需要 Python 3.10+。'
-  ensure_service_account
   user_dir "$APP_HOME"
   root_dir "$RELEASES"
   root_dir "$BACKUPS" 0700
-  root_dir "$CONFIG_DIR" 0750 "$APP_USER"
+  root_dir "$CONFIG_DIR" 0700 root
 
   [[ ! -L "$CONFIG" && ! -L "$UNIT" ]] || fail '配置或服务文件是符号链接。'
   if [[ -L "$APP" ]]; then
@@ -393,7 +333,7 @@ main() {
   echo "采用提交：$commit"
 
   CANDIDATE="$(mktemp "$CONFIG_DIR/.candidate-XXXXXXXX")"
-  chown root:"$APP_USER" "$CANDIDATE"; chmod 0640 "$CANDIDATE"
+  chown root:root "$CANDIDATE"; chmod 0600 "$CANDIDATE"
   local prepare=(prepare-config --output "$CANDIDATE" --home "$APP_HOME")
   if [[ -f "$CONFIG" ]]; then
     prepare+=(--old "$CONFIG")
@@ -431,14 +371,14 @@ main() {
   if systemctl is-active --quiet "$SERVICE"; then
     fail '旧服务没有停止，不能继续部署。'
   fi
-  if pgrep -u "$APP_USER" >/dev/null; then
-    fail '运行账户仍有进程，请先检查手工运行的 agy 或残余任务。'
+  if pgrep -f '/opt/agy-telegram-remote/bot.py' >/dev/null; then
+    fail '检测到旧版本 bot.py 进程仍在运行，请先手动结束该进程。'
   fi
 
   local installed_now=0
   if [[ ! -x "$agy" ]]; then
     [[ "$agy" == "$APP_HOME/.local/bin/agy" ]] || fail '自定义 AGY_PATH 不存在，请先人工安装。'
-    echo '正在以受限账户安装 Google 官方 agy……'
+    echo '正在安装 Google 官方 agy……'
     local official_installer
     official_installer="$(mktemp "$RELEASES/.agy-installer-XXXXXXXX")"
     curl --proto '=https' --tlsv1.2 -fsSL https://antigravity.google/cli/install.sh \
@@ -455,10 +395,8 @@ main() {
   echo '已有有效授权会自动复用。新授权请打开链接登录，再粘贴授权码。'
   echo '进入 agy 主界面后输入 /exit 返回安装器；不需要额外输入 YES。'
   local smoke_rc=10
-  local allow_root_flag=""
-  [[ "$APP_USER" == "root" ]] && allow_root_flag="--allow-root"
   if [[ "$installed_now" == 0 && "$REAUTH" == 0 ]]; then
-    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" $allow_root_flag; then
+    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
       smoke_rc=0
     else
       smoke_rc=$?
@@ -469,7 +407,7 @@ main() {
     as_user env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
       /bin/bash -c 'cd -- "$1"; exec "$2"' _ "$work" "$agy" || auth_rc=$?
     [[ "$auth_rc" == 0 || "$auth_rc" == 130 ]] || fail 'agy 交互授权异常退出。'
-    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" $allow_root_flag; then
+    if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
       smoke_rc=0
     else
       smoke_rc=$?
@@ -492,8 +430,8 @@ main() {
   CONFIG_CHANGED=1
   mv -f -- "$CANDIDATE" "$CONFIG"
   CANDIDATE=
-  chown root:"$APP_USER" "$CONFIG"; chmod 0640 "$CONFIG"
-  /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" --user "$APP_USER" > "$BACKUP/new.service"
+  chown root:root "$CONFIG"; chmod 0600 "$CONFIG"
+  /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" --user root > "$BACKUP/new.service"
   UNIT_CHANGED=1
   install -o root -g root -m 0644 "$BACKUP/new.service" "$UNIT"
   systemctl daemon-reload
