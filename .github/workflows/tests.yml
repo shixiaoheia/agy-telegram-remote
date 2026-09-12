@@ -22,3 +22,43 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Verify source and offline tests
         run: bash scripts/verify.sh
+  restore-executable-modes:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/fix/three-step-reliable-runner' &&
+      github.event.head_commit.message == 'chore: bootstrap restore executable modes'
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4 ref
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Restore and verify final tree
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^:.github/workflows/tests.yml)" = "52433f0cb30cbf5f56ca98fdcbd98be90283d449"
+          git checkout HEAD^ -- .github/workflows/tests.yml
+          chmod +x install.sh scripts/verify.sh
+          git update-index --chmod=+x install.sh scripts/verify.sh
+          test "$(git ls-files -s install.sh | awk '{print $1}')" = "100755"
+          test "$(git ls-files -s scripts/verify.sh | awk '{print $1}')" = "100755"
+          git diff --cached --check
+          test "$(git diff --cached --name-only)" = $'.github/workflows/tests.yml\ninstall.sh\nscripts/verify.sh'
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          bash scripts/verify.sh
+      - name: Commit restored modes
+        shell: bash
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git commit -m 'chore: preserve script executable modes'
+          git push origin HEAD:fix/three-step-reliable-runner
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
