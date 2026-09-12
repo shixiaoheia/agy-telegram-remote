@@ -1,6 +1,17 @@
 .env
+.env.*
+!.env.example
 venv/
+.venv/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
 *.log
 *.pid
+*.pem
+*.key
+state/
+workspace/
+local-results/

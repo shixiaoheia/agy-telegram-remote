@@ -1,598 +1,335 @@
+#!/usr/bin/env python3
+"""Private-chat Telegram bridge. One workspace, one job, no automatic task rerun."""
+from __future__ import annotations
+
+import argparse
 import asyncio
-import json
+import logging
 import os
-from collections import deque
 import signal
-from dataclasses import dataclass
+import sys
+import time
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from agy_runner import Result, Runner
+from settings import ConfigError, Settings
+from state_store import Store, atomic_json
+from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 
-ROOT = Path(__file__).parent
-load_dotenv(ROOT / ".env")
-
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-AGY = os.getenv("AGY_PATH", "agy")
-WORK = Path(os.getenv("AGY_WORKSPACE", "/srv/agy-workspace")).resolve()
-TIMEOUT = int(os.getenv("AGY_TIMEOUT_SECONDS", "900"))
-MAX_PROMPT_CHARS = int(os.getenv("MAX_PROMPT_CHARS", "12000"))
-MAX_OUTPUT_BYTES = max(1024, int(os.getenv("MAX_OUTPUT_BYTES", "1048576")))
-MAX_REPLY_CHARS = max(3900, int(os.getenv("MAX_REPLY_CHARS", "30000")))
-SKIP_PERMISSIONS = os.getenv("AGY_SKIP_PERMISSIONS", "false").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
+LOG = logging.getLogger("agy_remote")
+LABELS = {
+    "success": "agy 返回结果",
+    "no_text": "缺少最终文字回复",
+    "permission": "存在权限拒绝，需要核对",
+    "invalid": "结果无法完整解析",
+    "error": "执行异常",
+    "timed_out": "执行超时",
+    "cancelled": "任务已取消",
+    "interrupted": "上次任务被中断",
+    "output_limit": "输出超过上限",
+    "cleanup_failed": "进程清理未确认完成",
+    "not_started": "任务没有启动",
+    "running": "任务执行中",
 }
-ALLOWED = {
-    int(value)
-    for value in os.getenv("ALLOWED_USER_IDS", "").split(",")
-    if value.strip()
+CATEGORY_HELP = {
+    "auth": "诊断信息疑似要求登录，请在服务器重新授权。",
+    "quota": "诊断信息疑似涉及配额或限流，请检查账户额度。",
+    "permission": "请检查 AGY_SKIP_PERMISSIONS 或 agy 的权限规则。",
+    "network": "诊断信息疑似网络问题，请检查服务器连接。",
 }
 
 
 @dataclass
 class Job:
-    process: asyncio.subprocess.Process | None = None
-    cancelled: bool = False
-    state: str = "准备中"
+    user: int
+    chat: int
+    job_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    cancel: asyncio.Event = field(default_factory=asyncio.Event)
     worker: asyncio.Task | None = None
-    communicate_task: asyncio.Task | None = None
-    stop_task: asyncio.Task | None = None
 
 
-# A single dedicated workspace is shared by all allowed users, so it has one slot.
-JOBS: dict[int, Job] = {}
-WORK_LOCK = asyncio.Lock()
-WORK_SLOT: Job | None = None
+def describe(record: dict) -> str:
+    outcome = str(record.get("outcome", "error"))
+    title = LABELS.get(outcome, "结果需核对")
+    parts = [f"{title}｜任务 {record.get('job_id', '-') }"]
+    if record.get("detail"):
+        parts.append(str(record["detail"]))
+    help_text = CATEGORY_HELP.get(record.get("category"))
+    if help_text:
+        parts.append(help_text)
+    if record.get("text"):
+        parts.append(str(record["text"]))
+    if outcome not in {"success", "not_started", "running"}:
+        parts.append("没有自动重跑任务。请先核对工作目录；/last 只取回记录，不重新执行。")
+    return "\n\n".join(parts)
 
 
-def is_private_chat(update: Update) -> bool:
-    return bool(update.effective_chat and update.effective_chat.type == "private")
+class Bridge:
+    def __init__(self, settings: Settings, api: TelegramAPI, store: Store,
+                 runner: Runner, ready_file: Path | None = None):
+        self.settings, self.api, self.store, self.runner = settings, api, store, runner
+        self.ready_file = ready_file
+        self.slot: Job | None = None
+        self.stop = asyncio.Event()
+        self.offset = store.offset()
+        self._last_maintenance = 0.0
 
-
-def authorized(update: Update) -> bool:
-    return bool(update.effective_user and update.effective_user.id in ALLOWED)
-
-
-def authorized_private(update: Update) -> bool:
-    return is_private_chat(update) and authorized(update)
-
-
-def signal_process_group(process: asyncio.subprocess.Process, signum: int) -> None:
-    try:
-        os.killpg(process.pid, signum)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
-def decode_output(raw: bytes | None) -> str:
-    if raw is None:
-        return ""
-    if isinstance(raw, bytes):
-        return raw.decode(errors="replace").strip()
-    return str(raw).strip()
-
-
-def parse_agy_output(raw: bytes | None) -> tuple[str, str, bool]:
-    text = decode_output(raw)
-    if not text:
-        return "", "", False
-
-    def consume_result(result: object) -> tuple[str, str, bool]:
-        if not isinstance(result, dict):
-            return "", "agy 返回格式异常：result 不是对象。", False
-
-        response = result.get("response")
-        answer = response if isinstance(response, str) else ""
-        if response is not None and not isinstance(response, str):
-            return "", "agy 返回格式异常：response 不是文本。", False
-
-        status = result.get("status")
-        if status not in (None, "SUCCESS"):
-            result_error = result.get("error")
-            return (
-                "",
-                str(result_error)
-                if result_error not in (None, "")
-                else f"agy 返回状态：{status or '未知'}",
-                False,
-            )
-        return answer, "", status == "SUCCESS"
-
-    answer = ""
-    error = ""
-    streamed: list[str] = []
-    saw_structured = False
-    saw_successful_result = False
-    decoder = json.JSONDecoder(strict=False)
-    offset = 0
-
-    while offset < len(text):
-        while offset < len(text) and text[offset].isspace():
-            offset += 1
-        if offset >= len(text):
-            break
+    async def send_text(self, chat: int, text: str) -> bool:
         try:
-            event, offset = decoder.raw_decode(text, offset)
-        except json.JSONDecodeError:
-            break
-        if not isinstance(event, dict):
-            continue
+            for chunk in chunks_utf16(self.store.redact(text)):
+                await self.api.send(chat, chunk)
+            return True
+        except TelegramError as error:
+            LOG.warning("telegram_delivery_failed code=%s", error.code)
+            return False
 
-        event_type = event.get("event")
-        if event_type == "step_update":
-            saw_structured = True
-            step_update = event.get("step_update")
-            if isinstance(step_update, dict) and step_update.get(
-                "step_type"
-            ) in (None, "agent_response"):
-                delta = step_update.get("text_delta")
-                if isinstance(delta, str):
-                    streamed.append(delta)
-        elif event_type == "result":
-            saw_structured = True
-            result_answer, result_error, successful_result = consume_result(
-                event.get("result")
-            )
-            if result_answer:
-                answer = result_answer
-            if result_error:
-                error = result_error
-            saw_successful_result = saw_successful_result or successful_result
-        elif "result" in event:
-            saw_structured = True
-            result_answer, result_error, successful_result = consume_result(
-                event.get("result")
-            )
-            if result_answer:
-                answer = result_answer
-            if result_error:
-                error = result_error
-            saw_successful_result = saw_successful_result or successful_result
-        elif "response" in event or "status" in event:
-            saw_structured = True
-            result_answer, result_error, successful_result = consume_result(event)
-            if result_answer:
-                answer = result_answer
-            if result_error:
-                error = result_error
-            saw_successful_result = saw_successful_result or successful_result
-
-    final_answer = answer.strip() or "".join(streamed).strip()
-    if final_answer:
-        return final_answer, error, False
-    if error:
-        return "", error, False
-    if saw_successful_result:
-        return "", "", True
-    if saw_structured:
-        return "", "agy 返回了不完整的结构化输出。请重新运行安装脚本后再试。", False
-    return text, "", False
-
-async def read_output_tail(
-    stream: asyncio.StreamReader | None, limit: int
-) -> tuple[bytes, bool]:
-    """Drain a pipe completely while retaining only its most recent bytes."""
-    if stream is None:
-        return b"", False
-
-    chunks: deque[bytes] = deque()
-    stored = 0
-    truncated = False
-    while True:
-        chunk = await stream.read(65536)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        stored += len(chunk)
-        while stored > limit:
-            first = chunks[0]
-            excess = stored - limit
-            if len(first) <= excess:
-                chunks.popleft()
-                stored -= len(first)
-            else:
-                chunks[0] = first[excess:]
-                stored -= excess
-            truncated = True
-    return b"".join(chunks), truncated
-
-
-async def collect_process_output(
-    process: asyncio.subprocess.Process,
-) -> tuple[bytes, bytes, bool, bool]:
-    stdout_task = asyncio.create_task(read_output_tail(process.stdout, MAX_OUTPUT_BYTES))
-    stderr_task = asyncio.create_task(read_output_tail(process.stderr, MAX_OUTPUT_BYTES))
-    try:
-        await process.wait()
-        stdout, stdout_truncated = await stdout_task
-        stderr, stderr_truncated = await stderr_task
-        return stdout, stderr, stdout_truncated, stderr_truncated
-    finally:
-        for reader_task in (stdout_task, stderr_task):
-            if not reader_task.done():
-                reader_task.cancel()
-
-
-async def send_long(update: Update, text: str) -> None:
-    if not update.message:
-        return
-    if len(text) > MAX_REPLY_CHARS:
-        notice = "\n\n（回传内容过长，已截断；请在服务器工作目录或日志中查看完整输出。）"
-        text = text[: max(0, MAX_REPLY_CHARS - len(notice))] + notice
-    for start in range(0, len(text), 3900):
-        await update.message.reply_text(text[start : start + 3900])
-
-
-async def terminate_and_reap(
-    process: asyncio.subprocess.Process,
-    communicate_task: asyncio.Task | None,
-) -> None:
-    """Stop the agy process group, including child tools, and reap its pipes."""
-    if process.returncode is None:
-        signal_process_group(process, signal.SIGTERM)
-
-    try:
-        if communicate_task is not None:
-            await asyncio.wait_for(asyncio.shield(communicate_task), timeout=10)
-        else:
-            await asyncio.wait_for(process.wait(), timeout=10)
-        return
-    except asyncio.CancelledError:
-        # Shutdown may cancel the reaper. Escalate before preserving cancellation.
-        if process.returncode is None:
-            signal_process_group(process, signal.SIGKILL)
-        raise
-    except Exception:
-        pass
-
-    if process.returncode is None:
-        signal_process_group(process, signal.SIGKILL)
-
-    try:
-        if communicate_task is not None:
-            await asyncio.wait_for(asyncio.shield(communicate_task), timeout=5)
-        else:
-            await asyncio.wait_for(process.wait(), timeout=5)
-    except asyncio.CancelledError:
-        raise
-    except asyncio.TimeoutError:
-        # A detached descendant may keep a pipe open after its parent exits.
-        # Do not leave this bot worker blocked forever on that pipe.
-        if communicate_task is not None and not communicate_task.done():
-            communicate_task.cancel()
-    except Exception:
-        pass
-
-
-def ensure_reaper(
-    application: Application,
-    update: Update,
-    job: Job,
-    process: asyncio.subprocess.Process,
-    communicate_task: asyncio.Task | None,
-) -> asyncio.Task:
-    """Create at most one live reaper for this Job without yielding first."""
-    current = job.stop_task
-    if current is None or (current.done() and process.returncode is None):
-        cleanup = terminate_and_reap(process, communicate_task)
+    async def _work(self, job: Job, prompt: str) -> None:
+        # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
-            current = application.create_task(cleanup, update=update)
-        except BaseException:
-            cleanup.close()
-            if process.returncode is None:
-                signal_process_group(process, signal.SIGKILL)
+            result = await self.runner.run(prompt, job.cancel)
+            record = self.store.save(
+                job.user, result.to_dict() | {"job_id": job.job_id, "delivery": "pending"}
+            )
+            LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
+            delivered = await self.send_text(job.chat, describe(record))
+            self.store.save(job.user, record | {
+                "delivery": "sent" if delivered else "failed_or_partial"
+            })
+        except asyncio.CancelledError:
+            job.cancel.set()
+            # Runner normally consumes cancellation only after cleaning its group.
+            LOG.warning("worker_cancelled id=%s", job.job_id)
             raise
-        job.stop_task = current
-    return current
-
-
-def start_reaper(application: Application, update: Update, job: Job) -> None:
-    process = job.process
-    if process is not None and process.returncode is None:
-        ensure_reaper(application, update, job, process, job.communicate_task)
-
-
-async def finish_reaper(
-    application: Application,
-    update: Update,
-    job: Job,
-    process: asyncio.subprocess.Process,
-    communicate_task: asyncio.Task | None,
-) -> None:
-    stop_task = ensure_reaper(application, update, job, process, communicate_task)
-    try:
-        await asyncio.shield(stop_task)
-    except asyncio.CancelledError:
-        if process.returncode is None:
-            signal_process_group(process, signal.SIGKILL)
-        raise
-    except Exception:
-        pass
-
-
-async def show_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if is_private_chat(update) and update.effective_user and update.message:
-        await update.message.reply_text(
-            f"你的 Telegram 数字 ID：{update.effective_user.id}"
-        )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if authorized_private(update) and update.message:
-        await update.message.reply_text(
-            "直接发送任务给 agy。\n"
-            "/status 查看状态\n"
-            "/cancel 停止当前任务"
-        )
-
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized_private(update) or not update.message or not update.effective_user:
-        return
-
-    job = JOBS.get(update.effective_user.id)
-    if job is None:
-        await update.message.reply_text("当前没有任务。")
-    else:
-        await update.message.reply_text(f"当前任务：{job.state}。")
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not authorized_private(update) or not update.message or not update.effective_user:
-        return
-
-    job = JOBS.get(update.effective_user.id)
-    if job is None:
-        await update.message.reply_text("当前没有可停止的任务。")
-        return
-
-    job.cancelled = True
-    if job.process is None:
-        await update.message.reply_text("任务正在准备，已请求取消。")
-    elif job.process.returncode is None:
-        signal_process_group(job.process, signal.SIGTERM)
-        start_reaper(context.application, update, job)
-        await update.message.reply_text("已请求停止任务及其子进程。")
-    else:
-        await update.message.reply_text("agy 已结束，结果正在发送。")
-
-
-async def run_job(
-    application: Application,
-    update: Update,
-    note,
-    prompt: str,
-    user_id: int,
-    job: Job,
-) -> None:
-    global WORK_SLOT
-
-    process = None
-    communicate_task = None
-    successful = False
-
-    try:
-        async with WORK_LOCK:
-            if job.cancelled:
-                job.state = "已取消"
-                await note.edit_text("任务已取消。")
-                return
-
-            command = [
-                AGY,
-                "--print-timeout",
-                f"{TIMEOUT}s",
-                "--output-format",
-                "stream-json",
-            ]
-            if SKIP_PERMISSIONS:
-                command.append("--dangerously-skip-permissions")
-            command.extend(("--print", prompt))
-
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=WORK,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
+        except Exception as error:
+            # Never print raw exception text: it may contain request URLs or secrets.
+            LOG.error("worker_failed id=%s type=%s", job.job_id, type(error).__name__)
+            self.runner.blocked = True
+            await self.send_text(
+                job.chat,
+                f"任务 {job.job_id} 的结果保存或内部处理异常。"
+                "已暂停新任务；请检查服务器。不要直接重复原任务。",
             )
-            job.process = process
-            job.state = "运行中"
-            communicate_task = asyncio.create_task(collect_process_output(process))
-            job.communicate_task = communicate_task
+        finally:
+            if self.slot is job:
+                self.slot = None
 
-            if job.cancelled:
-                job.state = "已取消"
-                await finish_reaper(
-                    application, update, job, process, communicate_task
+    async def handle(self, update: dict) -> None:
+        if self.stop.is_set():
+            return
+        message = update.get("message")
+        if not isinstance(message, dict):
+            return
+        chat = message.get("chat")
+        sender = message.get("from")
+        if not isinstance(chat, dict) or not isinstance(sender, dict):
+            return
+        if chat.get("type") != "private":
+            return
+        user, chat_id = sender.get("id"), chat.get("id")
+        if type(user) is not int or type(chat_id) is not int or user <= 0 or chat_id <= 0:
+            return
+        text = message.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return
+        text = text.strip()
+        command = text.split()[0].split("@")[0] if text.startswith("/") else ""
+        if command == "/id":
+            await self.send_text(chat_id, f"你的 Telegram 数字 ID：{user}")
+            return
+        if user not in self.settings.allowed or sender.get("is_bot") is True:
+            return
+        if command in {"/start", "/help"}:
+            await self.send_text(
+                chat_id, "直接发送任务给 agy。\n/status 查看状态\n/cancel 请求取消"
+                "\n/last 取回本人最近结果（不会重新执行）\n/id 查看数字 ID"
+                "\n每条普通消息独立执行，不保留对话上下文。",
+            )
+            return
+        if command == "/status":
+            if self.slot and self.slot.user == user:
+                text = f"任务 {self.slot.job_id}：" + (
+                    "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
                 )
-                await note.edit_text("任务已取消，子进程已回收。")
-                return
-
+            elif self.runner.blocked:
+                text = "已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
+            else:
+                text = "你当前没有任务。" + ("工作目录正被其他任务占用。" if self.slot else "")
+            await self.send_text(chat_id, text)
+            return
+        if command == "/cancel":
+            job = self.slot
+            if job is not None and job.user == user:
+                job.cancel.set()
+                await self.send_text(chat_id, "已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
+            else:
+                await self.send_text(chat_id, "你当前没有可取消的任务。")
+            return
+        if command == "/last":
             try:
-                (
-                    stdout,
-                    stderr,
-                    stdout_truncated,
-                    stderr_truncated,
-                ) = await asyncio.wait_for(
-                    asyncio.shield(communicate_task),
-                    timeout=TIMEOUT + 30,
-                )
-            except asyncio.TimeoutError:
-                if job.cancelled:
-                    job.state = "已取消"
-                    await finish_reaper(
-                        application, update, job, process, communicate_task
+                record = self.store.load(user)
+                text = describe(record) if record else "没有可取回的结果，或结果已过保留期。"
+            except (OSError, ValueError):
+                text = "无法读取最近结果，请检查服务器状态。"
+            await self.send_text(chat_id, text)
+            return
+        if command:
+            await self.send_text(chat_id, "不支持这个控制命令。发送 /help 查看用法。")
+            return
+        if len(text) > self.settings.max_prompt or "\x00" in text:
+            await self.send_text(chat_id, f"任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+            return
+        if self.runner.blocked:
+            await self.send_text(chat_id, "新任务已暂停，请检查服务器并重启服务。")
+            return
+        if self.slot is not None:
+            await self.send_text(chat_id, "工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
+            return
+
+        job = Job(user, chat_id)
+        self.slot = job  # reserve before first await
+        try:
+            self.store.maintain()
+            self.store.save(user, {
+                "job_id": job.job_id, "outcome": "running", "delivery": "pending",
+                "detail": "任务准备或执行中；服务中断时不会自动重试。",
+            })
+            accepted = await self.send_text(chat_id, f"任务 {job.job_id} 已接收，准备调用 agy。")
+            if not accepted or self.stop.is_set():
+                self.store.save(user, {
+                    "job_id": job.job_id, "outcome": "not_started",
+                    "detail": "确认消息未成功投递或服务正在停止；没有启动 agy。",
+                    "delivery": "failed",
+                })
+                self.slot = None
+                return
+            job.worker = asyncio.create_task(self._work(job, text))
+        except Exception:
+            self.slot = None
+            self.runner.blocked = True
+            LOG.error("job_prepare_failed id=%s", job.job_id)
+            await self.send_text(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+
+    async def consume_updates(self, updates: object) -> None:
+        if not isinstance(updates, list):
+            raise TelegramError()
+        for update in updates:
+            if self.stop.is_set():
+                break
+            if not isinstance(update, dict) or type(update.get("update_id")) is not int:
+                raise TelegramError()
+            uid = update["update_id"]
+            if uid < self.offset:
+                continue
+            # Persist before dispatch: fail closed rather than replay side effects.
+            # A crash here can drop this update; this is not exactly-once delivery.
+            self.store.save_offset(uid + 1)
+            self.offset = uid + 1
+            await self.handle(update)
+
+    async def initialize(self) -> None:
+        me = await self.api.call("getMe")
+        if not isinstance(me, dict) or me.get("is_bot") is not True:
+            raise TelegramError()
+        webhook = await self.api.call("getWebhookInfo")
+        if not isinstance(webhook, dict) or webhook.get("url"):
+            raise RuntimeError("An active webhook must be removed explicitly before polling")
+        # Drop pre-start backlog. Negative offset is documented by Telegram.
+        updates = await self.api.call(
+            "getUpdates", offset=-1, limit=1, timeout=0, allowed_updates=["message"]
+        )
+        if not isinstance(updates, list):
+            raise TelegramError()
+        # Telegram may reseed update IDs after a long idle period. On startup
+        # the explicit backlog drop defines a new watermark, not the old file.
+        self.offset = 0
+        for item in updates:
+            if not isinstance(item, dict) or type(item.get("update_id")) is not int:
+                raise TelegramError()
+            self.offset = max(self.offset, item["update_id"] + 1)
+        self.store.save_offset(self.offset)
+        self.store.recover_interrupted()
+        if self.ready_file is not None:
+            atomic_json(self.ready_file, {
+                "pid": os.getpid(), "initialized": True, "started_at": time.time(),
+            })
+        LOG.info("READY pid=%s", os.getpid())
+
+    async def run(self) -> None:
+        try:
+            await self.initialize()
+            backoff = 1.0
+            while not self.stop.is_set():
+                if time.monotonic() - self._last_maintenance > 3600:
+                    self.store.maintain()
+                    self._last_maintenance = time.monotonic()
+                try:
+                    updates = await self.api.call(
+                        "getUpdates", offset=self.offset, limit=25, timeout=10,
+                        allowed_updates=["message"],
                     )
-                    await note.edit_text("任务已取消，子进程已回收。")
-                else:
-                    job.state = "超时"
-                    await finish_reaper(
-                        application, update, job, process, communicate_task
-                    )
-                    await note.edit_text("任务超时，已停止并回收子进程。")
-                return
+                    await self.consume_updates(updates)
+                    backoff = 1.0
+                except TelegramError as error:
+                    if error.code in {401, 403, 409}:
+                        raise
+                    LOG.warning("telegram_poll_retry code=%s", error.code)
+                    delay = max(backoff, float(error.retry_after))
+                    try:
+                        await asyncio.wait_for(self.stop.wait(), delay)
+                    except asyncio.TimeoutError:
+                        pass
+                    backoff = min(30.0, backoff * 2)
+        finally:
+            self.stop.set()
+            if self.ready_file is not None:
+                self.ready_file.unlink(missing_ok=True)
+            job = self.slot
+            if job is not None:
+                job.cancel.set()
+                if job.worker is not None:
+                    await job.worker
 
-            if job.cancelled:
-                job.state = "已取消"
-                await finish_reaper(
-                    application, update, job, process, communicate_task
-                )
-                await note.edit_text("任务已取消，子进程已回收。")
-                return
 
-            answer, error, completed_without_text = parse_agy_output(stdout)
-            stderr_text = decode_output(stderr)
-            if stdout_truncated:
-                output_note = (
-                    "agy 输出超过保留上限，已只保留最后 "
-                    f"{MAX_OUTPUT_BYTES // 1024} KiB。"
-                )
-                if answer:
-                    answer = f"{answer}\n\n（{output_note}）"
-                elif not error:
-                    error = output_note
-            if stderr_truncated and not error and process.returncode != 0:
-                error = "agy 错误输出过长，已只保留最后部分诊断信息。"
-            if process.returncode != 0 and not error:
-                error = stderr_text or f"agy 退出码：{process.returncode}"
-            elif "soft-denied" in stderr_text.lower():
-                error = (
-                    "agy 有工具请求被权限策略拒绝。"
-                    "如确认白名单、工作目录和任务都可信，可在 .env 中把 "
-                    "AGY_SKIP_PERMISSIONS 改为 true 后重启服务。\n\n"
-                    f"{stderr_text[-1800:]}"
-                )
-
-            if error:
-                job.state = "失败"
-                await finish_reaper(
-                    application, update, job, process, communicate_task
-                )
-                await note.edit_text(f"执行失败：{str(error)[:3500]}")
-                return
-            if not answer:
-                if completed_without_text:
-                    successful = True
-                    job.state = "完成"
-                    await note.edit_text(
-                        "任务已完成，但 agy 没有生成可转发的文本。"
-                        "为避免重复执行任务，机器人没有自动重试；请再发送一次任务。"
-                    )
-                    return
-                job.state = "失败"
-                await finish_reaper(
-                    application, update, job, process, communicate_task
-                )
-                await note.edit_text("agy 没有返回内容。请重新运行安装脚本后再试。")
-                return
-
-            successful = True
-            job.state = "完成"
-            await note.edit_text("任务完成：")
-            await send_long(update, answer)
-    except asyncio.CancelledError:
-        job.cancelled = True
-        job.state = "已取消"
-        if process is not None:
-            await finish_reaper(
-                application, update, job, process, communicate_task
-            )
-        raise
-    except FileNotFoundError:
-        job.state = "失败"
-        await note.edit_text(f"未找到 agy：{AGY}")
-    except Exception as exc:
-        job.state = "失败"
-        await note.edit_text(f"执行失败：{str(exc)[:3500]}")
+async def start(settings: Settings, ready_file: Path | None) -> None:
+    if os.geteuid() == 0:
+        raise ConfigError("Bot 和 agy 禁止以 root 运行。")
+    if not settings.workspace.is_dir() or not os.access(settings.workspace, os.R_OK | os.W_OK | os.X_OK):
+        raise ConfigError("工作目录不可用。")
+    store = Store(settings.state_dir, settings.allowed, settings.max_reply,
+                  settings.retention_days, settings.token)
+    store.lock()
+    bridge = Bridge(settings, TelegramAPI(settings.token), store, Runner(settings), ready_file)
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, bridge.stop.set)
+    try:
+        await bridge.run()
     finally:
-        if process is not None and not successful:
-            await finish_reaper(
-                application, update, job, process, communicate_task
-            )
-
-        job.process = None
-        job.communicate_task = None
-        if JOBS.get(user_id) is job:
-            JOBS.pop(user_id, None)
-        if WORK_SLOT is job:
-            WORK_SLOT = None
+        store.close()
 
 
-async def task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    global WORK_SLOT
-
-    if not authorized_private(update) or not update.message or not update.effective_user:
-        return
-
-    prompt = (update.message.text or "").strip()
-    if not prompt:
-        return
-    if len(prompt) > MAX_PROMPT_CHARS:
-        await update.message.reply_text(
-            f"任务过长，请控制在 {MAX_PROMPT_CHARS} 个字符以内。"
-        )
-        return
-    if not WORK.is_dir():
-        await update.message.reply_text(f"工作目录不存在或不可用：{WORK}")
-        return
-
-    user_id = update.effective_user.id
-    if user_id in JOBS:
-        await update.message.reply_text("你已有任务在运行，请先等待完成或发送 /cancel。")
-        return
-    if WORK_SLOT is not None:
-        await update.message.reply_text(
-            "工作目录正在执行另一个任务。为避免同时读写冲突，请等待后重试。"
-        )
-        return
-
-    # Register before the first await. The short handler returns immediately;
-    # the long agy run is managed by the Application as a background task.
-    job = Job()
-    JOBS[user_id] = job
-    WORK_SLOT = job
-
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("/etc/agy-telegram-remote/config.env"))
+    parser.add_argument("--ready-file", type=Path)
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
-        note = await update.message.reply_text("任务已接收，正在调用 agy…")
-    except BaseException:
-        if JOBS.get(user_id) is job:
-            JOBS.pop(user_id, None)
-        if WORK_SLOT is job:
-            WORK_SLOT = None
-        raise
-
-    worker_coro = run_job(context.application, update, note, prompt, user_id, job)
-    try:
-        job.worker = context.application.create_task(worker_coro, update=update)
-    except BaseException:
-        worker_coro.close()
-        if JOBS.get(user_id) is job:
-            JOBS.pop(user_id, None)
-        if WORK_SLOT is job:
-            WORK_SLOT = None
-        raise
-
-
-def main() -> None:
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("id", show_id))
-    app.add_handler(CommandHandler(["start", "help"], help_command))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
-            task,
-        )
-    )
-    app.run_polling(drop_pending_updates=True)
+        settings = Settings.load(args.config)
+        asyncio.run(start(settings, args.ready_file))
+        return 0
+    except (ConfigError, PermissionError, BlockingIOError):
+        LOG.error("startup_failed: configuration, permissions, or another local instance")
+        return 78
+    except TelegramError as error:
+        LOG.error("startup_or_poll_failed: Telegram code=%s", error.code)
+        return 78 if error.code in {401, 403, 409} else 1
+    except (OSError, ValueError, RuntimeError):
+        LOG.error("startup_failed: local state, webhook, or runtime error")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
