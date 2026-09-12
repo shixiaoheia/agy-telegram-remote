@@ -10,7 +10,7 @@
 [![Telegram Channel](https://img.shields.io/badge/TG%E9%A2%91%E9%81%93-Xiaohei%E7%9A%84%E7%A7%98%E5%AF%86%E5%9F%BA%E5%9C%B0-2CA5E0?logo=telegram)](https://t.me/xiaoheidemimi)
 [![BandwagonHost VPS](https://img.shields.io/badge/%E6%8E%A8%E8%8D%90VPS-%E6%90%AC%E7%93%A6%E5%B7%A5-red)](https://bandwagonhost.com/aff.php?aff=80815)
 
-[✨ 核心亮点](#-核心亮点) • [⚡ 极简安装](#-极简三步安装) • [🎮 指令速查](#-使用指南与指令速查) • [🧠 模型与调优](#-官方全量模型支持与快捷别名-model) • [💬 会话与用量](#-连续对话与-token-用量统计-new--reset--usage) • [🖥️ 运维与监控](#-运维管理与系统监控-sys-ls-whitelist-restart) • [👑 Root 模式](#-单机-vps-极简-root-部署模式-root) • [⚙️ 目录与配置](#-目录与配置说明) • [❓ 常见排错](#-常见问题排查-faq)
+[⚡ 极简一键直装](#-极简一键直装复制即用) • [✨ 核心亮点](#-核心亮点) • [🎮 指令速查](#-使用指南与指令速查) • [🧠 模型与调优](#-官方全量模型支持与快捷别名-model) • [💬 会话与用量](#-连续对话与-token-用量统计-new--reset--usage) • [🖥️ 运维与监控](#-运维管理与系统监控-sys-ls-whitelist-restart) • [👑 Root 模式](#-单机-vps-极简-root-部署模式-root) • [⚙️ 目录与配置](#-目录与配置说明) • [❓ 常见排错](#-常见问题排查-faq)
 
 </div>
 
@@ -18,6 +18,16 @@
 
 > 📢 **官方交流社区**：加入 Telegram 频道 **[Xiaohei的秘密基地](https://t.me/xiaoheidemimi)**，实时获取最新版本发布、使用技巧与答疑交流！<br>
 > 🚀 **推荐服务器**：建站与稳定运行 VPS 首选推荐 **[搬瓦工 BandwagonHost（专属优惠通道）](https://bandwagonhost.com/aff.php?aff=80815)**。
+
+---
+
+## ⚡ 极简一键直装（复制即用）
+
+在 VPS 终端直接复制粘贴运行以下命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
+```
 
 ---
 
