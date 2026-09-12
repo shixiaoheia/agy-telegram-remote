@@ -387,7 +387,7 @@ main() {
   systemctl restart "$SERVICE"
 
   echo '正在验证机器人初始化和长轮询就绪……'
-  local ready=0 pid attempt
+  local ready=0 pid
   for _ in {1..180}; do
     pid="$(systemctl show "$SERVICE" -p MainPID --value)"
     if systemctl is-active --quiet "$SERVICE" \
