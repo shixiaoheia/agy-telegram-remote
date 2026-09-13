@@ -47,6 +47,20 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(self.store.load(12345))
         self.assertFalse(path.exists())
 
+    def test_history_is_private_bounded_and_expires(self):
+        for index in range(12):
+            record = self.store.save(12345, {
+                "job_id": f"{index:012x}", "outcome": "success", "text": f"result {index}",
+            })
+            self.store.save_history(12345, f"task {index}", record)
+        history = self.store.history(12345)
+        self.assertEqual(len(history), 10)
+        self.assertEqual(history[0]["title"], "task 11")
+        self.assertEqual(self.store.history_item(12345, f"{11:012x}")["text"], "result 11")
+        self.assertIsNone(self.store.history_item(67890, f"{11:012x}"))
+        path = self.directory / "history-12345.json"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
     def test_interrupted_record_not_reexecuted(self):
         self.store.save(12345, {"job_id": "job", "outcome": "running"})
         self.store.recover_interrupted()

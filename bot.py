@@ -41,6 +41,13 @@ CATEGORY_HELP = {
     "permission": "请检查 AGY_SKIP_PERMISSIONS 或 agy 的权限规则。",
     "network": "诊断信息疑似网络问题，请检查服务器连接。",
 }
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+SAFE_DOCUMENT_SUFFIXES = frozenset({
+    ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
+    ".sql", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb", ".xml", ".csv",
+})
+FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 
 
 def clean_model_reply(text: str) -> str:
@@ -263,6 +270,32 @@ class Job:
     started_at: float = field(default_factory=time.monotonic)
     status_message_id: int | None = None
     progress_task: asyncio.Task | None = None
+    attachment_dir: Path | None = None
+    attachments: list[Path] = field(default_factory=list)
+    history_title: str = ""
+
+
+def task_title(text: str, fallback: str = "未命名任务") -> str:
+    return " ".join(text.split())[:160] or fallback
+
+
+def history_summary(records: list[dict]) -> tuple[str, dict | None]:
+    if not records:
+        return "📚 任务历史\n━━━━━━━━━━━━━━━━━━━━\nℹ️ 暂无已完成的任务记录。", None
+    lines = ["📚 任务历史（最近 10 条）", "━━━━━━━━━━━━━━━━━━━━"]
+    keyboard: list[list[dict[str, str]]] = []
+    for index, record in enumerate(records, 1):
+        title = task_title(str(record.get("title", "未命名任务")))
+        outcome = str(record.get("outcome", "error"))
+        duration = record.get("duration_seconds")
+        duration_text = f" ｜ ⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
+        lines.append(f"{index}. {LABELS.get(outcome, '结果需核对')}{duration_text}\n   {title}")
+        job_id = record.get("job_id")
+        if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
+            label = f"{index}. {title}"[:60]
+            keyboard.append([{"text": label, "callback_data": f"history:{job_id}"}])
+    lines.append("━━━━━━━━━━━━━━━━━━━━\n点击下方任务可查看完整结果。")
+    return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
 
 
 def describe(record: dict) -> str:
@@ -571,6 +604,8 @@ class Bridge:
                 f"⏳ 正在调用 Antigravity 执行任务，请稍候...\n\n"
                 f"进度会每 5 秒自动更新；需要停止时请点下方按钮。"
             )
+            if job.attachments:
+                accept_msg += f"\n📎 已接收 {len(job.attachments)} 个附件，将在本次任务中读取。"
             cancel_markup = {"inline_keyboard": [[{
                 "text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"
             }]]}
@@ -581,7 +616,7 @@ class Bridge:
             except TelegramError:
                 accepted = False
             if not accepted or self.stop.is_set() or job.cancel.is_set():
-                self.store.save(job.user, {
+                record = self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
                     "detail": "确认消息未成功投递、任务已取消或服务正在停止；没有启动 agy。",
                     "delivery": "sent" if accepted else "failed",
@@ -589,6 +624,7 @@ class Bridge:
                     "effort": job.effort,
                     "mode": job.mode,
                 })
+                self.store.save_history(job.user, job.history_title, record)
                 return
             await self._work(job, prompt)
         except Exception as error:
@@ -596,6 +632,7 @@ class Bridge:
             LOG.error("job_accept_failed id=%s type=%s", job.job_id, type(error).__name__)
             self.queue_reply(job.chat, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。")
         finally:
+            self._cleanup_attachments(job)
             if self.slot is job:
                 self.slot = None
 
@@ -639,6 +676,7 @@ class Bridge:
                     "mode": job.mode or getattr(result, "mode", ""),
                 }
             )
+            self.store.save_history(job.user, job.history_title, record)
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
             await self._finish_progress(job, result.outcome)
             delivered = await self.send_html(job.chat, describe_html(record))
@@ -694,6 +732,56 @@ class Bridge:
         except (TelegramError, AttributeError):
             pass
 
+    async def _receive_attachment(self, job: Job, attachment: dict, is_photo: bool) -> tuple[Path, str]:
+        """Fetch a whitelisted Telegram attachment into this job's private workspace."""
+        size = attachment.get("file_size")
+        file_id = attachment.get("file_id")
+        if type(size) is not int or not 0 < size <= MAX_ATTACHMENT_BYTES or not isinstance(file_id, str) or not FILE_ID_RE.fullmatch(file_id):
+            raise ValueError("invalid attachment metadata")
+        original = "screenshot.jpg" if is_photo else str(attachment.get("file_name") or "")
+        suffix = ".jpg" if is_photo else Path(original).suffix.lower()
+        if not is_photo and suffix not in SAFE_DOCUMENT_SUFFIXES:
+            raise ValueError("unsupported document")
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original).name)[:96]
+        if not name or name in {".", ".."}:
+            name = "screenshot.jpg" if is_photo else "attachment" + suffix
+        base = self.settings.workspace / ".agy-telegram-inputs"
+        if base.is_symlink() or (base.exists() and not base.is_dir()):
+            raise ValueError("unsafe attachment directory")
+        base.mkdir(mode=0o700, exist_ok=True)
+        directory = base / job.job_id
+        directory.mkdir(mode=0o700)
+        destination = directory / name
+        try:
+            info = await self.api.call("getFile", file_id=file_id)
+            if not isinstance(info, dict) or not isinstance(info.get("file_path"), str):
+                raise ValueError("missing file path")
+            server_size = info.get("file_size", size)
+            if type(server_size) is not int or not 0 < server_size <= MAX_ATTACHMENT_BYTES:
+                raise ValueError("oversized file")
+            downloaded = await self.api.download_file(info["file_path"], destination, MAX_ATTACHMENT_BYTES)
+            if not isinstance(downloaded, int) or not 0 < downloaded <= MAX_ATTACHMENT_BYTES:
+                raise ValueError("invalid downloaded file")
+        except (TelegramError, OSError, ValueError, AttributeError):
+            destination.unlink(missing_ok=True)
+            directory.rmdir()
+            raise ValueError("attachment download failed") from None
+        job.attachment_dir = directory
+        job.attachments.append(destination)
+        return destination, name
+
+    def _cleanup_attachments(self, job: Job) -> None:
+        for item in job.attachments:
+            try:
+                item.unlink(missing_ok=True)
+            except OSError:
+                LOG.warning("attachment_cleanup_failed id=%s", job.job_id)
+        if job.attachment_dir is not None:
+            try:
+                job.attachment_dir.rmdir()
+            except OSError:
+                LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
+
     def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
         curr = self.store.get_effort(user)
         lines = [
@@ -739,6 +827,15 @@ class Bridge:
                 self.queue_reply(chat_id, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。")
             elif cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="该任务已结束或不可取消")
+            return
+
+        if data.startswith("history:"):
+            record = self.store.history_item(user, data[8:])
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(
+                    cq_id, text="📖 正在打开任务结果" if record else "该历史记录不存在或已过期")
+            if record:
+                self.queue_reply(chat_id, describe_html(record), html_mode=True)
             return
 
         if data.startswith("model:"):
@@ -811,7 +908,14 @@ class Bridge:
         if type(user) is not int or type(chat_id) is not int or user <= 0 or chat_id <= 0:
             return
         text = message.get("text")
-        if not isinstance(text, str) or not text.strip():
+        caption = message.get("caption")
+        if not isinstance(text, str):
+            text = caption if isinstance(caption, str) else ""
+        photo_list = message.get("photo")
+        document = message.get("document")
+        has_photo = isinstance(photo_list, list) and bool(photo_list)
+        has_document = isinstance(document, dict)
+        if (not text.strip()) and not has_photo and not has_document:
             return
         text = text.strip()
         command = text.split()[0].split("@")[0] if text.startswith("/") else ""
@@ -833,6 +937,7 @@ class Bridge:
                 "1. 发送 /model，选择模型与思考强度\n"
                 "2. 直接发送任务，例如“检查当前项目的错误并修复”\n"
                 "3. 运行中可点“取消任务”，或发送 /status 查看状态\n\n"
+                "📎 也可直接发送截图、日志或代码文件（单文件最大 10MB）。\n"
                 "🔒 仅白名单私聊可使用；任务会在你的服务器工作区运行。\n"
                 "💡 发送 /help 查看全部指令，发送 /new 开启全新对话。",
             )
@@ -857,6 +962,8 @@ class Bridge:
                 "【🛑 任务控制与基础】\n"
                 "• 🛑 /cancel - 立即取消正在执行的任务\n"
                 "• 📜 /last - 查看最近一条任务的执行结果\n"
+                "• 📚 /history - 查看最近 10 条任务并点开完整结果\n"
+                "• 📎 可直接发送截图、日志或代码文件（单文件最大 10MB）\n"
                 "• 🆔 /id - 查看你的 Telegram 数字 ID\n"
                 "• ❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
                 "✨ 零依赖纯 Python 构建 ｜ 原生支持多轮上下文对话记忆！",
@@ -945,6 +1052,13 @@ class Bridge:
             except (OSError, ValueError):
                 text = "⚠️ 无法读取最近结果，请检查服务器状态。"
             self.queue_reply(chat_id, text)
+            return
+        if command == "/history":
+            try:
+                summary, keyboard = history_summary(self.store.history(user))
+                self.queue_reply(chat_id, summary, reply_markup=keyboard)
+            except (OSError, ValueError):
+                self.queue_reply(chat_id, "⚠️ 无法读取任务历史，请检查服务器状态。")
             return
         if command == "/model":
             parts = text.split(maxsplit=1)
@@ -1203,6 +1317,17 @@ class Bridge:
         if command:
             self.queue_reply(chat_id, "⚠️ 不支持这个控制命令。发送 /help 查看可用指令。")
             return
+        attachment: dict | None = None
+        is_photo = False
+        if has_photo:
+            candidates = [entry for entry in photo_list if isinstance(entry, dict)]
+            if not candidates:
+                self.queue_reply(chat_id, "⚠️ 无法识别这张图片，请重新发送原图或截图。")
+                return
+            attachment = max(candidates, key=lambda entry: entry.get("file_size", 0) if type(entry.get("file_size")) is int else 0)
+            is_photo = True
+        elif has_document:
+            attachment = document
         if len(text) > self.settings.max_prompt or "\x00" in text:
             self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
             return
@@ -1218,10 +1343,34 @@ class Bridge:
         conv_id = conv.get("conversation_id", "") if conv else ""
         effort = self.store.get_effort(user) or ""
         mode = self.store.get_mode(user) or ""
-        job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort, mode=mode)
+        fallback_title = f"分析附件：{attachment.get('file_name', '截图')}" if attachment else "未命名任务"
+        job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort,
+                  mode=mode, history_title=task_title(text, fallback_title))
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
+            prompt = text
+            if attachment is not None:
+                try:
+                    path, display_name = await self._receive_attachment(job, attachment, is_photo)
+                except ValueError:
+                    self._cleanup_attachments(job)
+                    self.slot = None
+                    self.queue_reply(
+                        chat_id,
+                        "⚠️ 附件未接收：仅支持截图或常见的文本、日志、代码文件，单文件最大 10MB。"
+                    )
+                    return
+                instruction = text or "请读取并分析该附件，说明发现的问题和建议。"
+                prompt = (
+                    f"用户上传了附件“{display_name}”，已保存到工作目录的此路径：{path}。"
+                    f"请先读取该文件，再完成用户要求：{instruction}"
+                )
+            if len(prompt) > self.settings.max_prompt or "\x00" in prompt:
+                self._cleanup_attachments(job)
+                self.slot = None
+                self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+                return
             self.store.save(user, {
                 "job_id": job.job_id, "outcome": "running", "delivery": "pending",
                 "detail": "任务准备或执行中；服务中断时不会自动重试。",
@@ -1229,8 +1378,9 @@ class Bridge:
                 "effort": job.effort,
                 "mode": job.mode,
             })
-            job.worker = asyncio.create_task(self._accept_and_work(job, text))
+            job.worker = asyncio.create_task(self._accept_and_work(job, prompt))
         except Exception:
+            self._cleanup_attachments(job)
             self.slot = None
             self.runner.blocked = True
             LOG.error("job_prepare_failed id=%s", job.job_id)
@@ -1267,6 +1417,7 @@ class Bridge:
                 {"command": "new", "description": "新建对话并清除上下文"},
                 {"command": "usage", "description": "查看 Token 用量"},
                 {"command": "last", "description": "查看最近一次结果"},
+                {"command": "history", "description": "查看最近 10 条任务"},
             ])
         except (TelegramError, AttributeError):
             LOG.warning("telegram_command_menu_unavailable")

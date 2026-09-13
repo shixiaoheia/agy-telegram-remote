@@ -1,7 +1,9 @@
 import asyncio
 import json
 import threading
+import tempfile
 import unittest
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import AsyncMock, patch
 try:
@@ -14,6 +16,7 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.responses = []
         self.requests = []
+        self.file_body = b"fixture"
         outer = self
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_):
@@ -25,6 +28,13 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
                 raw = value if isinstance(value, bytes) else json.dumps(value).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            def do_GET(self):
+                raw = outer.file_body
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -165,6 +175,16 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
                                      allowed_updates=["message"])
         self.assertEqual(result, [])
         self.assertEqual(self.requests[0][1]["offset"], 100)
+
+    async def test_download_file_is_bounded_and_private(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "input.txt"
+            size = await self.api.download_file("documents/input.txt", target, 10)
+            self.assertEqual(size, len(self.file_body))
+            self.assertEqual(target.read_bytes(), self.file_body)
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            with self.assertRaises(TelegramError):
+                await self.api.download_file("../secret", Path(temp) / "bad", 10)
 
 class ChunkTests(unittest.TestCase):
     def test_emoji_utf16_limit(self):

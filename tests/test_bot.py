@@ -25,6 +25,19 @@ def update(text, user=12345, chat_type="private", update_id=1):
         },
     }
 
+def attachment_update(*, photo=None, document=None, caption="", user=12345, update_id=1):
+    message = {
+        "chat": {"type": "private", "id": user},
+        "from": {"id": user, "is_bot": False},
+    }
+    if photo is not None:
+        message["photo"] = photo
+    if document is not None:
+        message["document"] = document
+    if caption:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
 def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int = 12345) -> dict:
     return {
         "update_id": 1,
@@ -77,7 +90,14 @@ class FakeAPI:
             return {"url": self.webhook}
         if method == "getUpdates":
             return self.backlog
+        if method == "getFile":
+            return {"file_path": "documents/fixture.txt", "file_size": 4}
         raise AssertionError(method)
+
+    async def download_file(self, _file_path, destination, maximum):
+        self.assert_download_limit = maximum
+        destination.write_bytes(b"test")
+        return 4
 
 class FakeRunner:
     def __init__(self):
@@ -90,8 +110,10 @@ class FakeRunner:
         self.result = Result("success", text="the result")
         self.last_model = None
         self.last_conversation_id = None
+        self.last_prompt = None
 
     async def run(self, prompt, cancel, model=None, conversation_id=None):
+        self.last_prompt = prompt
         self.last_model = model
         self.last_conversation_id = conversation_id
         self.calls += 1
@@ -224,6 +246,53 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(update("/last", user=67890))
         self.assertNotIn("secret", self.api.messages[-1][1])
         self.assertEqual(self.runner.calls, 0)
+
+    async def test_history_lists_recent_tasks_and_opens_own_result(self):
+        self.runner.result = Result("success", text="first full result")
+        await self.handle(update("first task title"))
+        await self.finish_job()
+        first_id = self.store.history(12345)[0]["job_id"]
+        self.runner.result = Result("success", text="second full result", duration_seconds=2.5)
+        await self.handle(update("second task title"))
+        await self.finish_job()
+
+        await self.handle(update("/history"))
+        text, keyboard = self.api.messages[-1][1:]
+        self.assertIn("second task title", text)
+        self.assertIn("first task title", text)
+        self.assertIn("⏱️ 2.5s", text)
+        self.assertEqual(keyboard["inline_keyboard"][1][0]["callback_data"], f"history:{first_id}")
+
+        await self.handle(callback_update(f"history:{first_id}"))
+        self.assertIn("first full result", self.api.messages[-1][1])
+        self.assertEqual(self.api.answered_callbacks[-1][1], "📖 正在打开任务结果")
+
+    async def test_photo_attachment_is_available_to_task_then_removed(self):
+        photo = [{"file_id": "photo_file_1", "file_size": 4, "width": 50, "height": 50}]
+        await self.handle(attachment_update(photo=photo, caption="分析截图"))
+        await self.finish_job()
+        self.assertEqual(self.runner.calls, 1)
+        self.assertIn("screenshot.jpg", self.runner.last_prompt)
+        self.assertIn("分析截图", self.runner.last_prompt)
+        self.assertEqual(self.api.assert_download_limit, 10 * 1024 * 1024)
+        self.assertFalse((self.settings.workspace / ".agy-telegram-inputs").joinpath(
+            self.store.load(12345)["job_id"]).exists())
+
+    async def test_code_document_is_available_to_task(self):
+        document = {"file_id": "code_file_1", "file_size": 4, "file_name": "main.py"}
+        await self.handle(attachment_update(document=document, caption="检查这个代码"))
+        await self.finish_job()
+        self.assertEqual(self.runner.calls, 1)
+        self.assertIn("main.py", self.runner.last_prompt)
+        self.assertIn("检查这个代码", self.runner.last_prompt)
+
+    async def test_oversized_or_unsafe_document_never_starts_task(self):
+        oversized = {"file_id": "large_file", "file_size": 10 * 1024 * 1024 + 1, "file_name": "large.log"}
+        await self.handle(attachment_update(document=oversized))
+        unsafe = {"file_id": "secret_file", "file_size": 4, "file_name": ".env"}
+        await self.handle(attachment_update(document=unsafe, update_id=2))
+        self.assertEqual(self.runner.calls, 0)
+        self.assertIn("单文件最大 10MB", self.api.messages[-1][1])
 
     async def test_empty_result_does_not_say_task_completed_or_retry(self):
         self.runner.result = Result("no_text", detail="缺少回复")
@@ -539,6 +608,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         command_call = next(payload for method, payload in self.api.calls if method == "setMyCommands")
         self.assertIn({"command": "cancel", "description": "取消正在执行的任务"}, command_call["commands"])
         self.assertIn({"command": "start", "description": "欢迎页与快速开始"}, command_call["commands"])
+        self.assertIn({"command": "history", "description": "查看最近 10 条任务"}, command_call["commands"])
 
     async def test_callback_query_switches_model_and_answers(self):
         await self.handle(callback_update("model:claude-opus-4-6-thinking", cq_id="cq_opus"))

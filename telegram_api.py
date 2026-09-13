@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
+import re
 from http.client import HTTPException
 import socket
 from urllib.error import HTTPError, URLError
@@ -20,7 +23,9 @@ class TelegramAPI:
     def __init__(self, token: str, *, base_url: str = "https://api.telegram.org",
                  request_timeout: float = 25.0):
         # base_url injection is only used by offline tests, never configuration.
-        self._endpoint = f"{base_url.rstrip('/')}/bot{token}/"
+        root = base_url.rstrip("/")
+        self._endpoint = f"{root}/bot{token}/"
+        self._file_endpoint = f"{root}/file/bot{token}/"
         self.request_timeout = request_timeout
 
     def _request(self, method: str, payload: dict) -> object:
@@ -62,6 +67,47 @@ class TelegramAPI:
 
     async def call(self, method: str, **payload) -> object:
         return await asyncio.to_thread(self._request, method, payload)
+
+    def _download_file(self, file_path: str, destination: Path, maximum: int) -> int:
+        """Download a Telegram file into a new private regular file, bounded in bytes."""
+        if (not isinstance(file_path, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,512}", file_path)
+                or file_path.startswith("/") or ".." in file_path.split("/")):
+            raise TelegramError()
+        if maximum < 1 or destination.parent.is_symlink() or destination.exists():
+            raise TelegramError()
+        try:
+            request = Request(self._file_endpoint + file_path, method="GET")
+            with urlopen(request, timeout=self.request_timeout) as response:
+                length = response.headers.get("Content-Length")
+                if length is not None and (not length.isdigit() or int(length) > maximum):
+                    raise TelegramError(413)
+                fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                try:
+                    total = 0
+                    with os.fdopen(fd, "wb") as output:
+                        while True:
+                            chunk = response.read(min(65536, maximum + 1 - total))
+                            if not chunk:
+                                break
+                            total += len(chunk)
+                            if total > maximum:
+                                raise TelegramError(413)
+                            output.write(chunk)
+                        output.flush()
+                        os.fsync(output.fileno())
+                except BaseException:
+                    try:
+                        destination.unlink(missing_ok=True)
+                    finally:
+                        raise
+            return total
+        except TelegramError:
+            raise
+        except (URLError, OSError, socket.timeout, ValueError, HTTPException, RecursionError):
+            raise TelegramError() from None
+
+    async def download_file(self, file_path: str, destination: Path, maximum: int) -> int:
+        return await asyncio.to_thread(self._download_file, file_path, destination, maximum)
 
     async def send(self, chat_id: int, text: str, reply_markup: dict | None = None,
                    parse_mode: str | None = None) -> object:

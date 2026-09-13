@@ -317,6 +317,54 @@ class Store:
             return None
         return value
 
+    def _history_path(self, user: int) -> Path:
+        if type(user) is not int or user not in self.allowed:
+            raise ValueError("User is not allowed")
+        return self.directory / f"history-{user}.json"
+
+    def save_history(self, user: int, title: str, record: dict) -> None:
+        """Keep a small, private, per-user result history for /history."""
+        title = self.redact(" ".join(str(title).split()))[:160] or "未命名任务"
+        try:
+            value = read_json(self._history_path(user), 12 * self.max_reply + 65536)
+            items = value.get("items", []) if isinstance(value, dict) else []
+        except FileNotFoundError:
+            items = []
+        if not isinstance(items, list):
+            items = []
+        item = dict(record)
+        item["title"] = title
+        item["user_id"] = user
+        # Newest first. Keep full stored records, but never an unbounded history.
+        items = [item] + [entry for entry in items
+                          if isinstance(entry, dict) and entry.get("job_id") != item.get("job_id")]
+        atomic_json(self._history_path(user), {"user_id": user, "items": items[:10]})
+
+    def history(self, user: int) -> list[dict]:
+        path = self._history_path(user)
+        try:
+            value = read_json(path, 12 * self.max_reply + 65536)
+        except FileNotFoundError:
+            return []
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            raise ValueError("Invalid history record")
+        items = value.get("items")
+        if not isinstance(items, list):
+            raise ValueError("Invalid history record")
+        now = time.time()
+        valid = [entry for entry in items if isinstance(entry, dict)
+                 and entry.get("user_id") == user
+                 and isinstance(entry.get("updated_at"), (int, float))
+                 and now - entry["updated_at"] <= self.retention]
+        if len(valid) != len(items):
+            atomic_json(path, {"user_id": user, "items": valid[:10]})
+        return valid[:10]
+
+    def history_item(self, user: int, job_id: str) -> dict | None:
+        if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{12}", job_id):
+            return None
+        return next((item for item in self.history(user) if item.get("job_id") == job_id), None)
+
     def maintain(self) -> None:
         """Runs at startup and periodically: expire or remove non-allowed records."""
         for path in self.directory.iterdir():
@@ -329,6 +377,16 @@ class Store:
                     path.unlink()
                     continue
                 self.load(user)
+                continue
+            match_history = re.fullmatch(r"history-([0-9]+)\.json", path.name)
+            if match_history:
+                user = int(match_history[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                    continue
+                self.history(user)
                 continue
             match_model = re.fullmatch(r"model-([0-9]+)\.json", path.name)
             if match_model:
