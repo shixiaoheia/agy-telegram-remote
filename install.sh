@@ -25,6 +25,7 @@ PURGE=0
 TRANSACTION=0
 COMMITTED=0
 SWITCHED=0
+COMMIT_CHANGED=0
 CONFIG_CHANGED=0
 UNIT_CHANGED=0
 OLD_ACTIVE=0
@@ -34,8 +35,31 @@ LEGACY=
 BACKUP=
 STAGE=
 CANDIDATE=
+TOKEN_ORIGINAL=
+TOKEN_BACKUP=
+AUTH_PID=
 
 fail() { printf '\n错误：%s\n' "$*" >&2; exit 1; }
+
+stop_auth_helper() {
+  if [[ -n "$AUTH_PID" ]] && kill -0 "$AUTH_PID" 2>/dev/null; then
+    echo "正在等待授权助手及相关子进程退出……" >&2
+    kill -TERM "$AUTH_PID" 2>/dev/null || true
+    local wait_count=0
+    while kill -0 "$AUTH_PID" 2>/dev/null && (( wait_count < 30 )); do
+      sleep 0.1
+      (( wait_count++ ))
+    done
+    if kill -0 "$AUTH_PID" 2>/dev/null; then
+      kill -KILL "$AUTH_PID" 2>/dev/null || true
+      sleep 0.2
+    fi
+    if kill -0 "$AUTH_PID" 2>/dev/null; then
+      echo "⚠️ 警告：授权助手 (PID: $AUTH_PID) 清理未确认，可能仍在后台运行。" >&2
+    fi
+    AUTH_PID=
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -156,6 +180,8 @@ as_user() {
     HOME="$APP_HOME" USER="root" LOGNAME="root" \
     PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
     TERM="${TERM:-xterm-256color}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    SSH_CLIENT="${SSH_CLIENT-}" SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
     HTTP_PROXY="${HTTP_PROXY-}" HTTPS_PROXY="${HTTPS_PROXY-}" ALL_PROXY="${ALL_PROXY-}" NO_PROXY="${NO_PROXY-}" \
     http_proxy="${http_proxy-}" https_proxy="${https_proxy-}" all_proxy="${all_proxy-}" no_proxy="${no_proxy-}" \
     "$@"
@@ -172,18 +198,31 @@ rollback() {
       ln -s -- "$OLD_TARGET" "$APP"
     fi
   fi
+  if [[ "$COMMIT_CHANGED" == 1 || "$SWITCHED" == 1 ]]; then
+    if [[ -f "$BACKUP/current_commit" ]]; then
+      if ! cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"; then
+        echo "❌ 版本记录恢复失败：无法将备份还原至 $CONFIG_DIR/current_commit。备份文件保留在：$BACKUP/current_commit" >&2
+      fi
+    else
+      rm -f -- "$CONFIG_DIR/current_commit" 2>/dev/null || true
+    fi
+  fi
   if [[ "$CONFIG_CHANGED" == 1 ]]; then
     if [[ -f "$BACKUP/config.env" ]]; then
-      cp -p -- "$BACKUP/config.env" "$CONFIG"
+      if ! cp -p -- "$BACKUP/config.env" "$CONFIG"; then
+        echo "❌ 配置恢复失败：无法将备份还原至 $CONFIG。备份文件保留在：$BACKUP/config.env" >&2
+      fi
     else
-      rm -f -- "$CONFIG"
+      rm -f -- "$CONFIG" 2>/dev/null || true
     fi
   fi
   if [[ "$UNIT_CHANGED" == 1 ]]; then
     if [[ -f "$BACKUP/service" ]]; then
-      cp -p -- "$BACKUP/service" "$UNIT"
+      if ! cp -p -- "$BACKUP/service" "$UNIT"; then
+        echo "❌ 服务配置恢复失败：无法将备份还原至 $UNIT。备份文件保留在：$BACKUP/service" >&2
+      fi
     else
-      rm -f -- "$UNIT"
+      rm -f -- "$UNIT" 2>/dev/null || true
     fi
   fi
   systemctl daemon-reload || true
@@ -195,6 +234,14 @@ rollback() {
   if [[ "$OLD_ACTIVE" == 1 ]]; then
     systemctl restart "$SERVICE" || echo '旧服务恢复启动失败，请人工检查。' >&2
   fi
+  stop_auth_helper
+  if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
+    if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
+      TOKEN_BACKUP=
+    else
+      echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+    fi
+  fi
   echo '已尝试回退；依赖安装、Google 登录及已经发生的任务修改不会被撤销。' >&2
 }
 
@@ -202,6 +249,14 @@ on_exit() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
+  stop_auth_helper
+  if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
+    if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
+      TOKEN_BACKUP=
+    else
+      echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+    fi
+  fi
   if [[ "$TRANSACTION" == 1 && "$COMMITTED" == 0 ]]; then
     rollback
     (( rc != 0 )) || rc=1
@@ -366,6 +421,7 @@ main() {
   BACKUP="$(mktemp -d "$BACKUPS/deploy-XXXXXXXX")"
   [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/config.env"
   [[ ! -f "$UNIT" ]] || cp -p -- "$UNIT" "$BACKUP/service"
+  [[ ! -f "$CONFIG_DIR/current_commit" ]] || cp -p -- "$CONFIG_DIR/current_commit" "$BACKUP/current_commit"
   OLD_ACTIVE=0
   OLD_ENABLED=0
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
@@ -451,24 +507,54 @@ _ONBOARDING_EOF
       smoke_rc=$?
     fi
   fi
-  if [[ "$smoke_rc" -ne 0 || "$REAUTH" == 1 ]]; then
+  if [[ "$smoke_rc" -eq 10 || "$installed_now" == 1 || "$REAUTH" == 1 ]]; then
     local auth_rc=0
-    local _token_file="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
-    # 若已有凭证失效或主动重授，移开旧凭据以确保直接输出全新授权链接
-    if [[ -f "$_token_file" ]]; then
-      mv -f -- "$_token_file" "$_token_file.bak.$$" 2>/dev/null || rm -f -- "$_token_file"
+    TOKEN_ORIGINAL="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+    TOKEN_BACKUP="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token.bak.$$"
+    # 仅在确认需要授权或显式重授时，暂时移开旧凭据文件以获取全新授权链接
+    if [[ -f "$TOKEN_ORIGINAL" ]]; then
+      if ! mv -f -- "$TOKEN_ORIGINAL" "$TOKEN_BACKUP"; then
+        TOKEN_BACKUP=
+        fail "凭据备份失败：无法将旧凭据移动至备份路径，已保留原件，安装中止。"
+      fi
     fi
-    as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
+    as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" &
+    AUTH_PID=$!
+    wait "$AUTH_PID" || auth_rc=$?
+    AUTH_PID=
     if [[ "$auth_rc" -ne 0 ]]; then
-      [[ ! -f "$_token_file.bak.$$" ]] || mv -f -- "$_token_file.bak.$$" "$_token_file" 2>/dev/null || true
+      if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" ]]; then
+        if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
+          TOKEN_BACKUP=
+        else
+          echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+        fi
+      fi
       fail 'Google 账号授权未完成或失败。'
     fi
-    rm -f -- "$_token_file.bak.$$" 2>/dev/null || true
+    rm -f -- "$TOKEN_BACKUP" 2>/dev/null || true
+    TOKEN_BACKUP=
     if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
       smoke_rc=0
     else
       smoke_rc=$?
     fi
+  elif [[ "$smoke_rc" -ne 0 ]]; then
+    # 配额、网络、权限或协议问题，绝对不移走凭据，不触发重新授权，直接明确报错
+    if [[ "$smoke_rc" -eq 12 ]]; then
+      fail 'agy 自检未通过：Google 账号配额受限（代码 12）。已保留现有凭据，请稍后重试，无需重新授权。'
+    elif [[ "$smoke_rc" -eq 13 ]]; then
+      fail 'agy 自检未通过：网络连接或通信超时（代码 13）。已保留现有凭据，请检查网络或代理配置，无需重新授权。'
+    elif [[ "$smoke_rc" -eq 14 ]]; then
+      fail 'agy 自检未通过：工具权限拒绝（代码 14）。已保留现有凭据，无需重新授权。'
+    elif [[ "$smoke_rc" -eq 18 ]]; then
+      fail 'agy 自检未通过：Google 返回账号或访问地区资格拒绝（代码 18）。已保留现有凭据，未自动重新授权；请核对官方资格要求。'
+    else
+      fail "agy 自检未通过（代码 $smoke_rc）。已保留现有凭据，配额、网络和协议问题不能靠反复重新授权解决。"
+    fi
+  fi
+  if [[ "$smoke_rc" -eq 18 ]]; then
+    fail 'Google 登录后，Antigravity 资格检查仍被拒绝（代码 18）。不会自动再次授权；请核对账号及访问地区资格。'
   fi
   [[ "$smoke_rc" == 0 ]] || fail \
     "agy 自检未通过（代码 $smoke_rc）。配额、网络和协议问题不能靠反复重新授权解决。"
@@ -478,7 +564,6 @@ _ONBOARDING_EOF
   mv -- "$STAGE" "$release"
   STAGE=
   echo "$commit" > "$release/.commit"
-  echo "$commit" > "$CONFIG_DIR/current_commit" 2>/dev/null || true
   SWITCHED=1
   if [[ -d "$APP" && ! -L "$APP" ]]; then
     LEGACY="$BACKUP/legacy-app"
@@ -486,8 +571,14 @@ _ONBOARDING_EOF
   fi
   ln -s -- "$release" "$APP.next.$$"
   mv -Tf -- "$APP.next.$$" "$APP"
-  CONFIG_CHANGED=1
+  echo "$commit" > "$CONFIG_DIR/current_commit.next.$$"
+  if ! mv -f -- "$CONFIG_DIR/current_commit.next.$$" "$CONFIG_DIR/current_commit"; then
+    rm -f -- "$CONFIG_DIR/current_commit.next.$$" 2>/dev/null || true
+    fail "版本记录写入失败：无法更新 $CONFIG_DIR/current_commit，中止部署并回滚。"
+  fi
+  COMMIT_CHANGED=1
   mv -f -- "$CANDIDATE" "$CONFIG"
+  CONFIG_CHANGED=1
   CANDIDATE=
   chown root:root "$CONFIG"; chmod 0600 "$CONFIG"
   /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" --user root > "$BACKUP/new.service"

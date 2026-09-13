@@ -47,19 +47,38 @@ class Result:
 def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
-    if any(s in low for s in ("authentication required", "not authenticated",
-                             "login required", "unauthenticated", "unauthorized",
-                             "invalid_grant", "token expired", "no credentials",
-                             "oauth", "sign in", "signin", "headlessauthrequired",
-                             "401", "re-authenticate", "credentials")):
+    # Explicit service eligibility denial is NOT an expired credential.
+    # Do not classify a bare "location" or "country" as a rejection.
+    if any(s in low for s in (
+        "not eligible for antigravity",
+        "not currently available in your location",
+        "not available in your country",
+        "unsupported region",
+    )):
+        return "eligibility"
+    is_network = any(s in low for s in (
+        "connection", "network", "dns", "timed out", "timeout", "deadline exceeded",
+        "certificate", "unable to resolve", "dial tcp", "reset by peer", "broken pipe",
+        "no route to host", "temporary failure", "ssl", "tls handshake"
+    ))
+    is_unambiguous_auth = any(s in low for s in (
+        "authentication required", "not authenticated", "login required",
+        "unauthenticated", "unauthorized", "invalid_grant", "token expired",
+        "no credentials", "headlessauthrequired", "401", "re-authenticate",
+        "sign in", "signin", "unauthorized_client"
+    ))
+    if is_network and not is_unambiguous_auth:
+        return "network"
+    if is_unambiguous_auth:
         return "auth"
     if any(s in low for s in ("quota", "rate limit", "resource_exhausted", "429")):
         return "quota"
-    if "soft-denied" in low or "permissiondenied" in low:
+    if "soft-denied" in low or "permissiondenied" in low or "permission_denied" in low:
         return "permission"
-    if any(s in low for s in ("connection", "network", "dns", "timed out",
-                             "certificate", "unable to resolve")):
+    if is_network:
         return "network"
+    if any(s in low for s in ("oauth", "credentials")):
+        return "auth"
     return "unknown"
 
 
@@ -74,6 +93,16 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
 
 def _reject_constant(value: str) -> None:
     raise ValueError("Non-finite JSON value")
+
+
+def _validate_non_negative_int(value: object, field_name: str, max_val: int = 1_000_000_000) -> tuple[int, str | None]:
+    if value is None:
+        return 0, None
+    if type(value) is not int:
+        return 0, f"{field_name} 类型不合法（期望整数，实际为 {type(value).__name__}）"
+    if value < 0 or value > max_val:
+        return 0, f"{field_name} 数值超出有效范围 [0, {max_val}]：{value}"
+    return value, None
 
 
 def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
@@ -95,15 +124,50 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
     status = envelope.get("status")
     response = envelope.get("response")
     raw_error = envelope.get("error")
-    conversation_id = str(envelope.get("conversation_id") or "")
-    num_turns = int(envelope.get("num_turns") or 0)
+
+    raw_conv = envelope.get("conversation_id")
+    if raw_conv is not None and not isinstance(raw_conv, str):
+        return Result(
+            "invalid",
+            detail="agy 返回的 conversation_id 字段不是字符串；任务可能已经执行，不能自动重跑。",
+            category="protocol", agy_status=str(status)[:32] if status else "", exit_code=exit_code,
+        )
+    conversation_id = raw_conv or ""
+
+    num_turns_val, err = _validate_non_negative_int(envelope.get("num_turns"), "num_turns", max_val=10_000_000)
+    if err:
+        return Result(
+            "invalid",
+            detail=f"agy 返回的数值字段不符合协议格式（{err}）；任务可能已经执行，不能自动重跑。",
+            category="protocol", agy_status=str(status)[:32] if status else "", exit_code=exit_code,
+        )
+    num_turns = num_turns_val
+
     usage = envelope.get("usage")
     input_tokens, output_tokens, thinking_tokens, total_tokens = 0, 0, 0, 0
-    if isinstance(usage, dict):
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        thinking_tokens = int(usage.get("thinking_tokens") or 0)
-        total_tokens = int(usage.get("total_tokens") or 0)
+    if usage is not None:
+        if not isinstance(usage, dict):
+            return Result(
+                "invalid",
+                detail="agy 返回的 usage 字段不是字典对象；任务可能已经执行，不能自动重跑。",
+                category="protocol", agy_status=str(status)[:32] if status else "", exit_code=exit_code,
+            )
+        for key in ("input_tokens", "output_tokens", "thinking_tokens", "total_tokens"):
+            val, err = _validate_non_negative_int(usage.get(key), key)
+            if err:
+                return Result(
+                    "invalid",
+                    detail=f"agy 返回的数值字段不符合协议格式（{err}）；任务可能已经执行，不能自动重跑。",
+                    category="protocol", agy_status=str(status)[:32] if status else "", exit_code=exit_code,
+                )
+            if key == "input_tokens":
+                input_tokens = val
+            elif key == "output_tokens":
+                output_tokens = val
+            elif key == "thinking_tokens":
+                thinking_tokens = val
+            elif key == "total_tokens":
+                total_tokens = val
 
     if isinstance(raw_error, str):
         category = classify(raw_error + "\n" + diagnostics)

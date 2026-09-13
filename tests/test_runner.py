@@ -74,6 +74,35 @@ class ParserTests(unittest.TestCase):
         result = parse_result(b'{"status":"SUCCESS","response":"\\ud800"}', b"", 0)
         self.assertEqual(result.outcome, "invalid")
 
+    def test_invalid_numeric_fields_type_and_range_rejected(self):
+        # Invalid types and ranges for num_turns and usage must return invalid/protocol
+        bad_envelopes = [
+            {"status": "SUCCESS", "response": "ok", "num_turns": "not_int"},
+            {"status": "SUCCESS", "response": "ok", "num_turns": True},
+            {"status": "SUCCESS", "response": "ok", "num_turns": -1},
+            {"status": "SUCCESS", "response": "ok", "num_turns": [1]},
+            {"status": "SUCCESS", "response": "ok", "usage": "not_a_dict"},
+            {"status": "SUCCESS", "response": "ok", "usage": {"input_tokens": "abc"}},
+            {"status": "SUCCESS", "response": "ok", "usage": {"input_tokens": True}},
+            {"status": "SUCCESS", "response": "ok", "usage": {"output_tokens": -5}},
+            {"status": "SUCCESS", "response": "ok", "usage": {"total_tokens": [100]}},
+            {"status": "SUCCESS", "response": "ok", "conversation_id": 12345},
+        ]
+        for bad in bad_envelopes:
+            with self.subTest(bad=bad):
+                res = self.parse(bad)
+                self.assertEqual(res.outcome, "invalid")
+                self.assertEqual(res.category, "protocol")
+                self.assertIn("不能自动重跑", res.detail)
+
+    def test_classify_network_overrides_oauth_endpoint(self):
+        # Explicit network errors on oauth URLs must be classified as network, not auth
+        self.assertEqual(classify("oauth.googleapis.com: dial tcp: i/o timeout"), "network")
+        self.assertEqual(classify("failed to reach oauth host: connection reset by peer"), "network")
+        self.assertEqual(classify("fetch credentials: network is unreachable"), "network")
+        self.assertEqual(classify("invalid_grant: code expired"), "auth")
+        self.assertEqual(classify("headlessauthrequired: login required"), "auth")
+
     def test_random_garbage_never_raises_or_succeeds(self):
         import random
         rng = random.Random(20260912)

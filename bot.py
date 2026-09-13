@@ -52,6 +52,24 @@ class Job:
     conversation_id: str = ""
     effort: str = ""
     mode: str = ""
+    reset_requested: bool = False
+    cancelled_by_unwhitelist: bool = False
+
+
+def get_restart_argv() -> list[str]:
+    """Reconstruct interpreter and script invocation arguments, preserving -E -s -B flags."""
+    if hasattr(sys, "orig_argv") and sys.orig_argv:
+        args = list(sys.orig_argv)
+        args[0] = sys.executable
+        return args
+    flags: list[str] = []
+    if getattr(sys.flags, "ignore_environment", 0):
+        flags.append("-E")
+    if getattr(sys.flags, "no_user_site", 0):
+        flags.append("-s")
+    if getattr(sys.flags, "dont_write_bytecode", 0):
+        flags.append("-B")
+    return [sys.executable] + flags + sys.argv
 
 
 def describe(record: dict) -> str:
@@ -264,15 +282,20 @@ class Bridge:
         self.replies: asyncio.Queue[tuple] = asyncio.Queue(maxsize=32)
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
+        self.restarting = False
+        self._restart_task: asyncio.Task | None = None
 
     def _is_allowed(self, user: int) -> bool:
         return user in self.settings.allowed or user in self.store.allowed
 
-    async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
+    async def send_text(self, chat: int, text: str, reply_markup: dict | None = None, job: Job | None = None) -> bool:
         try:
             chunks = chunks_utf16(self.store.redact(text))
             total = len(chunks)
             for i, chunk in enumerate(chunks):
+                if job is not None and (getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user)):
+                    LOG.info("send_text_aborted_unwhitelist job=%s user=%s chunk=%d/%d", job.job_id, job.user, i + 1, total)
+                    return False
                 suffix = f"\n\n📄 [第 {i+1}/{total} 页]" if total > 1 else ""
                 markup = reply_markup if i == total - 1 else None
                 try:
@@ -327,7 +350,13 @@ class Bridge:
                 f"━━━━━━━━━━━━━━━━━━━━{conv_tag}{effort_info}{mode_info}\n"
                 f"⏳ 正在调用 Antigravity 执行任务，请稍候..."
             )
-            accepted = await self.send_text(job.chat, accept_msg)
+            accepted = await self.send_text(job.chat, accept_msg, job=job)
+
+            # Re-check whitelist/cancellation right after awaiting send_text
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_in_accept id=%s user=%s, dropping job", job.job_id, job.user)
+                return
+
             if not accepted or self.stop.is_set() or job.cancel.is_set():
                 self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
@@ -340,6 +369,9 @@ class Bridge:
                 return
             await self._work(job, prompt)
         except Exception as error:
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_accept_unwhitelisted_exception id=%s user=%s", job.job_id, job.user)
+                return
             self.runner.blocked = True
             LOG.error("job_accept_failed id=%s type=%s", job.job_id, type(error).__name__)
             self.queue_reply(job.chat, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。")
@@ -350,25 +382,18 @@ class Bridge:
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
-            try:
-                result = await self.runner.run(
-                    prompt, job.cancel, model=job.model or None,
-                    conversation_id=job.conversation_id or None,
-                    effort=job.effort or None, mode=job.mode or None,
-                )
-            except TypeError:
-                try:
-                    result = await self.runner.run(
-                        prompt, job.cancel, model=job.model or None,
-                        conversation_id=job.conversation_id or None,
-                    )
-                except TypeError:
-                    try:
-                        result = await self.runner.run(prompt, job.cancel, model=job.model or None)
-                    except TypeError:
-                        result = await self.runner.run(prompt, job.cancel)
+            result = await self.runner.run(
+                prompt, job.cancel, model=job.model or None,
+                conversation_id=job.conversation_id or None,
+                effort=job.effort or None, mode=job.mode or None,
+            )
 
-            if result.outcome == "success" and getattr(result, "conversation_id", None):
+            # Check if user was unwhitelisted during execution
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_during_run id=%s user=%s, dropping result", job.job_id, job.user)
+                return
+
+            if not getattr(job, "reset_requested", False) and result.outcome == "success" and getattr(result, "conversation_id", None):
                 self.store.set_conversation(job.user, result.conversation_id, getattr(result, "num_turns", 1))
             if getattr(result, "total_tokens", 0) > 0:
                 self.store.record_usage(
@@ -377,6 +402,11 @@ class Bridge:
                     getattr(result, "output_tokens", 0),
                     getattr(result, "thinking_tokens", 0),
                 )
+
+            # Check again right before store.save in case user was unwhitelisted
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_before_save id=%s user=%s, dropping result", job.job_id, job.user)
+                return
 
             record = self.store.save(
                 job.user, result.to_dict() | {
@@ -387,7 +417,13 @@ class Bridge:
                 }
             )
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
-            delivered = await self.send_text(job.chat, describe(record))
+            delivered = await self.send_text(job.chat, describe(record), job=job)
+
+            # Re-check unwhitelist status after awaiting result delivery
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_after_send id=%s user=%s, dropping delivery update", job.job_id, job.user)
+                return
+
             self.store.save(job.user, record | {
                 "delivery": "sent" if delivered else "failed_or_partial"
             })
@@ -397,6 +433,9 @@ class Bridge:
             LOG.warning("worker_cancelled id=%s", job.job_id)
             raise
         except Exception as error:
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("worker_exception_unwhitelisted id=%s user=%s", job.job_id, job.user)
+                return
             # Never print raw exception text: it may contain request URLs or secrets.
             LOG.error("worker_failed id=%s type=%s", job.job_id, type(error).__name__)
             self.runner.blocked = True
@@ -413,10 +452,22 @@ class Bridge:
         cq_id = str(cq.get("id") or "")
         sender = cq.get("from") or {}
         user = sender.get("id")
-        message = cq.get("message") or {}
+        message = cq.get("message")
+        if not isinstance(message, dict) or not message:
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="⚠️ 无效的消息来源", show_alert=True)
+            return
+
         chat = message.get("chat") or {}
-        chat_id = chat.get("id") or user
+        chat_id = chat.get("id")
+        chat_type = chat.get("type")
         data = str(cq.get("data") or "")
+
+        # Private chat and chat ownership verification
+        if chat_type != "private" or chat_id != user:
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="⚠️ 仅支持私聊操作", show_alert=True)
+            return
 
         if type(user) is not int or not self._is_allowed(user) or sender.get("is_bot") is True:
             if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -534,6 +585,8 @@ class Bridge:
             )
             return
         if command in {"/new", "/reset"}:
+            if self.slot is not None and self.slot.user == user:
+                self.slot.reset_requested = True
             self.store.reset_conversation(user)
             self.queue_reply(
                 chat_id,
@@ -586,7 +639,9 @@ class Bridge:
                 disk_info = f"\n💾 工作空间可用磁盘：{free_gb:.1f} GB"
             except Exception:
                 pass
-            if self.slot and self.slot.user == user:
+            if self.restarting:
+                text = "🔄 守护进程正在重启中，暂不接收新任务，请稍候重试。"
+            elif self.slot and self.slot.user == user:
                 job_model = f"[{self.slot.model}] " if self.slot.model else ""
                 text = f"⏳ 任务 {self.slot.job_id}：{job_model}" + (
                     "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
@@ -686,22 +741,79 @@ class Bridge:
             if user != admin_id:
                 self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。")
                 return
+            if self.restarting or (self._restart_task is not None and not self._restart_task.done()):
+                self.queue_reply(chat_id, "⚠️ 守护进程已在重启流程中，请勿重复操作。")
+                return
             if self.slot is not None and not self.slot.cancel.is_set():
                 self.queue_reply(
                     chat_id,
                     f"⚠️ 当前有正在执行的任务（任务 {self.slot.job_id}），请等待其完成或先发送 /cancel 后再重启。"
                 )
                 return
-            self.queue_reply(chat_id, "🔄 守护进程正在重新载入并启动，请稍候约 3-5 秒后发送 /status 验证……")
+
+            self.restarting = True
+            target_slot = self.slot
+            if target_slot is not None and target_slot.cancel.is_set():
+                self.queue_reply(
+                    chat_id,
+                    f"🔄 已请求重启。正在等待已取消任务（任务 {target_slot.job_id}）的进程清理与状态持久化完成……"
+                )
+            else:
+                self.queue_reply(chat_id, "🔄 守护进程正在重新载入并启动，请稍候约 3-5 秒后发送 /status 验证……")
 
             async def _do_restart():
-                await asyncio.sleep(0.8)
                 try:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    if target_slot is not None and target_slot.worker and not target_slot.worker.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(target_slot.worker), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            LOG.error("restart_aborted_worker_timeout job=%s", target_slot.job_id)
+                            self.restarting = False
+                            self.queue_reply(chat_id, f"❌ 重启已中止：任务 {target_slot.job_id} 未能在 15 秒内完成退出与清理。")
+                            return
+                        except asyncio.CancelledError:
+                            LOG.warning("restart_cancelled_waiting_worker job=%s", target_slot.job_id)
+                            self.restarting = False
+                            raise
+                        except Exception as e:
+                            LOG.warning("wait_worker_during_restart_error: %s", e)
+
+                    if target_slot is not None and target_slot.worker and not target_slot.worker.done():
+                        LOG.error("restart_aborted_worker_not_done job=%s", target_slot.job_id)
+                        self.restarting = False
+                        self.queue_reply(chat_id, f"❌ 重启已中止：任务 {target_slot.job_id} 仍在运行中。")
+                        return
+
+                    if self.runner.blocked:
+                        LOG.error("restart_aborted_runner_blocked")
+                        self.restarting = False
+                        self.queue_reply(
+                            chat_id,
+                            "❌ 重启已中止：检测到底层任务进程清理未确认，服务处于安全阻断状态。请排查服务器残留进程。"
+                        )
+                        return
+
+                    if self.slot is not None and self.slot is not target_slot:
+                        LOG.error("restart_aborted_slot_occupied")
+                        self.restarting = False
+                        self.queue_reply(chat_id, "❌ 重启已中止：任务槽位未释放。")
+                        return
+                    self.slot = None
+
+                    await asyncio.sleep(0.8)
+                    exec_args = get_restart_argv()
+                    LOG.info("execv_restarting args=%s", exec_args)
+                    os.execv(exec_args[0], exec_args)
+                except asyncio.CancelledError:
+                    LOG.warning("restart_coroutine_cancelled")
+                    self.restarting = False
+                    raise
                 except Exception as err:
                     LOG.error("restart_execv_failed: %s", err)
+                    self.restarting = False
+                    self.queue_reply(chat_id, f"❌ 重启守护进程失败：{err}")
 
-            asyncio.create_task(_do_restart())
+            self._restart_task = asyncio.create_task(_do_restart())
             return
         if command == "/whitelist":
             admin_id = self.settings.owner_id
@@ -764,7 +876,14 @@ class Bridge:
                     return
                 ok = self.store.remove_whitelist(target_id)
                 if ok:
-                    self.queue_reply(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`。")
+                    cancelled_msg = ""
+                    if self.slot is not None and self.slot.user == target_id:
+                        self.slot.cancelled_by_unwhitelist = True
+                        self.slot.cancel.set()
+                        cancelled_msg = f"（已请求取消其正在执行的任务 {self.slot.job_id}）"
+                        self.queue_reply(self.slot.chat, "⚠️ 你的白名单权限已被管理员移除，正在执行的任务已取消。")
+                    self.store.maintain()
+                    self.queue_reply(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`。{cancelled_msg}".strip())
                 else:
                     self.queue_reply(chat_id, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。")
                 return
@@ -920,6 +1039,9 @@ class Bridge:
         if self.runner.blocked:
             self.queue_reply(chat_id, "⚠️ 新任务已暂停，请检查服务器并重启服务。")
             return
+        if self.restarting:
+            self.queue_reply(chat_id, "⚠️ 守护进程正在重启中，暂不接收新任务，请稍候重试。")
+            return
         if self.slot is not None:
             self.queue_reply(chat_id, "⚠️ 工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
             return
@@ -1066,7 +1188,7 @@ class Bridge:
 
 async def start(settings: Settings, ready_file: Path | None) -> None:
     if os.geteuid() == 0:
-        raise ConfigError("Bot 和 agy 禁止以 root 运行。")
+        LOG.warning("running_as_root: Bot 和 agy 以 root 特权运行于宿主机（纯 Root 部署模式）；请确保白名单内的 Telegram 账户完全受信任。")
     if not settings.workspace.is_dir() or not os.access(settings.workspace, os.R_OK | os.W_OK | os.X_OK):
         raise ConfigError("工作目录不可用。")
     store = Store(settings.state_dir, settings.allowed, settings.max_reply,

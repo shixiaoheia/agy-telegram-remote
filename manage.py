@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import builtins
+import getpass
+import io
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
+import urllib.parse
 from dataclasses import replace
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
-from agy_runner import Runner, SMOKE_PROMPT
+from agy_runner import Runner, SMOKE_PROMPT, classify
 from settings import (ConfigError, KEYS, Settings, check_no_symlink, merged_config,
                       parse_env, read_private_text, serialize_env)
 from state_store import read_json
@@ -62,7 +67,39 @@ WantedBy=multi-user.target
 """
 
 
-def prepare_config(args: argparse.Namespace) -> int:
+def prompt_secret(prompt: str = "> ", reader: Callable[[str], str] | None = None) -> str:
+    """Read sensitive input without echo when on an interactive terminal."""
+    read_fn = reader or input
+    stdin_fd = None
+    old_term_attrs = None
+    try:
+        if hasattr(sys.stdin, "fileno") and sys.stdin.isatty():
+            import termios
+            stdin_fd = sys.stdin.fileno()
+            old_term_attrs = termios.tcgetattr(stdin_fd)
+            new_term_attrs = list(old_term_attrs)
+            new_term_attrs[3] &= ~termios.ECHO
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, new_term_attrs)
+    except Exception:
+        stdin_fd = None
+        old_term_attrs = None
+
+    try:
+        return read_fn(prompt).strip()
+    finally:
+        if stdin_fd is not None and old_term_attrs is not None:
+            try:
+                import termios
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term_attrs)
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            except Exception:
+                pass
+
+
+def prepare_config(args: argparse.Namespace,
+                   input_fn: Callable[[str], str] | None = None,
+                   secret_fn: Callable[[str], str] | None = None) -> int:
     old: dict[str, str] = {}
     if args.old:
         old = parse_env(read_private_text(args.old))
@@ -72,11 +109,13 @@ def prepare_config(args: argparse.Namespace) -> int:
     print("\n步骤 1/3：请输入 Telegram Bot Token（更新时直接回车保留原 Token）：")
     if old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN"):
         print("（已有 Token，直接回车保留。粘贴新 Token 后按回车可更新。）")
-    token = input("> ").strip()
+    actual_input = input_fn if input_fn is not None else input
+    actual_secret_fn = secret_fn if secret_fn is not None else (lambda p: prompt_secret(p, reader=actual_input))
+    token = actual_secret_fn("> ")
     print("\n步骤 2/3：请输入 Telegram 数字 ID（多个 ID 用逗号分隔）：")
     if old.get("ALLOWED_USER_IDS"):
         print("直接回车保留已有白名单。")
-    ids = input("> ").strip()
+    ids = actual_input("> ").strip()
     home = getattr(args, "home", "/root") or "/root"
     values = merged_config(old, token, ids, home, args.enable_auto)
     settings = Settings.from_mapping(values)
@@ -107,7 +146,8 @@ async def smoke(settings: Settings, allow_root: bool = True) -> int:
         print(result.text.strip())
     if result.category == "auth":
         return 10
-    return {"quota": 12, "network": 13, "permission": 14}.get(result.category, 15)
+    return {"quota": 12, "network": 13, "permission": 14,
+            "eligibility": 18}.get(result.category, 15)
 
 
 async def check_token(settings: Settings) -> int:
@@ -162,66 +202,164 @@ def oauth_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
     return env
 
 
-def kill_process_group(proc: subprocess.Popen, timeout: float = 3.0) -> None:
-    """Terminate the process and its child process group safely."""
-    pgid = None
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        pass
+def kill_process_group(proc: subprocess.Popen, timeout: float = 3.0, kill_timeout: float = 2.0,
+                       pgid: int | None = None) -> bool:
+    """Terminate the process and its child process group safely with SIGTERM then SIGKILL.
+    Returns True if the entire group is confirmed dead, False otherwise."""
+    if pgid is None:
+        pgid = getattr(proc, "_agy_pgid", None)
+    if pgid is None and proc.pid:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            pass
 
-    if pgid is not None:
+    def is_group_alive() -> bool:
+        try:
+            if proc.poll() is None:
+                return True
+        except Exception:
+            pass
+        if pgid is not None and pgid > 1:
+            try:
+                os.killpg(pgid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+        return False
+
+    if pgid is not None and pgid > 1:
         try:
             os.killpg(pgid, signal.SIGTERM)
         except (ProcessLookupError, OSError):
             pass
-    else:
-        try:
-            proc.terminate()
-        except (ProcessLookupError, OSError):
-            pass
-
     try:
-        proc.wait(timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError):
-        if pgid is not None:
+        if proc.poll() is None:
+            proc.terminate()
+    except (ProcessLookupError, OSError):
+        pass
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_group_alive():
+            break
+        time.sleep(0.05)
+
+    if is_group_alive():
+        if pgid is not None and pgid > 1:
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
-        else:
-            try:
-                proc.kill()
-            except (ProcessLookupError, OSError):
-                pass
         try:
-            proc.wait(timeout=2.0)
-        except (subprocess.TimeoutExpired, OSError):
+            if proc.poll() is None:
+                proc.kill()
+        except (ProcessLookupError, OSError):
             pass
+
+        kill_deadline = time.monotonic() + kill_timeout
+        while time.monotonic() < kill_deadline:
+            if not is_group_alive():
+                break
+            time.sleep(0.05)
+
+    try:
+        proc.wait(timeout=0.1)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    return not is_group_alive()
+
+
+def drain_pty(master: int, timeout: float = 0.3, max_bytes: int = 65536) -> str:
+    """Safely drain pending output bytes from master PTY file descriptor."""
+    import select
+    tail = ""
+    deadline = time.monotonic() + timeout
+    while len(tail) < max_bytes and time.monotonic() < deadline:
+        try:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if not r:
+                break
+            chunk = os.read(master, 4096)
+            if not chunk:
+                break
+            tail += chunk.decode("utf-8", errors="replace")
+        except OSError:
+            break
+    return tail
 
 
 def redact_auth_data(text: str, code: str = "") -> str:
-    """Ensure authorization codes, bearer tokens and secret parameters never leak."""
+    """Ensure authorization codes, bearer tokens, passwords and secret parameters never leak."""
     if code and len(code) >= 3:
         text = text.replace(code, "[REDACTED_CODE]")
-    text = re.sub(r'4/[0-9A-Za-z_-]{20,}', '[REDACTED_CODE]', text)
+    text = re.sub(r'4/[0-9A-Za-z_-]{16,}', '[REDACTED_CODE]', text)
     text = re.sub(r'ya29\.[0-9A-Za-z_-]+', '[REDACTED_TOKEN]', text)
+    text = re.sub(r'1//[0-9A-Za-z_-]{16,}', '[REDACTED_TOKEN]', text)
     text = re.sub(r'(code=)[^&\s]+', r'\1[REDACTED_CODE]', text)
+    text = re.sub(r'(token=)[^&\s]+', r'\1[REDACTED_TOKEN]', text)
+    text = re.sub(r'(refresh_token=)[^&\s]+', r'\1[REDACTED_TOKEN]', text)
+    text = re.sub(r'[0-9]{8,12}:[A-Za-z0-9_-]{30,45}', '[REDACTED_BOT_TOKEN]', text)
+    text = re.sub(r'://([^:/@\s]+):([^@\s]+)@', r'://\1:[REDACTED_PASSWORD]@', text)
     return text
 
 
-def classify_auth_error(raw_output: str, exit_code: int, code: str = "") -> str:
+SAFE_AUTH_CODE_RE = re.compile(r'^[A-Za-z0-9_.\-/:]{4,512}$')
+
+
+def extract_code_from_input(text: str) -> tuple[str, bool]:
+    """
+    Extract authorization code from user input.
+    If the user pasted a full redirect URL containing '?code=...', extract and validate the code.
+    Returns (clean_code, is_url).
+    """
+    stripped = text.strip()
+    if stripped.startswith("http://") or stripped.startswith("https://"):
+        try:
+            parsed = urllib.parse.urlparse(stripped)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "code" in qs and qs["code"]:
+                extracted = qs["code"][0].strip()
+                if extracted and SAFE_AUTH_CODE_RE.match(extracted):
+                    return extracted, True
+        except Exception:
+            pass
+    return stripped, False
+
+
+def classify_auth_error(raw_output: str, exit_code: int, code: str = "",
+                        phase: str = "", submitted: bool = False) -> str:
     """Categorize OAuth failures and return a clean, user-friendly diagnostic message."""
     clean = redact_auth_data(raw_output, code=code)
     low = clean.lower()
+
+    if classify(clean) == "eligibility":
+        return ("地区或资格受限：Google 拒绝了当前账号或访问环境的 Antigravity 资格。"
+                "请核对官方支持地区和账号资格；此提示不能单独判定是账号还是 IP 问题。"
+                "不要反复删除凭据或重新授权。")
+
+    if phase == "await_input" and not submitted:
+        if "timeout" in low or "timed out" in low:
+            return "授权失败：等待用户输入授权码超时，授权会话已结束，请重新开始。"
+        return f"授权会话异常终止：Google CLI 在等待输入时提前退出（退出代码 {exit_code}），请重新开始。"
+
     if any(k in low for k in ("invalid_grant", "malformed", "invalid code", "unauthorized_client", "expired")):
         return "授权失败：授权码无效或格式不正确，请确保完整复制网页上的最新授权码。"
+    if any(k in low for k in ("quota", "rate limit", "resource_exhausted", "429")):
+        return "授权失败：Google 账号配额受限 (quota/rate limit)，请稍后重试。"
+    if any(k in low for k in ("network", "connection", "dns", "reset by peer", "broken pipe", "eof", "dial tcp", "no route to host", "certificate", "ssl", "tls")):
+        return "授权失败：网络连接失败，无法与 Google 认证服务器建立通信，请检查服务器网络或代理配置。"
     if any(k in low for k in ("timeout", "timed out", "deadline", "context canceled")):
+        if submitted:
+            return "授权失败：与 Google 认证服务器通信换票超时，请检查网络后重试。"
         return "授权失败：与 Google 认证服务器通信超时，请检查网络后重试。"
     if any(k in low for k in ("not eligible", "location", "unsupported region", "country", "geographic")):
         return "地区或资格受限：当前 IP 或账号所在地区暂不支持 Antigravity 服务。"
-    if any(k in low for k in ("network", "connection", "dns", "reset by peer", "broken pipe", "eof", "dial tcp", "no route to host", "certificate", "ssl", "tls")):
-        return "授权失败：网络连接失败，无法与 Google 认证服务器建立通信，请检查服务器网络或代理配置。"
     if any(k in low for k in ("unknown flag", "unexpected argument", "syntax error", "panic:", "protocol")):
         return "CLI 协议或参数异常：Google CLI 输出格式变化或未在预期步骤完成换票。"
 
@@ -234,12 +372,189 @@ def classify_auth_error(raw_output: str, exit_code: int, code: str = "") -> str:
     return f"Google 账号授权未成功完成{detail}，请重试。"
 
 
+MAX_INPUT_BUFFER = 2048
+MAX_AUTH_CODE_LEN = 512
+
+
+def _read_code_line(proc: subprocess.Popen, timeout: float,
+                    stdin_stream=None,
+                    input_fn: Callable[[], str] | None = None) -> tuple[str | None, str]:
+    """
+    Read a non-empty, safe authorization code line while monitoring proc.poll().
+    Returns (code_or_none, status):
+      status in ('ok', 'process_exited', 'timeout', 'cancelled')
+    """
+    import select
+    start_time = time.monotonic()
+
+    if input_fn is not None:
+        while time.monotonic() - start_time < timeout:
+            if proc.poll() is not None:
+                return None, "process_exited"
+            try:
+                line = input_fn()
+            except (KeyboardInterrupt, EOFError):
+                return None, "cancelled"
+            if len(line) > MAX_INPUT_BUFFER:
+                if proc.poll() is not None:
+                    return None, "process_exited"
+                print("\n⚠️ 授权码输入超过长度限制，请重新输入：", end="", flush=True)
+                continue
+            stripped = line.strip().replace("\r", "")
+            if not stripped:
+                if proc.poll() is not None:
+                    return None, "process_exited"
+                print("\n⚠️ 输入为空，请输入有效的授权码：", end="", flush=True)
+                continue
+            code, _ = extract_code_from_input(stripped)
+            if len(code) > MAX_AUTH_CODE_LEN or not SAFE_AUTH_CODE_RE.match(code):
+                print("\n⚠️ 授权码格式不合法或包含非法字符，请重新输入：", end="", flush=True)
+                continue
+            return code, "ok"
+        return None, "timeout"
+
+    if stdin_stream is None:
+        stdin_stream = sys.stdin
+
+    # Save terminal attributes and disable echo on interactive terminals
+    stdin_fd = None
+    old_term_attrs = None
+    try:
+        if hasattr(stdin_stream, "fileno"):
+            fd = stdin_stream.fileno()
+            if isinstance(fd, int) and fd >= 0:
+                stdin_fd = fd
+                if os.isatty(stdin_fd):
+                    try:
+                        import termios
+                        old_term_attrs = termios.tcgetattr(stdin_fd)
+                        new_term_attrs = list(old_term_attrs)
+                        new_term_attrs[3] = new_term_attrs[3] & ~termios.ECHO
+                        termios.tcsetattr(stdin_fd, termios.TCSANOW, new_term_attrs)
+                    except Exception as err:
+                        raise RuntimeError("无法在当前终端安全关闭敏感输入回显，已终止授权。") from err
+    except (io.UnsupportedOperation, OSError, AttributeError):
+        stdin_fd = None
+
+    raw_buffer = ""
+    line_oversized = False
+    try:
+        while time.monotonic() - start_time < timeout:
+            if proc.poll() is not None:
+                return None, "process_exited"
+
+            # Check if raw_buffer already contains a complete line
+            if "\n" in raw_buffer or "\r" in raw_buffer:
+                parts = re.split(r'[\r\n]', raw_buffer, maxsplit=1)
+                line = parts[0]
+                raw_buffer = parts[1] if len(parts) > 1 else ""
+
+                if line_oversized:
+                    line_oversized = False
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    print("\n⚠️ 授权码输入超过长度限制，请重新输入：", end="", flush=True)
+                    continue
+
+                stripped = line.strip()
+                if not stripped:
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    print("\n⚠️ 输入为空，请输入有效的授权码：", end="", flush=True)
+                    continue
+
+                code, _ = extract_code_from_input(stripped)
+                if len(code) > MAX_AUTH_CODE_LEN or not SAFE_AUTH_CODE_RE.match(code):
+                    print("\n⚠️ 授权码格式不合法或包含非法字符，请重新输入：", end="", flush=True)
+                    continue
+
+                if stdin_fd is not None and os.isatty(stdin_fd):
+                    print("", flush=True)
+                return code, "ok"
+
+            # If no complete line yet, but buffer has exceeded max allowed length
+            if len(raw_buffer) >= MAX_INPUT_BUFFER:
+                line_oversized = True
+                raw_buffer = ""
+
+            # Check input stream
+            if stdin_fd is not None:
+                r, _, _ = select.select([stdin_fd], [], [], 0.15)
+                if not r:
+                    continue
+                try:
+                    chunk = os.read(stdin_fd, 1024)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    # EOF reached
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    if not line_oversized:
+                        stripped = raw_buffer.strip()
+                        if stripped:
+                            code, _ = extract_code_from_input(stripped)
+                            if len(code) <= MAX_AUTH_CODE_LEN and SAFE_AUTH_CODE_RE.match(code):
+                                if os.isatty(stdin_fd):
+                                    print("", flush=True)
+                                return code, "ok"
+                    return None, "cancelled"
+                decoded = chunk.decode("utf-8", errors="replace")
+                if line_oversized:
+                    if "\n" in decoded or "\r" in decoded:
+                        parts = re.split(r'[\r\n]', decoded, maxsplit=1)
+                        line_oversized = False
+                        raw_buffer = parts[1] if len(parts) > 1 else ""
+                        if proc.poll() is not None:
+                            return None, "process_exited"
+                        print("\n⚠️ 授权码输入超过长度限制，请重新输入：", end="", flush=True)
+                else:
+                    raw_buffer += decoded
+                    if len(raw_buffer) > MAX_INPUT_BUFFER:
+                        line_oversized = True
+                        if "\n" in raw_buffer or "\r" in raw_buffer:
+                            parts = re.split(r'[\r\n]', raw_buffer, maxsplit=1)
+                            line_oversized = False
+                            raw_buffer = parts[1] if len(parts) > 1 else ""
+                            if proc.poll() is not None:
+                                return None, "process_exited"
+                            print("\n⚠️ 授权码输入超过长度限制，请重新输入：", end="", flush=True)
+                        else:
+                            raw_buffer = ""
+            else:
+                # stream without fileno (e.g. io.StringIO)
+                try:
+                    line = stdin_stream.readline()
+                except (KeyboardInterrupt, EOFError):
+                    return None, "cancelled"
+                except Exception:
+                    return None, "cancelled"
+                if not line:
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    return None, "cancelled"
+                if len(line) > MAX_INPUT_BUFFER:
+                    line_oversized = True
+                    print("\n⚠️ 授权码输入超过长度限制，请重新输入：", end="", flush=True)
+                else:
+                    raw_buffer += line
+
+        return None, "timeout"
+    finally:
+        if old_term_attrs is not None and stdin_fd is not None:
+            try:
+                import termios
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term_attrs)
+            except Exception:
+                pass
+
+
 def auth_login(agy: Path, home: Path, workspace: Path,
-               timeout: float = 180.0, exchange_timeout: float = 90.0) -> int:
+               timeout: float = 180.0, exchange_timeout: float = 90.0,
+               input_fn: Callable[[], str] | None = None) -> int:
     try:
         import pty
         import select
-        import subprocess
     except ImportError:
         print("❌ 错误：当前系统缺少 pty 伪终端支持。", file=sys.stderr)
         return 1
@@ -262,108 +577,166 @@ def auth_login(agy: Path, home: Path, workspace: Path,
 
     env = oauth_environment(home)
 
-    master, slave = pty.openpty()
+    master = None
+    slave = None
+    proc = None
+    old_sigterm = None
+    old_sigint = None
+
+    def _sig_handler(signum, frame):
+        raise SystemExit(128 + signum)
+
     try:
-        proc = subprocess.Popen(
-            [str(agy), "--print", "AGY ready."],
-            cwd=str(workspace),
-            env=env,
-            stdin=slave,
-            stdout=slave,
-            stderr=slave,
-            close_fds=True,
-            start_new_session=True,
-        )
-    finally:
-        os.close(slave)
+        try:
+            old_sigterm = signal.signal(signal.SIGTERM, _sig_handler)
+        except (ValueError, OSError):
+            old_sigterm = None
+        try:
+            old_sigint = signal.signal(signal.SIGINT, _sig_handler)
+        except (ValueError, OSError):
+            old_sigint = None
 
-    buffer = ""
-    auth_prompted = False
-    start_time = time.time()
-
-    while time.time() - start_time < timeout:
-        r, _, _ = select.select([master], [], [], 0.2)
-        if master in r:
+        master, slave = pty.openpty()
+        try:
+            proc = subprocess.Popen(
+                [str(agy), "--print", "AGY ready."],
+                cwd=str(workspace),
+                env=env,
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                close_fds=True,
+                start_new_session=True,
+            )
             try:
-                data = os.read(master, 4096)
-                if not data:
-                    break
-                buffer += data.decode("utf-8", errors="replace")
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    clean = line.strip().replace("\r", "")
-                    if not clean:
-                        continue
-                    low = clean.lower()
-                    if "authentication required" in low:
-                        print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
-                    elif clean.startswith("https://accounts.google.com/") or (
-                        "accounts.google.com" in clean and clean.startswith("https://")
-                    ):
-                        print(f"  {highlight_url(clean)}\n")
-                    elif "waiting for authentication" in low:
-                        print("⏳ 正在等待授权（有效时间约 60 秒）……")
-                    elif "paste the authorization code" in low:
-                        auth_prompted = True
+                proc._agy_pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, OSError):
+                proc._agy_pgid = proc.pid
+        finally:
+            if slave is not None:
+                try:
+                    os.close(slave)
+                except OSError:
+                    pass
+                slave = None
+
+        buffer = ""
+        auth_prompted = False
+        prompt_start = time.monotonic()
+        url_shown = False
+        waiting_shown = False
+
+        # Phase 1: Wait for prompt
+        while time.monotonic() - prompt_start < timeout:
+            r, _, _ = select.select([master], [], [], 0.15)
+            if master in r:
+                try:
+                    data = os.read(master, 4096)
+                    if not data:
                         break
-                if auth_prompted:
+                    buffer = (buffer + data.decode("utf-8", errors="replace"))[-65536:]
+                except OSError:
                     break
-            except OSError:
-                if "paste the authorization code" in buffer.lower():
+
+            # Check for URL
+            if not url_shown:
+                match = re.search(r'https://accounts\.google\.com/[^\s\x1b\r\n]+', buffer)
+                if match:
+                    is_complete = (
+                        match.end() < len(buffer)
+                        or proc.poll() is not None
+                        or any(p in buffer.lower() for p in ("paste the authorization code", "paste the code", "authorization code:"))
+                    )
+                    if is_complete:
+                        url = match.group(0)
+                        print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
+                        print(f"  {highlight_url(url)}\n")
+                        url_shown = True
+
+            low = buffer.lower()
+            if not waiting_shown and "waiting for authentication" in low:
+                print("⏳ 正在等待授权；有效期限由 CLI 控制，请在当前会话内完成。")
+                waiting_shown = True
+
+            if any(p in low for p in ("paste the authorization code", "paste the code", "authorization code:")):
+                auth_prompted = True
+                break
+
+            if proc.poll() is not None:
+                if any(p in buffer.lower() for p in ("paste the authorization code", "paste the code", "authorization code:")):
                     auth_prompted = True
                 break
-        if "paste the authorization code" in buffer.lower():
-            auth_prompted = True
-            buffer = ""
-            break
-        if proc.poll() is not None:
-            if "paste the authorization code" in buffer.lower():
-                auth_prompted = True
-            break
 
-    if auth_prompted:
-        try:
-            code = input("👉 请在此处粘贴浏览器显示的授权码并按回车：").strip()
-        except (KeyboardInterrupt, EOFError):
-            print("\n已取消授权流程。")
-            kill_process_group(proc)
+        if not url_shown:
+            match = re.search(r'https://accounts\.google\.com/[^\s\x1b\r\n]+', buffer)
+            if match:
+                url = match.group(0)
+                print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
+                print(f"  {highlight_url(url)}\n")
+                url_shown = True
+
+        if not auth_prompted:
+            buffer += drain_pty(master)
             try:
-                os.close(master)
-            except OSError:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
                 pass
+            if proc.poll() == 0:
+                print("\n✅ 已检测到有效的 Google 账号授权，无需重新登录！")
+                return 0
+            err_msg = classify_auth_error(buffer, proc.poll() or 1, phase="await_prompt", submitted=False)
+            print(f"\n❌ {err_msg}", file=sys.stderr)
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
+            return 1
+
+        # Phase 2: Await user input
+        print("👉 请在此处粘贴浏览器显示的授权码并按回车：", end="", flush=True)
+        code, status = _read_code_line(proc, timeout=timeout, input_fn=input_fn)
+
+        if status == "cancelled":
+            print("\n已取消授权流程。")
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。")
             return 20
 
-        if proc.poll() is not None:
+        if status == "process_exited":
+            buffer += drain_pty(master)
             print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
-            kill_process_group(proc)
-            try:
-                os.close(master)
-            except OSError:
-                pass
+            err_msg = classify_auth_error(
+                buffer, proc.returncode if proc.returncode is not None else 1,
+                phase="await_input", submitted=False,
+            )
+            print(err_msg, file=sys.stderr)
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
             return 1
 
-        write_ok = False
+        if status == "timeout":
+            buffer += drain_pty(master)
+            print("\n❌ 错误：等待用户输入授权码超时，授权会话已结束，请重新开始。", file=sys.stderr)
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
+            return 1
+
+        # Check proc right before write
+        if proc.poll() is not None:
+            buffer += drain_pty(master)
+            print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
+            return 1
+
+        # Phase 3: Submit valid code
         try:
             os.write(master, (code + "\n").encode("utf-8"))
-            write_ok = True
         except OSError:
-            write_ok = False
-
-        if not write_ok or proc.poll() is not None:
+            buffer += drain_pty(master)
             print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
-            kill_process_group(proc)
-            try:
-                os.close(master)
-            except OSError:
-                pass
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
             return 1
-
         print("🔄 正在验证授权码并完成配置，请稍候……")
 
-        post_buf = ""
-        exchange_start = time.time()
+        # Phase 4: Await token exchange result
+        exchange_start = time.monotonic()
         timed_out = False
-        while time.time() - exchange_start < exchange_timeout:
+        post_buf = ""
+        while time.monotonic() - exchange_start < exchange_timeout:
             if proc.poll() is not None:
                 break
             r, _, _ = select.select([master], [], [], 0.2)
@@ -372,21 +745,19 @@ def auth_login(agy: Path, home: Path, workspace: Path,
                     data = os.read(master, 4096)
                     if not data:
                         break
-                    post_buf += data.decode("utf-8", errors="replace")
+                    post_buf = (post_buf + data.decode("utf-8", errors="replace"))[-65536:]
                 except OSError:
                     break
         else:
             if proc.poll() is None:
                 timed_out = True
 
-        try:
-            os.close(master)
-        except OSError:
-            pass
+        post_buf += drain_pty(master)
 
         if timed_out:
             kill_process_group(proc)
-            print(f"\n❌ 授权失败：等待换票认证超时（{int(exchange_timeout)} 秒），请检查网络连接后重试。", file=sys.stderr)
+            print(f"\n❌ 授权失败：与 Google 认证服务器通信换票超时（{int(exchange_timeout)} 秒），请检查网络连接后重试。", file=sys.stderr)
+            print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
             return 1
 
         try:
@@ -395,35 +766,45 @@ def auth_login(agy: Path, home: Path, workspace: Path,
             kill_process_group(proc)
             rc = 1
 
-        if rc == 0:
+        if rc == 0 and "invalid_grant" not in post_buf.lower():
             print("\n✅ Google 账号授权成功！")
             return 0
 
-        err_msg = classify_auth_error(post_buf, rc, code=code)
+        err_msg = classify_auth_error(post_buf, rc, code=code, phase="await_result", submitted=True)
         print(f"\n❌ {err_msg}", file=sys.stderr)
+        print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
         return 1
 
-    try:
-        os.close(master)
-    except OSError:
-        pass
+    finally:
+        if old_sigterm is not None:
+            try:
+                signal.signal(signal.SIGTERM, old_sigterm)
+            except (ValueError, OSError):
+                pass
+        if old_sigint is not None:
+            try:
+                signal.signal(signal.SIGINT, old_sigint)
+            except (ValueError, OSError):
+                pass
+        if proc is not None:
+            cleanup_ok = kill_process_group(proc)
+            if not cleanup_ok:
+                print("⚠️ 警告：授权子进程组清理未确认，部分子进程可能仍在运行。", file=sys.stderr)
+        if slave is not None:
+            try:
+                os.close(slave)
+            except OSError:
+                pass
+        if master is not None:
+            try:
+                os.close(master)
+            except OSError:
+                pass
 
-    try:
-        rc = proc.wait(timeout=3.0)
-    except subprocess.TimeoutExpired:
-        kill_process_group(proc)
-        rc = 1
 
-    if rc == 0:
-        print("\n✅ 已检测到有效的 Google 账号授权，无需重新登录！")
-        return 0
-
-    err_msg = classify_auth_error(buffer, rc)
-    print(f"\n❌ {err_msg}", file=sys.stderr)
-    return 1
-
-
-def main() -> int:
+def main(argv: list[str] | None = None,
+         input_fn: Callable[[str], str] | None = None,
+         secret_fn: Callable[[str], str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare-config")
@@ -448,10 +829,10 @@ def main() -> int:
     ready = sub.add_parser("check-ready")
     ready.add_argument("--file", type=Path, required=True)
     ready.add_argument("--pid", type=int, required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         if args.command == "prepare-config":
-            return prepare_config(args)
+            return prepare_config(args, input_fn=input_fn, secret_fn=secret_fn)
         if args.command == "check-ready":
             data = read_json(args.file, 1024)
             return 0 if (

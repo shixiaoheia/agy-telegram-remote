@@ -4,6 +4,7 @@ import io
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -12,8 +13,8 @@ try:
 except ImportError:
     from common import ROOT, config_values, settings_at
 from agy_runner import Result, SMOKE_PROMPT, build_command
-from manage import (auth_login, classify_auth_error, main, oauth_environment,
-                    redact_auth_data, service_unit, smoke)
+from manage import (auth_login, classify_auth_error, kill_process_group, main,
+                    oauth_environment, redact_auth_data, service_unit, smoke)
 from settings import ConfigError, Settings, parse_env
 
 class InstallerTests(unittest.TestCase):
@@ -346,8 +347,8 @@ fi
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf = io.StringIO()
-            with patch("sys.stdout", buf), patch("builtins.input", return_value="good_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "good_code")
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             self.assertIn("Google 账号授权成功", out)
@@ -370,9 +371,8 @@ exit 1
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="bad_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "bad_code")
             self.assertEqual(rc, 1)
             self.assertIn("授权码无效或格式不正确", buf_err.getvalue())
 
@@ -388,8 +388,10 @@ sleep 10
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf = io.StringIO()
-            with patch("sys.stdout", buf), patch("builtins.input", side_effect=KeyboardInterrupt):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            def _raise_ki():
+                raise KeyboardInterrupt
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=_raise_ki)
             self.assertEqual(rc, 20)
             self.assertIn("已取消授权流程", buf.getvalue())
 
@@ -440,12 +442,11 @@ exit 1
             buf_out = io.StringIO()
             buf_err = io.StringIO()
             import time
-            def fake_input(prompt):
+            def fake_input(prompt=None):
                 time.sleep(0.05)
                 return "some_code"
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", side_effect=fake_input):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=fake_input)
             self.assertEqual(rc, 1)
             self.assertIn("授权会话已结束，请重新开始", buf_err.getvalue())
             self.assertNotIn("正在验证授权码", buf_out.getvalue())
@@ -462,9 +463,8 @@ sleep 10
             buf_out = io.StringIO()
             buf_err = io.StringIO()
             with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="some_code"), \
                  patch("os.write", side_effect=OSError(5, "Input/output error")):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "some_code")
             self.assertEqual(rc, 1)
             self.assertIn("授权会话已结束，请重新开始", buf_err.getvalue())
             self.assertNotIn("正在验证授权码", buf_out.getvalue())
@@ -486,8 +486,8 @@ exit 1
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf = io.StringIO()
-            with patch("sys.stdout", buf), patch("builtins.input", return_value="valid_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=10)
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=10, input_fn=lambda: "valid_code")
             self.assertEqual(rc, 0)
             self.assertIn("Google 账号授权成功", buf.getvalue())
 
@@ -507,9 +507,8 @@ exit 42
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value=secret_code):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: secret_code)
             self.assertEqual(rc, 1)
             err = buf_err.getvalue()
             self.assertNotIn(secret_code, err)
@@ -563,8 +562,328 @@ sleep 30
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf_err = io.StringIO()
-            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="slow_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.3)
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.3, input_fn=lambda: "slow_code")
             self.assertEqual(rc, 1)
             self.assertIn("超时", buf_err.getvalue())
+
+    def test_empty_line_and_residual_newline_not_submitted_prematurely(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+if [[ -z "$code" ]]; then
+  echo "RECEIVED_EMPTY" >&2
+  exit 2
+fi
+if [[ "$code" == "valid_code" ]]; then
+  echo "AGY ready."
+  exit 0
+fi
+exit 1
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            inputs = iter(["", "   ", "valid_code"])
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=inputs.__next__)
+            self.assertEqual(rc, 0)
+            out = buf_out.getvalue()
+            self.assertIn("输入为空", out)
+            self.assertIn("正在验证授权码", out)
+            self.assertNotIn("RECEIVED_EMPTY", buf_err.getvalue())
+
+    def test_url_input_extracts_code(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+if [[ "$code" == "extracted_code_123" ]]; then
+  echo "AGY ready."
+  exit 0
+fi
+echo "RECEIVED: $code" >&2
+exit 1
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            with patch("sys.stdout", buf_out):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "http://localhost:8080/oauth/callback?state=xyz&code=extracted_code_123")
+            self.assertEqual(rc, 0)
+
+    def test_cli_exits_before_user_input_promptly_detected(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+exit 7
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_err = io.StringIO()
+            buf_out = io.StringIO()
+            # An open, silent input pipe models a user who has not typed yet.
+            # In CI the inherited stdin may be /dev/null: that is EOF/cancel,
+            # a different scenario from "CLI exited before user input".
+            read_fd, write_fd = os.pipe()
+            try:
+                with os.fdopen(read_fd, "r", encoding="utf-8") as terminal_input, \
+                     patch("sys.stdin", terminal_input), \
+                     patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                    rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            finally:
+                os.close(write_fd)
+            self.assertEqual(rc, 1)
+            self.assertNotIn("正在验证授权码", buf_out.getvalue())
+            err = buf_err.getvalue()
+            self.assertIn("授权会话已结束", err)
+            self.assertIn("请勿在 Shell 提示符后继续粘贴授权码", err)
+
+    def test_user_input_timeout_vs_network_exchange_timeout_distinct(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+sleep 10
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+
+            # 1. User input timeout
+            buf_err1 = io.StringIO()
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err1), \
+                 patch("manage._read_code_line", return_value=(None, "timeout")):
+                rc1 = auth_login(mock_agy, Path(td), Path(td), timeout=0.2)
+            self.assertEqual(rc1, 1)
+            self.assertIn("等待用户输入授权码超时", buf_err1.getvalue())
+
+            # 2. Exchange timeout
+            buf_err2 = io.StringIO()
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err2):
+                rc2 = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.2, input_fn=lambda: "my_code")
+            self.assertEqual(rc2, 1)
+            self.assertIn("通信换票超时", buf_err2.getvalue())
+
+    def test_prompt_split_in_chunks_without_trailing_newline_recognized(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+printf 'Authentication required. Please visit the URL to log in:\n'
+printf 'https://accounts.google.com/o/oauth2/auth?test=split\n'
+printf 'Or, paste the authorization code '
+sleep 0.1
+printf 'here and press Enter:'
+read -r code
+if [[ "$code" == "chunk_ok" ]]; then
+  echo "AGY ready."
+  exit 0
+fi
+exit 1
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            with patch("sys.stdout", buf_out):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "chunk_ok")
+            self.assertEqual(rc, 0)
+            self.assertIn("https://accounts.google.com/o/oauth2/auth?test=split", buf_out.getvalue())
+            self.assertIn("Google 账号授权成功", buf_out.getvalue())
+
+    def test_cli_fast_exit_trailing_output_not_lost(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+echo "FATAL_CLI_DIAGNOSTIC_TRAILING_ERROR_XYZ" >&2
+exit 33
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_err = io.StringIO()
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "any_code")
+            self.assertEqual(rc, 1)
+            self.assertIn("FATAL_CLI_DIAGNOSTIC_TRAILING_ERROR_XYZ", buf_err.getvalue())
+
+    def test_auth_error_categories_distinct(self):
+        from manage import classify_auth_error
+        self.assertIn("授权码无效或格式不正确", classify_auth_error("oauth2: invalid_grant code expired", 1, submitted=True))
+        self.assertIn("配额受限", classify_auth_error("resource_exhausted: quota exceeded 429", 1, submitted=True))
+        self.assertIn("网络连接失败", classify_auth_error("dial tcp: connection refused", 1, submitted=True))
+        self.assertIn("协议或参数异常", classify_auth_error("unknown flag --foo panic:", 1, submitted=True))
+        self.assertIn("超时", classify_auth_error("context deadline exceeded", 1, submitted=True))
+        self.assertIn("地区或资格受限", classify_auth_error("location not eligible unsupported country", 1, submitted=True))
+
+    def test_child_ignoring_sigterm_escalates_to_sigkill_no_nameerror(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_script = Path(td) / "stubborn.sh"
+            mock_script.write_text("#!/bin/bash\ntrap '' SIGTERM\nwhile true; do sleep 1; done\n")
+            mock_script.chmod(0o755)
+            proc = subprocess.Popen([str(mock_script)], start_new_session=True)
+            try:
+                self.assertIsNone(proc.poll())
+                kill_process_group(proc, timeout=0.1, kill_timeout=0.2)
+                self.assertIsNotNone(proc.poll())
+            finally:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+
+    def test_child_descendants_cleaned_no_pty_leak(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            pid_file = Path(td) / "child.pid"
+            script = f'''#!/bin/bash
+sleep 60 &
+echo $! > "{pid_file}"
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+wait $!
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            def _raise_ki():
+                raise KeyboardInterrupt
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=_raise_ki)
+            self.assertEqual(rc, 20)
+            if pid_file.exists() and pid_file.read_text().strip():
+                child_pid = int(pid_file.read_text().strip())
+                time.sleep(0.2)
+                try:
+                    os.kill(child_pid, 0)
+                    self.fail("Descendant child process was not killed")
+                except ProcessLookupError:
+                    pass
+
+    def test_quota_network_smoke_failure_preserves_credentials_no_reauth(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            token_file = base / "antigravity-oauth-token"
+            token_file.write_text("my_existing_valid_token")
+            bash_snippet = f'''
+APP_HOME="{base}"
+REAUTH=0
+installed_now=0
+smoke_rc=12
+TOKEN_ORIGINAL="{token_file}"
+TOKEN_BACKUP="{token_file}.bak.$$"
+
+if [[ "$smoke_rc" -eq 10 || "$installed_now" == 1 || "$REAUTH" == 1 ]]; then
+  if [[ -f "$TOKEN_ORIGINAL" ]]; then
+    mv -f -- "$TOKEN_ORIGINAL" "$TOKEN_BACKUP"
+  fi
+  auth_called=1
+elif [[ "$smoke_rc" -ne 0 ]]; then
+  auth_called=0
+fi
+
+if [[ "$auth_called" == 0 && -f "$TOKEN_ORIGINAL" ]]; then
+  echo "PRESERVED"
+fi
+'''
+            proc = subprocess.run(["/bin/bash", "-c", bash_snippet], capture_output=True, text=True)
+            self.assertIn("PRESERVED", proc.stdout)
+            self.assertTrue(token_file.exists())
+            self.assertEqual(token_file.read_text(), "my_existing_valid_token")
+
+    def test_auth_cancel_or_sigterm_restores_token_backup(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            token_file = base / "antigravity-oauth-token"
+            token_file.write_text("precious_credentials")
+            backup_file = base / "antigravity-oauth-token.bak.1234"
+            token_file.rename(backup_file)
+            self.assertFalse(token_file.exists())
+            self.assertTrue(backup_file.exists())
+
+            bash_snippet = f'''
+TOKEN_ORIGINAL="{token_file}"
+TOKEN_BACKUP="{backup_file}"
+if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
+  mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
+  TOKEN_BACKUP=
+fi
+'''
+            subprocess.run(["/bin/bash", "-c", bash_snippet], check=True)
+            self.assertTrue(token_file.exists())
+            self.assertEqual(token_file.read_text(), "precious_credentials")
+            self.assertFalse(backup_file.exists())
+
+    def test_full_environment_chain_preserves_ssh_and_proxy_strips_secrets(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            script = f'''
+APP_HOME="{base}"
+SSH_CLIENT="1.2.3.4 5678 22"
+SSH_CONNECTION="1.2.3.4 5678 10.0.0.1 22"
+SSH_TTY="/dev/pts/1"
+HTTPS_PROXY="http://127.0.0.1:7890"
+HTTP_PROXY="http://127.0.0.1:7890"
+TELEGRAM_BOT_TOKEN="secret_bot_token"
+BOT_TOKEN="secret_bot_token"
+SSH_AUTH_SOCK="/tmp/secret.sock"
+AWS_SECRET_ACCESS_KEY="secret_aws"
+
+as_user() {{
+  env -i \\
+    HOME="$APP_HOME" USER="root" LOGNAME="root" \\
+    PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \\
+    TERM="${{TERM:-xterm-256color}}" \\
+    TMPDIR="${{TMPDIR:-/tmp}}" \\
+    SSH_CLIENT="${{SSH_CLIENT-}}" SSH_CONNECTION="${{SSH_CONNECTION-}}" SSH_TTY="${{SSH_TTY-}}" \\
+    HTTP_PROXY="${{HTTP_PROXY-}}" HTTPS_PROXY="${{HTTPS_PROXY-}}" ALL_PROXY="${{ALL_PROXY-}}" NO_PROXY="${{NO_PROXY-}}" \\
+    "$@"
+}}
+
+as_user python3 -c "
+import os, sys
+sys.path.insert(0, '{ROOT}')
+from manage import oauth_environment
+from pathlib import Path
+env = oauth_environment(Path('{base}'), os.environ)
+assert env['SSH_CLIENT'] == '1.2.3.4 5678 22'
+assert env['SSH_CONNECTION'] == '1.2.3.4 5678 10.0.0.1 22'
+assert env['SSH_TTY'] == '/dev/pts/1'
+assert env['HTTPS_PROXY'] == 'http://127.0.0.1:7890'
+assert 'TELEGRAM_BOT_TOKEN' not in env
+assert 'BOT_TOKEN' not in env
+assert 'SSH_AUTH_SOCK' not in env
+assert 'AWS_SECRET_ACCESS_KEY' not in env
+print('ENV_CHAIN_SUCCESS')
+"
+'''
+            res = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, cwd=str(ROOT))
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertIn("ENV_CHAIN_SUCCESS", res.stdout)
+
+    def test_tokens_auth_codes_and_refresh_tokens_redacted(self):
+        from manage import redact_auth_data
+        sample = (
+            "Login failed for code 4/0Abc1234567890XYZ_SuperSecret and token ya29.a0AfH6SMD_TokenXYZSecret123. "
+            "Redirect uri was http://localhost:8080/?code=4/0Abc1234567890XYZ_SuperSecret&token=ya29.xyz "
+            "and refresh_token=1//0987654321xyz. Bot token is 123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234567. "
+            "Proxy was http://user:supersecretpass@proxy.example.com:8080"
+        )
+        redacted = redact_auth_data(sample, code="4/0Abc1234567890XYZ_SuperSecret")
+        self.assertNotIn("4/0Abc1234567890XYZ_SuperSecret", redacted)
+        self.assertNotIn("ya29.a0AfH6SMD_TokenXYZSecret123", redacted)
+        self.assertNotIn("123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234567", redacted)
+        self.assertNotIn("supersecretpass", redacted)
+        self.assertIn("[REDACTED_CODE]", redacted)
+        self.assertIn("[REDACTED_TOKEN]", redacted)
+        self.assertIn("[REDACTED_BOT_TOKEN]", redacted)
+        self.assertIn("[REDACTED_PASSWORD]", redacted)
