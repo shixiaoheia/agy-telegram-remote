@@ -4,7 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 try:
     from .common import settings_at
@@ -130,11 +130,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         if self.bridge.slot and self.bridge.slot.worker:
             await self.bridge.slot.worker
 
-    async def test_bot_runtime_refuses_root(self):
-        from bot import start
-        from settings import ConfigError
-        with patch("bot.os.geteuid", return_value=0), self.assertRaises(ConfigError):
-            await start(self.settings, None)
+    async def test_bot_runtime_allows_root(self): from bot import start; root=patch("bot.os.geteuid", return_value=0); runner=patch("bot.Bridge.run", new_callable=AsyncMock); root.start(); runner.start(); await start(self.settings, None); runner.stop(); root.stop()
 
     async def test_unauthorized_user_and_group_ignored(self):
         await self.handle(update("task", user=999))
