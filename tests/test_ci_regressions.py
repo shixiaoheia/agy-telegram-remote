@@ -14,7 +14,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from agy_runner import Result, classify
-from manage import _read_code_line, auth_login, classify_auth_error, smoke
+from manage import (_read_code_line, auth_login, classify_auth_error,
+                    kill_process_group, smoke)
 
 ROOT = Path(__file__).resolve().parents[1]
 ELIGIBILITY_ERROR = (
@@ -272,6 +273,227 @@ probe() {
             self.assertEqual(result.returncode, 1)
             self.assertIn("登录后", result.stderr)
             self.assertEqual((base / "auth-calls").read_text().splitlines(), ["called"])
+
+
+class PTYUrlChunkTests(unittest.TestCase):
+    def test_url_split_in_two_chunks_real_pty(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            cli = base / "fake-agy"
+            cli.write_text(
+                "#!/bin/bash\n"
+                "printf 'https://accounts.google.com/o/oauth2/auth?test=chunk1'\n"
+                "sleep 0.1\n"
+                "printf 'chunk2\\n'\n"
+                "echo 'Or, paste the authorization code here and press Enter:'\n"
+                "read -r code\n"
+                "echo 'AGY ready.'\n",
+                encoding="utf-8",
+            )
+            cli.chmod(0o755)
+            out = io.StringIO()
+            with patch("sys.stdout", out), patch("manage._read_code_line", return_value=("good_code", "ok")):
+                rc = auth_login(cli, base, base, timeout=5, exchange_timeout=2)
+            self.assertEqual(rc, 0)
+            val = out.getvalue()
+            self.assertIn("https://accounts.google.com/o/oauth2/auth?test=chunk1chunk2", val)
+            self.assertNotIn("https://accounts.google.com/o/oauth2/auth?test=chunk1\n", val)
+
+
+class KillProcessGroupTests(unittest.TestCase):
+    def test_parent_exits_first_cleans_surviving_child(self):
+        proc = subprocess.Popen(["bash", "-c", "sleep 30 & exit 0"], start_new_session=True)
+        pgid = os.getpgid(proc.pid)
+        proc.wait()
+        try:
+            os.killpg(pgid, 0)
+            group_alive = True
+        except ProcessLookupError:
+            group_alive = False
+        self.assertTrue(group_alive)
+
+        kill_process_group(proc, timeout=0.5, kill_timeout=0.5, pgid=pgid)
+
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
+    def test_child_ignores_sigterm_escalates_to_sigkill(self):
+        proc = subprocess.Popen(["bash", "-c", "trap '' TERM; sleep 30"], start_new_session=True)
+        pgid = os.getpgid(proc.pid)
+        proc._agy_pgid = pgid
+
+        kill_process_group(proc, timeout=0.2, kill_timeout=0.5)
+
+        self.assertIsNotNone(proc.poll())
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(pgid, 0)
+
+    def test_kill_process_group_does_not_kill_unrelated_process(self):
+        unrelated = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        target = subprocess.Popen(["sleep", "30"], start_new_session=True)
+
+        try:
+            kill_process_group(target, timeout=0.5, kill_timeout=0.5)
+            self.assertIsNotNone(target.poll())
+            self.assertIsNone(unrelated.poll())
+        finally:
+            unrelated.terminate()
+            unrelated.wait()
+
+
+class ReadCodeLineRealInputTests(unittest.TestCase):
+    def test_empty_lines_followed_by_valid_input(self):
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        with input_pipe("\n   \n4/0AY0e-valid_code_123\n", close_writer=True) as reader, \
+             patch("sys.stdin", reader):
+            code, status = _read_code_line(dummy_proc, timeout=2)
+        self.assertEqual(status, "ok")
+        self.assertEqual(code, "4/0AY0e-valid_code_123")
+
+    def test_partial_input_chunks_then_newline(self):
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        r, w = os.pipe()
+        try:
+            with os.fdopen(r, "r", encoding="utf-8") as reader, patch("sys.stdin", reader):
+                os.write(w, b"4/0AY0e-part1")
+                def write_rest():
+                    import time
+                    time.sleep(0.05)
+                    os.write(w, b"_part2\n")
+                import threading
+                t = threading.Thread(target=write_rest)
+                t.start()
+                code, status = _read_code_line(dummy_proc, timeout=2)
+                t.join()
+            self.assertEqual(status, "ok")
+            self.assertEqual(code, "4/0AY0e-part1_part2")
+        finally:
+            try:
+                os.close(w)
+            except OSError:
+                pass
+
+    def test_cli_exits_first_detected(self):
+        dummy_proc = Mock()
+        dummy_proc.poll.side_effect = [None, None, 42]
+        with input_pipe("", close_writer=False) as reader, patch("sys.stdin", reader):
+            code, status = _read_code_line(dummy_proc, timeout=2)
+        self.assertIsNone(code)
+        self.assertEqual(status, "process_exited")
+
+    def test_timeout_detected(self):
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        with input_pipe("", close_writer=False) as reader, patch("sys.stdin", reader):
+            code, status = _read_code_line(dummy_proc, timeout=0.2)
+        self.assertIsNone(code)
+        self.assertEqual(status, "timeout")
+
+    def test_terminal_attributes_restoration(self):
+        import termios
+        master, slave = pty.openpty()
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        try:
+            with os.fdopen(slave, "r", encoding="utf-8") as terminal, \
+                 patch("sys.stdin", terminal):
+                code, status = _read_code_line(dummy_proc, timeout=0.1)
+            self.assertEqual(status, "timeout")
+        finally:
+            os.close(master)
+
+    def test_auth_code_never_leaked_in_output(self):
+        secret_code = "4/0AY0e-VERY_SECRET_CODE_DO_NOT_PRINT"
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        buf_out = io.StringIO()
+        with input_pipe(f" \n{secret_code}\n", close_writer=True) as reader, \
+             patch("sys.stdin", reader), \
+             contextlib.redirect_stdout(buf_out):
+            code, status = _read_code_line(dummy_proc, timeout=2)
+        self.assertEqual(status, "ok")
+        self.assertEqual(code, secret_code)
+        self.assertNotIn(secret_code, buf_out.getvalue())
+
+
+class InstallerProtectionTests(unittest.TestCase):
+    def test_backup_failure_preserves_original_and_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            token = base / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+            token.parent.mkdir(parents=True)
+            token.write_text("MY_REAL_PRECIOUS_TOKEN", encoding="utf-8")
+
+            snippet = f'''set -euo pipefail
+TOKEN_ORIGINAL="{token}"
+TOKEN_BACKUP="/nonexistent_dir/cannot_write/token.bak"
+fail() {{ echo "$*" >&2; exit 1; }}
+
+if [[ -f "$TOKEN_ORIGINAL" ]]; then
+  if ! mv -f -- "$TOKEN_ORIGINAL" "$TOKEN_BACKUP" 2>/dev/null; then
+    TOKEN_BACKUP=
+    fail "凭据备份失败：无法将旧凭据移动至备份路径，已保留原件，安装中止。"
+  fi
+fi
+'''
+            res = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("凭据备份失败", res.stderr)
+            self.assertTrue(token.exists())
+            self.assertEqual(token.read_text(encoding="utf-8"), "MY_REAL_PRECIOUS_TOKEN")
+
+    def test_restore_failure_reports_error_and_preserves_backup_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            backup = base / "token.bak.999"
+            backup.write_text("BACKUP_TOKEN_CONTENT", encoding="utf-8")
+            target = "/nonexistent_dir/cannot_write/dest_token"
+
+            snippet = f'''
+TOKEN_ORIGINAL="{target}"
+TOKEN_BACKUP="{backup}"
+
+if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
+  if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null; then
+    TOKEN_BACKUP=
+  else
+    echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+  fi
+fi
+'''
+            res = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+            self.assertIn("凭据恢复失败", res.stderr)
+            self.assertIn(str(backup), res.stderr)
+            self.assertTrue(backup.exists())
+
+    def test_current_commit_backed_up_and_restored_on_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config_dir = base / "etc"
+            config_dir.mkdir()
+            current_commit = config_dir / "current_commit"
+            current_commit.write_text("commit_v1\n", encoding="utf-8")
+
+            backup_dir = base / "backup"
+            backup_dir.mkdir()
+
+            snippet = f'''set -e
+CONFIG_DIR="{config_dir}"
+BACKUP="{backup_dir}"
+
+[[ ! -f "$CONFIG_DIR/current_commit" ]] || cp -p -- "$CONFIG_DIR/current_commit" "$BACKUP/current_commit"
+echo "commit_v2" > "$CONFIG_DIR/current_commit"
+
+if [[ -f "$BACKUP/current_commit" ]]; then
+  cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"
+else
+  rm -f -- "$CONFIG_DIR/current_commit"
+fi
+'''
+            subprocess.run(["bash", "-c", snippet], check=True)
+            self.assertEqual(current_commit.read_text(encoding="utf-8"), "commit_v1\n")
 
 
 if __name__ == "__main__":

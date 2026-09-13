@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import builtins
 import getpass
 import io
 import os
@@ -16,6 +17,8 @@ import urllib.parse
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
+
+_ORIGINAL_INPUT = builtins.input
 
 from agy_runner import Runner, SMOKE_PROMPT, classify
 from settings import (ConfigError, KEYS, Settings, check_no_symlink, merged_config,
@@ -179,45 +182,67 @@ def oauth_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
     return env
 
 
-def kill_process_group(proc: subprocess.Popen, timeout: float = 3.0, kill_timeout: float = 2.0) -> None:
+def kill_process_group(proc: subprocess.Popen, timeout: float = 3.0, kill_timeout: float = 2.0,
+                       pgid: int | None = None) -> None:
     """Terminate the process and its child process group safely with SIGTERM then SIGKILL."""
-    pgid = None
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        pass
+    if pgid is None:
+        pgid = getattr(proc, "_agy_pgid", None)
+    if pgid is None and proc.pid:
+        try:
+            pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            pass
+
+    def is_group_alive() -> bool:
+        try:
+            if proc.poll() is None:
+                return True
+        except Exception:
+            pass
+        if pgid is not None and pgid > 1:
+            try:
+                os.killpg(pgid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+        return False
 
     if pgid is not None and pgid > 1:
         try:
             os.killpg(pgid, signal.SIGTERM)
         except (ProcessLookupError, OSError):
             pass
-    else:
-        try:
+    try:
+        if proc.poll() is None:
             proc.terminate()
-        except (ProcessLookupError, OSError):
-            pass
+    except (ProcessLookupError, OSError):
+        pass
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
+        if not is_group_alive():
             break
         time.sleep(0.05)
 
-    if proc.poll() is None:
+    if is_group_alive():
         if pgid is not None and pgid > 1:
             try:
                 os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, OSError):
                 pass
-        else:
-            try:
+        try:
+            if proc.poll() is None:
                 proc.kill()
-            except (ProcessLookupError, OSError):
-                pass
+        except (ProcessLookupError, OSError):
+            pass
+
         kill_deadline = time.monotonic() + kill_timeout
         while time.monotonic() < kill_deadline:
-            if proc.poll() is not None:
+            if not is_group_alive():
                 break
             time.sleep(0.05)
 
@@ -333,78 +358,108 @@ def _read_code_line(proc: subprocess.Popen, timeout: float) -> tuple[str | None,
     import select
     start_time = time.monotonic()
 
-    is_mock = False
+    # Save terminal attributes on interactive terminals for restoration in finally
+    stdin_fd = None
+    old_term_attrs = None
     try:
-        if hasattr(input, "assert_called") or hasattr(input, "side_effect") or hasattr(input, "return_value"):
-            is_mock = True
-    except Exception:
-        pass
+        if hasattr(sys.stdin, "fileno"):
+            fd = sys.stdin.fileno()
+            if isinstance(fd, int) and fd >= 0:
+                stdin_fd = fd
+                if os.isatty(stdin_fd):
+                    try:
+                        import termios
+                        old_term_attrs = termios.tcgetattr(stdin_fd)
+                    except Exception:
+                        old_term_attrs = None
+    except (io.UnsupportedOperation, OSError, AttributeError):
+        stdin_fd = None
 
-    if is_mock:
+    try:
+        if builtins.input is not _ORIGINAL_INPUT:
+            while time.monotonic() - start_time < timeout:
+                if proc.poll() is not None:
+                    return None, "process_exited"
+                try:
+                    line = builtins.input("")
+                except (KeyboardInterrupt, EOFError):
+                    return None, "cancelled"
+                stripped = line.strip().replace("\r", "")
+                if not stripped:
+                    print("\n⚠️ 输入为空，请输入有效的授权码：", end="", flush=True)
+                    continue
+                code, _ = extract_code_from_input(stripped)
+                if not SAFE_AUTH_CODE_RE.match(code):
+                    print("\n⚠️ 授权码格式不合法或包含非法字符，请重新输入：", end="", flush=True)
+                    continue
+                return code, "ok"
+            return None, "timeout"
+
+        # Unified real input loop avoiding select and buffered readline mismatch
+        raw_buffer = ""
         while time.monotonic() - start_time < timeout:
             if proc.poll() is not None:
                 return None, "process_exited"
-            try:
-                line = input("")
-            except (KeyboardInterrupt, EOFError):
-                return None, "cancelled"
-            stripped = line.strip().replace("\r", "")
-            if not stripped:
-                print("\n⚠️ 输入为空，请输入有效的授权码：", end="", flush=True)
-                continue
-            code, _ = extract_code_from_input(stripped)
-            if not SAFE_AUTH_CODE_RE.match(code):
-                print("\n⚠️ 授权码格式不合法或包含非法字符，请重新输入：", end="", flush=True)
-                continue
-            return code, "ok"
+
+            # Check if raw_buffer already contains a complete line
+            if "\n" in raw_buffer or "\r" in raw_buffer:
+                parts = re.split(r'[\r\n]', raw_buffer, maxsplit=1)
+                line = parts[0]
+                raw_buffer = parts[1] if len(parts) > 1 else ""
+                stripped = line.strip()
+                if not stripped:
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    print("\n⚠️ 输入为空，请输入有效的授权码：", end="", flush=True)
+                    continue
+                code, _ = extract_code_from_input(stripped)
+                if not SAFE_AUTH_CODE_RE.match(code):
+                    print("\n⚠️ 授权码格式不合法或包含非法字符，请重新输入：", end="", flush=True)
+                    continue
+                return code, "ok"
+
+            # No complete line in buffer; check input stream
+            if stdin_fd is not None:
+                r, _, _ = select.select([stdin_fd], [], [], 0.15)
+                if not r:
+                    continue
+                try:
+                    chunk = os.read(stdin_fd, 1024)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    # EOF reached
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    stripped = raw_buffer.strip()
+                    if stripped:
+                        code, _ = extract_code_from_input(stripped)
+                        if SAFE_AUTH_CODE_RE.match(code):
+                            return code, "ok"
+                    return None, "cancelled"
+                raw_buffer += chunk.decode("utf-8", errors="replace")
+            else:
+                # sys.stdin without fileno (e.g. io.StringIO)
+                try:
+                    line = sys.stdin.readline()
+                except (KeyboardInterrupt, EOFError):
+                    return None, "cancelled"
+                except Exception:
+                    return None, "cancelled"
+                if not line:
+                    if proc.poll() is not None:
+                        return None, "process_exited"
+                    return None, "cancelled"
+                raw_buffer += line
+
         return None, "timeout"
-
-    can_select = False
-    stdin_fd = None
-    try:
-        if hasattr(sys.stdin, "fileno"):
-            stdin_fd = sys.stdin.fileno()
-            if isinstance(stdin_fd, int) and stdin_fd >= 0:
-                can_select = True
-    except (io.UnsupportedOperation, OSError, AttributeError):
-        can_select = False
-
-    while time.monotonic() - start_time < timeout:
-        if proc.poll() is not None:
-            return None, "process_exited"
-
-        if can_select and stdin_fd is not None:
-            r, _, _ = select.select([stdin_fd], [], [], 0.15)
-            if not r:
-                continue
-
-        try:
-            line = sys.stdin.readline()
-        except (KeyboardInterrupt, EOFError):
-            return None, "cancelled"
-        except Exception:
-            return None, "cancelled"
-
-        if not line:  # EOF
-            if proc.poll() is not None:
-                return None, "process_exited"
-            return None, "cancelled"
-
-        stripped = line.strip().replace("\r", "")
-        if not stripped:
-            if proc.poll() is not None:
-                return None, "process_exited"
-            print("\n⚠️ 输入为空，请输入有效的授权码：", end="", flush=True)
-            continue
-
-        code, _ = extract_code_from_input(stripped)
-        if not SAFE_AUTH_CODE_RE.match(code):
-            print("\n⚠️ 授权码格式不合法或包含非法字符，请重新输入：", end="", flush=True)
-            continue
-
-        return code, "ok"
-
-    return None, "timeout"
+    finally:
+        if old_term_attrs is not None and stdin_fd is not None:
+            try:
+                import termios
+                termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term_attrs)
+            except Exception:
+                pass
 
 
 def auth_login(agy: Path, home: Path, workspace: Path,
@@ -446,6 +501,10 @@ def auth_login(agy: Path, home: Path, workspace: Path,
             close_fds=True,
             start_new_session=True,
         )
+        try:
+            proc._agy_pgid = os.getpgid(proc.pid)
+        except (ProcessLookupError, OSError):
+            proc._agy_pgid = proc.pid
     finally:
         os.close(slave)
 
@@ -472,10 +531,16 @@ def auth_login(agy: Path, home: Path, workspace: Path,
             if not url_shown:
                 match = re.search(r'https://accounts\.google\.com/[^\s\x1b\r\n]+', buffer)
                 if match:
-                    url = match.group(0)
-                    print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
-                    print(f"  {highlight_url(url)}\n")
-                    url_shown = True
+                    is_complete = (
+                        match.end() < len(buffer)
+                        or proc.poll() is not None
+                        or any(p in buffer.lower() for p in ("paste the authorization code", "paste the code", "authorization code:"))
+                    )
+                    if is_complete:
+                        url = match.group(0)
+                        print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
+                        print(f"  {highlight_url(url)}\n")
+                        url_shown = True
 
             low = buffer.lower()
             if not waiting_shown and "waiting for authentication" in low:
@@ -490,6 +555,14 @@ def auth_login(agy: Path, home: Path, workspace: Path,
                 if any(p in buffer.lower() for p in ("paste the authorization code", "paste the code", "authorization code:")):
                     auth_prompted = True
                 break
+
+        if not url_shown:
+            match = re.search(r'https://accounts\.google\.com/[^\s\x1b\r\n]+', buffer)
+            if match:
+                url = match.group(0)
+                print("\n🔐 需要进行 Google 账号授权，请在浏览器中打开下方网址登录：\n")
+                print(f"  {highlight_url(url)}\n")
+                url_shown = True
 
         if not auth_prompted:
             buffer += drain_pty(master)

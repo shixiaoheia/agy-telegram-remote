@@ -1,10 +1,11 @@
 import asyncio
 import os
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 try:
     from .common import settings_at
@@ -25,13 +26,14 @@ def update(text, user=12345, chat_type="private", update_id=1):
         },
     }
 
-def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int = 12345) -> dict:
+def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int | None = None) -> dict:
+    actual_chat_id = user if chat_id is None else chat_id
     return {
         "update_id": 1,
         "callback_query": {
             "id": cq_id,
             "from": {"id": user, "is_bot": False},
-            "message": {"chat": {"id": chat_id, "type": "private"}},
+            "message": {"chat": {"id": actual_chat_id, "type": "private"}},
             "data": data,
         }
     }
@@ -906,3 +908,133 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         # 3. Try changing mode
         await self.bridge.handle(callback_update("mode:plan", user=98765, cq_id="cq_unauth_3"))
         self.assertEqual(self.api.answered_callbacks[-1], ("cq_unauth_3", "⚠️ 无操作权限", True))
+
+    async def test_callback_query_security_checks(self):
+        # 1. Group chat rejected
+        group_cq = {
+            "update_id": 2,
+            "callback_query": {
+                "id": "cq_group_1",
+                "from": {"id": 12345, "is_bot": False},
+                "message": {"chat": {"id": 12345, "type": "group"}},
+                "data": "effort:high",
+            }
+        }
+        await self.bridge.handle(group_cq)
+        self.assertEqual(self.api.answered_callbacks[-1], ("cq_group_1", "⚠️ 仅支持私聊操作", True))
+
+        # 2. Mismatched chat owner rejected
+        mismatched_cq = {
+            "update_id": 3,
+            "callback_query": {
+                "id": "cq_mismatch_1",
+                "from": {"id": 12345, "is_bot": False},
+                "message": {"chat": {"id": 67890, "type": "private"}},
+                "data": "effort:high",
+            }
+        }
+        await self.bridge.handle(mismatched_cq)
+        self.assertEqual(self.api.answered_callbacks[-1], ("cq_mismatch_1", "⚠️ 仅支持私聊操作", True))
+
+        # 3. Missing message source rejected
+        no_msg_cq = {
+            "update_id": 4,
+            "callback_query": {
+                "id": "cq_nomsg_1",
+                "from": {"id": 12345, "is_bot": False},
+                "data": "effort:high",
+            }
+        }
+        await self.bridge.handle(no_msg_cq)
+        self.assertEqual(self.api.answered_callbacks[-1], ("cq_nomsg_1", "⚠️ 无效的消息来源", True))
+
+    async def test_reset_during_running_task_race_condition(self):
+        from agy_runner import Result
+        self.store.set_conversation(12345, "conv-old", 1)
+        self.assertIsNotNone(self.store.get_conversation(12345))
+
+        # Create job that simulates in-flight execution
+        from bot import Job
+        job = Job(12345, 12345, conversation_id="conv-old")
+        self.bridge.slot = job
+
+        # While job is running, user sends /reset
+        await self.bridge.handle(update("/reset", user=12345))
+        await self.bridge.reply_worker
+        self.assertTrue(job.reset_requested)
+        self.assertIsNone(self.store.get_conversation(12345))
+
+        # Job completes with a new conversation id
+        fake_result = Result(
+            outcome="success", text="Done.", detail="",
+            conversation_id="conv-new-generated", num_turns=2,
+        )
+        self.runner.run = AsyncMock(return_value=fake_result)
+        await self.bridge._work(job, "Do something")
+
+        # Crucial assertion: conv-new-generated must NOT have been written to store!
+        self.assertIsNone(self.store.get_conversation(12345))
+
+    async def test_whitelist_remove_cancels_in_flight_task_and_drops_result(self):
+        from agy_runner import Result
+        # 1. Add user 77777 to dynamic whitelist
+        self.store.add_whitelist(77777)
+        self.assertTrue(self.bridge._is_allowed(77777))
+
+        # 2. User 77777 has a running task
+        from bot import Job
+        job = Job(77777, 77777)
+        self.bridge.slot = job
+
+        # 3. Admin removes user 77777
+        await self.bridge.handle(update("/whitelist remove 77777", user=12345))
+        await self.bridge.reply_worker
+        self.assertTrue(job.cancel.is_set())
+        self.assertTrue(getattr(job, "cancelled_by_unwhitelist", False))
+        self.assertFalse(self.bridge._is_allowed(77777))
+
+        # 4. In-flight worker finishes
+        fake_result = Result(outcome="success", text="Confidential output.")
+        self.runner.run = AsyncMock(return_value=fake_result)
+        initial_msg_count = len(self.api.messages)
+        await self.bridge._work(job, "Work")
+
+        # Result is NOT delivered to user 77777
+        delivered_to_target = any(chat == 77777 and "Confidential" in text for chat, text, _ in self.api.messages[initial_msg_count:])
+        self.assertFalse(delivered_to_target)
+
+    async def test_restart_lifecycle_blocks_new_tasks_and_waits_worker(self):
+        from bot import get_restart_argv, Job
+        # 1. get_restart_argv preserves -E -s -B
+        with patch("sys.orig_argv", ["/usr/bin/python3", "-E", "-s", "-B", "bot.py"]):
+            args = get_restart_argv()
+            self.assertEqual(args[:4], [sys.executable, "-E", "-s", "-B"])
+
+        # 2. While restarting is active, new tasks are rejected
+        self.bridge.restarting = True
+        await self.bridge.handle(update("Hello new task", user=12345))
+        await self.bridge.reply_worker
+        self.assertIn("守护进程正在重启中，暂不接收新任务", self.api.messages[-1][1])
+        self.assertIsNone(self.bridge.slot)
+        self.bridge.restarting = False
+
+        # 3. /restart while cancelling waits for worker before execv
+        worker_finished = False
+
+        async def fake_worker():
+            nonlocal worker_finished
+            await asyncio.sleep(0.1)
+            worker_finished = True
+
+        job = Job(12345, 12345)
+        job.cancel.set()
+        job.worker = asyncio.create_task(fake_worker())
+        self.bridge.slot = job
+
+        with patch("bot.os.execv") as mock_execv:
+            await self.bridge.handle(update("/restart", user=12345))
+            await self.bridge.reply_worker
+            self.assertIn("正在等待已取消任务", self.api.messages[-1][1])
+            await asyncio.sleep(1.0)
+            self.assertTrue(worker_finished)
+            mock_execv.assert_called_once()

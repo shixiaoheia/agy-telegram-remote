@@ -182,6 +182,11 @@ rollback() {
     else
       rm -f -- "$CONFIG"
     fi
+    if [[ -f "$BACKUP/current_commit" ]]; then
+      cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"
+    else
+      rm -f -- "$CONFIG_DIR/current_commit"
+    fi
   fi
   if [[ "$UNIT_CHANGED" == 1 ]]; then
     if [[ -f "$BACKUP/service" ]]; then
@@ -200,8 +205,11 @@ rollback() {
     systemctl restart "$SERVICE" || echo '旧服务恢复启动失败，请人工检查。' >&2
   fi
   if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
-    mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
-    TOKEN_BACKUP=
+    if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
+      TOKEN_BACKUP=
+    else
+      echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+    fi
   fi
   echo '已尝试回退；依赖安装、Google 登录及已经发生的任务修改不会被撤销。' >&2
 }
@@ -211,8 +219,11 @@ on_exit() {
   trap - EXIT INT TERM
   set +e
   if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
-    mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
-    TOKEN_BACKUP=
+    if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
+      TOKEN_BACKUP=
+    else
+      echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+    fi
   fi
   if [[ "$TRANSACTION" == 1 && "$COMMITTED" == 0 ]]; then
     rollback
@@ -378,6 +389,7 @@ main() {
   BACKUP="$(mktemp -d "$BACKUPS/deploy-XXXXXXXX")"
   [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/config.env"
   [[ ! -f "$UNIT" ]] || cp -p -- "$UNIT" "$BACKUP/service"
+  [[ ! -f "$CONFIG_DIR/current_commit" ]] || cp -p -- "$CONFIG_DIR/current_commit" "$BACKUP/current_commit"
   OLD_ACTIVE=0
   OLD_ENABLED=0
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
@@ -469,13 +481,19 @@ _ONBOARDING_EOF
     TOKEN_BACKUP="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token.bak.$$"
     # 仅在确认需要授权或显式重授时，暂时移开旧凭据文件以获取全新授权链接
     if [[ -f "$TOKEN_ORIGINAL" ]]; then
-      mv -f -- "$TOKEN_ORIGINAL" "$TOKEN_BACKUP" 2>/dev/null || rm -f -- "$TOKEN_ORIGINAL"
+      if ! mv -f -- "$TOKEN_ORIGINAL" "$TOKEN_BACKUP"; then
+        TOKEN_BACKUP=
+        fail "凭据备份失败：无法将旧凭据移动至备份路径，已保留原件，安装中止。"
+      fi
     fi
     as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
     if [[ "$auth_rc" -ne 0 ]]; then
-      if [[ -f "$TOKEN_BACKUP" ]]; then
-        mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
-        TOKEN_BACKUP=
+      if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" ]]; then
+        if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
+          TOKEN_BACKUP=
+        else
+          echo "❌ 凭据恢复失败：无法将备份还原至 $TOKEN_ORIGINAL。备份文件保留在：$TOKEN_BACKUP" >&2
+        fi
       fi
       fail 'Google 账号授权未完成或失败。'
     fi
@@ -511,7 +529,6 @@ _ONBOARDING_EOF
   mv -- "$STAGE" "$release"
   STAGE=
   echo "$commit" > "$release/.commit"
-  echo "$commit" > "$CONFIG_DIR/current_commit" 2>/dev/null || true
   SWITCHED=1
   if [[ -d "$APP" && ! -L "$APP" ]]; then
     LEGACY="$BACKUP/legacy-app"
@@ -519,6 +536,7 @@ _ONBOARDING_EOF
   fi
   ln -s -- "$release" "$APP.next.$$"
   mv -Tf -- "$APP.next.$$" "$APP"
+  echo "$commit" > "$CONFIG_DIR/current_commit" 2>/dev/null || true
   CONFIG_CHANGED=1
   mv -f -- "$CANDIDATE" "$CONFIG"
   CANDIDATE=
