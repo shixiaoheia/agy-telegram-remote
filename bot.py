@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import html
 import logging
 import os
 import re
@@ -58,6 +59,75 @@ def clean_model_reply(text: str) -> str:
         line = re.sub(r"(?<!\w)(\*{1,3}|_{1,3})(?=\S)(.+?)(?<=\S)\1", r"\2", line)
         line = re.sub(r"^\s*>\s?", "│ ", line)
         lines.append(line)
+    return "\n".join(lines).strip()
+
+
+INLINE_MARKDOWN = re.compile(
+    r"\[([^\]\n]+)]\((https?://[^\s)]+)\)|`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|"
+    r"~~([^~\n]+)~~|(?<!\w)\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_"
+)
+
+
+def render_inline_markdown(text: str) -> str:
+    """Render the small, safe Markdown subset supported by Telegram HTML."""
+    result: list[str] = []
+    cursor = 0
+    for match in INLINE_MARKDOWN.finditer(text):
+        result.append(html.escape(text[cursor:match.start()]))
+        link, href, code, bold1, bold2, strike, italic1, italic2 = match.groups()
+        if link is not None:
+            result.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(link)}</a>')
+        elif code is not None:
+            result.append(f"<code>{html.escape(code)}</code>")
+        elif bold1 is not None or bold2 is not None:
+            result.append(f"<b>{html.escape(bold1 if bold1 is not None else bold2)}</b>")
+        elif strike is not None:
+            result.append(f"<s>{html.escape(strike)}</s>")
+        else:
+            result.append(f"<i>{html.escape(italic1 if italic1 is not None else italic2)}</i>")
+        cursor = match.end()
+    result.append(html.escape(text[cursor:]))
+    return "".join(result)
+
+
+def render_markdown_html(text: str) -> str:
+    """Convert common model Markdown to Telegram's conservative HTML subset."""
+    lines: list[str] = []
+    code_lines: list[str] = []
+    code_language = ""
+    in_code_block = False
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        fence = re.match(r"^\s*```([A-Za-z0-9_+-]{0,32})\s*$", raw_line)
+        if fence:
+            if in_code_block:
+                language = f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
+                lines.append(f"<pre><code{language}>{html.escape(chr(10).join(code_lines))}</code></pre>")
+                code_lines = []
+                code_language = ""
+                in_code_block = False
+            else:
+                code_language = fence.group(1)
+                in_code_block = True
+            continue
+        if in_code_block:
+            code_lines.append(raw_line)
+            continue
+        heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", raw_line)
+        bullet = re.match(r"^\s*[-*+]\s+(.+)$", raw_line)
+        quote = re.match(r"^\s*>\s?(.*)$", raw_line)
+        if heading:
+            lines.append(f"<b>{render_inline_markdown(heading.group(1))}</b>")
+        elif bullet:
+            lines.append(f"• {render_inline_markdown(bullet.group(1))}")
+        elif quote:
+            lines.append(f"│ {render_inline_markdown(quote.group(1))}")
+        elif raw_line.strip() in {"---", "***", "___"}:
+            lines.append("")
+        else:
+            lines.append(render_inline_markdown(raw_line))
+    if in_code_block:
+        language = f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
+        lines.append(f"<pre><code{language}>{html.escape(chr(10).join(code_lines))}</code></pre>")
     return "\n".join(lines).strip()
 
 
@@ -127,6 +197,16 @@ def describe(record: dict) -> str:
         parts.append("ℹ️ 没有自动重跑任务。请先核对工作目录；/last 只取回记录，不重新执行。")
 
     return "\n\n".join(parts)
+
+
+def describe_html(record: dict) -> str:
+    """Render an agy result as Telegram HTML without trusting model-provided tags."""
+    if not record.get("text"):
+        return html.escape(describe(record))
+    marker = "AGY_MODEL_REPLY_MARKER"
+    plain = dict(record)
+    plain["text"] = marker
+    return html.escape(describe(plain)).replace(marker, render_markdown_html(str(record["text"])))
 
 
 def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
@@ -306,12 +386,25 @@ class Bridge:
             LOG.warning("telegram_delivery_failed code=%s", error.code)
             return False
 
-    def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None) -> None:
+    async def send_html(self, chat: int, text: str) -> bool:
+        # HTML must not be split mid-tag. Long replies fall back to readable plain text.
+        if len(text.encode("utf-16-le")) // 2 > 3500:
+            return await self.send_text(chat, clean_model_reply(re.sub(r"<[^>]+>", "", text)))
+        try:
+            await self.api.send(chat, text, parse_mode="HTML")
+            return True
+        except (TelegramError, TypeError) as error:
+            if isinstance(error, TelegramError):
+                LOG.warning("telegram_html_delivery_failed code=%s", error.code)
+            return await self.send_text(chat, clean_model_reply(re.sub(r"<[^>]+>", "", text)))
+
+    def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None,
+                    html_mode: bool = False) -> None:
         # Control replies must never hold up update ingestion or cancellation.
         if self.stop.is_set():
             return
         try:
-            self.replies.put_nowait((chat, text, reply_markup))
+            self.replies.put_nowait((chat, text, reply_markup, html_mode))
         except asyncio.QueueFull:
             return
         if self.reply_worker is None or self.reply_worker.done():
@@ -320,13 +413,17 @@ class Bridge:
     async def _send_replies(self) -> None:
         while not self.replies.empty():
             item = self.replies.get_nowait()
-            if len(item) == 3:
-                chat, text, reply_markup = item
+            if len(item) == 4:
+                chat, text, reply_markup, html_mode = item
             else:
                 chat, text = item
                 reply_markup = None
+                html_mode = False
             try:
-                await self.send_text(chat, text, reply_markup=reply_markup)
+                if html_mode:
+                    await self.send_html(chat, text)
+                else:
+                    await self.send_text(chat, text, reply_markup=reply_markup)
             finally:
                 self.replies.task_done()
 
@@ -420,7 +517,7 @@ class Bridge:
             )
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
             await self._finish_progress(job, result.outcome)
-            delivered = await self.send_text(job.chat, describe(record))
+            delivered = await self.send_html(job.chat, describe_html(record))
             self.store.save(job.user, record | {
                 "delivery": "sent" if delivered else "failed_or_partial"
             })
@@ -704,7 +801,10 @@ class Bridge:
         if command == "/last":
             try:
                 record = self.store.load(user)
-                text = describe(record) if record else "ℹ️ 没有可取回的结果，或记录已过保留期。"
+                if record:
+                    self.queue_reply(chat_id, describe_html(record), html_mode=True)
+                    return
+                text = "ℹ️ 没有可取回的结果，或记录已过保留期。"
             except (OSError, ValueError):
                 text = "⚠️ 无法读取最近结果，请检查服务器状态。"
             self.queue_reply(chat_id, text)

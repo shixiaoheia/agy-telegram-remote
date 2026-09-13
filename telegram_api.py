@@ -63,7 +63,8 @@ class TelegramAPI:
     async def call(self, method: str, **payload) -> object:
         return await asyncio.to_thread(self._request, method, payload)
 
-    async def send(self, chat_id: int, text: str, reply_markup: dict | None = None) -> object:
+    async def send(self, chat_id: int, text: str, reply_markup: dict | None = None,
+                   parse_mode: str | None = None) -> object:
         # Retry ONLY a definite 429 rejection, not an ambiguous network failure.
         payload: dict[str, object] = {
             "chat_id": chat_id,
@@ -72,6 +73,8 @@ class TelegramAPI:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         for attempt in range(3):
             try:
                 return await self.call("sendMessage", **payload)

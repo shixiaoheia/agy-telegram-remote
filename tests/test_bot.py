@@ -11,7 +11,7 @@ try:
 except ImportError:
     from common import settings_at
 from agy_runner import Result
-from bot import Bridge, describe
+from bot import Bridge, describe, describe_html
 from state_store import Store
 from telegram_api import TelegramError
 
@@ -46,14 +46,16 @@ class FakeAPI:
         self.accept_gate = None
         self.answered_callbacks = []
         self.calls = []
+        self.parse_modes = []
 
-    async def send(self, chat_id, text, reply_markup=None):
+    async def send(self, chat_id, text, reply_markup=None, parse_mode=None):
         self.sent_count += 1
         if self.accept_gate and self.sent_count == 1:
             await self.accept_gate.wait()
         if self.sent_count in self.fail_at:
             raise TelegramError()
         self.messages.append((chat_id, text, reply_markup))
+        self.parse_modes.append(parse_mode)
         return {"message_id": self.sent_count}
 
     async def edit(self, chat_id, message_id, text, reply_markup=None):
@@ -432,6 +434,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("**", text)
         self.assertNotIn("```", text)
         self.assertIn("# 保留代码注释", text)
+
+    async def test_result_renders_markdown_as_telegram_html(self):
+        rich = describe_html({
+            "outcome": "success",
+            "text": "## 标题\n\n- **重点** 与 *强调*\n\n[文档](https://example.com)\n\n```python\n# 代码注释\n```",
+        })
+        self.assertIn("<b>标题</b>", rich)
+        self.assertIn("• <b>重点</b> 与 <i>强调</i>", rich)
+        self.assertIn('<a href="https://example.com">文档</a>', rich)
+        self.assertIn("<pre><code class=\"language-python\"># 代码注释</code></pre>", rich)
+
+    async def test_task_result_uses_telegram_html(self):
+        self.runner.result = Result("success", text="# 标题\n\n**加粗内容**")
+        await self.handle(update("format this"))
+        await self.finish_job()
+        self.assertEqual(self.api.parse_modes[-1], "HTML")
+        self.assertIn("<b>标题</b>", self.api.messages[-1][1])
 
     async def test_model_command_highlights_current_model(self):
         self.store.set_model(12345, "claude-sonnet-4-6")
