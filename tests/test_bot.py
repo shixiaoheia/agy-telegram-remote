@@ -54,6 +54,15 @@ class FakeAPI:
         if self.sent_count in self.fail_at:
             raise TelegramError()
         self.messages.append((chat_id, text, reply_markup))
+        return {"message_id": self.sent_count}
+
+    async def edit(self, chat_id, message_id, text, reply_markup=None):
+        self.messages.append((chat_id, text, reply_markup))
+        return True
+
+    async def set_commands(self, commands):
+        self.calls.append(("setMyCommands", {"commands": commands}))
+        return True
 
     async def answer_callback_query(self, callback_query_id: str, text: str = "", show_alert: bool = False):
         self.answered_callbacks.append((callback_query_id, text, show_alert))
@@ -444,6 +453,21 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("model:claude-sonnet-4-6", buttons)
         self.assertIn("model:default", buttons)
 
+    async def test_task_acceptance_has_cancel_button_and_hides_internal_id(self):
+        self.runner.hold = True
+        await self.handle(update("long running task"))
+        await self.runner.started.wait()
+        text, keyboard = self.api.messages[0][1:]
+        self.assertNotIn(self.bridge.slot.job_id, text)
+        self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "🛑 取消任务")
+        await self.handle(callback_update(f"cancel:{self.bridge.slot.job_id}"))
+        self.assertTrue(self.bridge.slot.cancel.is_set())
+
+    async def test_initialize_registers_telegram_command_menu(self):
+        await self.bridge.initialize()
+        command_call = next(payload for method, payload in self.api.calls if method == "setMyCommands")
+        self.assertIn({"command": "cancel", "description": "取消正在执行的任务"}, command_call["commands"])
+
     async def test_callback_query_switches_model_and_answers(self):
         await self.handle(callback_update("model:claude-opus-4-6-thinking", cq_id="cq_opus"))
         self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
@@ -687,21 +711,17 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CPU 负载", text)
         self.assertIn("Python 版本", text)
 
-    async def test_effort_command_and_callback(self):
-        # 1. View effort menu
-        await self.bridge.handle(update("/effort"))
+    async def test_model_flow_shows_effort_picker_and_callback(self):
+        await self.bridge.handle(update("/model"))
         await self.bridge.reply_worker
         self.assertEqual(len(self.api.messages), 1)
-        self.assertIn("思考强度调节", self.api.messages[0][1])
         self.assertIsNotNone(self.api.messages[0][2])
 
-        # 2. Change effort via command
-        await self.bridge.handle(update("/effort high"))
+        await self.bridge.handle(callback_update("model:gemini-3.8-flash-high", user=12345))
         await self.bridge.reply_worker
-        self.assertEqual(self.store.get_effort(12345), "high")
-        self.assertIn("已成功设置思考强度为：`High`", self.api.messages[-1][1])
+        self.assertIn("下一步：请选择该模型的思考强度", self.api.messages[-1][1])
+        self.assertIn("inline_keyboard", self.api.messages[-1][2])
 
-        # 3. Change effort via callback query
         await self.bridge.handle(callback_update("effort:low", user=12345))
         await self.bridge.reply_worker
         self.assertEqual(self.store.get_effort(12345), "low")

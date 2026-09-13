@@ -52,18 +52,20 @@ class Job:
     conversation_id: str = ""
     effort: str = ""
     mode: str = ""
+    started_at: float = field(default_factory=time.monotonic)
+    status_message_id: int | None = None
+    progress_task: asyncio.Task | None = None
 
 
 def describe(record: dict) -> str:
     outcome = str(record.get("outcome", "error"))
     title = LABELS.get(outcome, "结果需核对")
-    job_id = record.get("job_id", "-")
     model = record.get("model", "")
     model_tag = f"｜{model}" if model else ""
     duration = record.get("duration_seconds")
     duration_tag = f"｜⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
 
-    parts = [f"{title}｜任务 {job_id}{model_tag}{duration_tag}"]
+    parts = [f"{title}{model_tag}{duration_tag}"]
     parts.append("━━━━━━━━━━━━━━━━━━━━")
 
     if record.get("text"):
@@ -323,11 +325,20 @@ class Bridge:
                 conv_tag = "\n🧠 会话记忆：全新独立会话"
 
             accept_msg = (
-                f"🚀 任务 {job.job_id} 已接收{model_info}，准备调用 agy。\n"
+                f"🚀 已接收任务{model_info}，准备调用 agy。\n"
                 f"━━━━━━━━━━━━━━━━━━━━{conv_tag}{effort_info}{mode_info}\n"
-                f"⏳ 正在调用 Antigravity 执行任务，请稍候..."
+                f"⏳ 正在调用 Antigravity 执行任务，请稍候...\n\n"
+                f"进度会每 5 秒自动更新；需要停止时请点下方按钮。"
             )
-            accepted = await self.send_text(job.chat, accept_msg)
+            cancel_markup = {"inline_keyboard": [[{
+                "text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"
+            }]]}
+            try:
+                sent = await self.api.send(job.chat, accept_msg, reply_markup=cancel_markup)
+                job.status_message_id = sent.get("message_id") if isinstance(sent, dict) else None
+                accepted = True
+            except TelegramError:
+                accepted = False
             if not accepted or self.stop.is_set() or job.cancel.is_set():
                 self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
@@ -350,6 +361,7 @@ class Bridge:
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
+            job.progress_task = asyncio.create_task(self._refresh_progress(job))
             try:
                 result = await self.runner.run(
                     prompt, job.cancel, model=job.model or None,
@@ -387,6 +399,7 @@ class Bridge:
                 }
             )
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
+            await self._finish_progress(job, result.outcome)
             delivered = await self.send_text(job.chat, describe(record))
             self.store.save(job.user, record | {
                 "delivery": "sent" if delivered else "failed_or_partial"
@@ -406,8 +419,61 @@ class Bridge:
                 "已暂停新任务；请检查服务器。不要直接重复原任务。",
             )
         finally:
+            if job.progress_task:
+                job.progress_task.cancel()
+                await asyncio.gather(job.progress_task, return_exceptions=True)
             if self.slot is job:
                 self.slot = None
+
+    def _progress_text(self, job: Job) -> str:
+        elapsed = max(0, int(time.monotonic() - job.started_at))
+        state = "正在取消并清理进程..." if job.cancel.is_set() else "正在执行任务..."
+        return (f"⏳ {state}\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"• 已运行：{elapsed}s\n"
+                f"• 每 5 秒自动更新\n━━━━━━━━━━━━━━━━━━━━")
+
+    async def _refresh_progress(self, job: Job) -> None:
+        while not self.stop.is_set() and not job.cancel.is_set():
+            await asyncio.sleep(5)
+            if job.status_message_id is None or self.slot is not job:
+                continue
+            try:
+                await self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
+                    "inline_keyboard": [[{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}]]
+                })
+            except (TelegramError, AttributeError):
+                return
+
+    async def _finish_progress(self, job: Job, outcome: str) -> None:
+        if job.status_message_id is None:
+            return
+        try:
+            await self.api.edit(job.chat, job.status_message_id,
+                                f"{LABELS.get(outcome, '任务已结束')}｜已停止进度更新。")
+        except (TelegramError, AttributeError):
+            pass
+
+    def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
+        curr = self.store.get_effort(user)
+        lines = [
+            f"🎯 已选择模型：{model_label}",
+            "━━━━━━━━━━━━━━━━━━━━",
+            "下一步：请选择该模型的思考强度。",
+            "• ⚡ 极速：适合简单问答与快速修改",
+            "• ⚖️ 均衡：速度与推理深度兼顾",
+            "• 🧠 深度：适合复杂分析与大型重构",
+        ]
+        keyboard = {"inline_keyboard": [
+            [
+                {"text": f"{'🔘' if curr == 'low' else '⚪'} ⚡ 极速", "callback_data": "effort:low"},
+                {"text": f"{'🔘' if curr == 'medium' else '⚪'} ⚖️ 均衡", "callback_data": "effort:medium"},
+            ],
+            [
+                {"text": f"{'🔘' if curr == 'high' else '⚪'} 🧠 深度", "callback_data": "effort:high"},
+                {"text": f"{'🔘' if not curr else '⚪'} 🔄 默认", "callback_data": "effort:default"},
+            ],
+        ]}
+        self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
 
     async def handle_callback(self, cq: dict) -> None:
         cq_id = str(cq.get("id") or "")
@@ -423,13 +489,24 @@ class Bridge:
                 await self.api.answer_callback_query(cq_id, text="⚠️ 无操作权限", show_alert=True)
             return
 
+        if data.startswith("cancel:"):
+            job = self.slot
+            if job is not None and job.user == user and data == f"cancel:{job.job_id}":
+                job.cancel.set()
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="🛑 已请求取消")
+                self.queue_reply(chat_id, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。")
+            elif cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="该任务已结束或不可取消")
+            return
+
         if data.startswith("model:"):
             target = data[6:].strip()
             if target.lower() in {"default", "reset", "auto", "clear"}:
                 self.store.set_model(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text="🔄 已恢复为默认模型")
-                self.queue_reply(chat_id, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model")
+                self._show_effort_picker(chat_id, user, "默认（由 agy 决定）")
                 return
             resolved = resolve_model(target)
             if not MODEL_RE.fullmatch(resolved):
@@ -437,10 +514,9 @@ class Bridge:
                     await self.api.answer_callback_query(cq_id, text="⚠️ 模型名称格式错误", show_alert=True)
                 return
             self.store.set_model(user, resolved)
-            alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {resolved}")
-            self.queue_reply(chat_id, f"🎯 已切换模型为：`{resolved}`{alias_note}\n🚀 后续任务将使用此模型。")
+            self._show_effort_picker(chat_id, user, resolved)
             return
 
         if data.startswith("effort:"):
@@ -513,8 +589,7 @@ class Bridge:
                 "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
                 "💬 直接发送文字：向 AI 助手提问或分派任务\n\n"
                 "【🧠 模型与推理配置】\n"
-                "• 🧠 /model - 切换 AI 模型（支持 14 种模型与点击直切）\n"
-                "• ⚡ /effort - 调整思考强度（Low 极速 / Medium 均衡 / High 深度）\n"
+                "• 🧠 /model - 选择模型后继续选择思考强度\n"
                 "• 📋 /mode - 切换执行模式（Accept-Edits 落地 / Plan 推演规划）\n\n"
                 "【💬 会话与用量管理】\n"
                 "• 🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
@@ -588,7 +663,7 @@ class Bridge:
                 pass
             if self.slot and self.slot.user == user:
                 job_model = f"[{self.slot.model}] " if self.slot.model else ""
-                text = f"⏳ 任务 {self.slot.job_id}：{job_model}" + (
+                text = f"⏳ 当前任务：{job_model}" + (
                     "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
                 )
             elif self.runner.blocked:
@@ -689,7 +764,7 @@ class Bridge:
             if self.slot is not None and not self.slot.cancel.is_set():
                 self.queue_reply(
                     chat_id,
-                    f"⚠️ 当前有正在执行的任务（任务 {self.slot.job_id}），请等待其完成或先发送 /cancel 后再重启。"
+                    "⚠️ 当前有正在执行的任务，请等待其完成或先发送 /cancel 后再重启。"
                 )
                 return
             self.queue_reply(chat_id, "🔄 守护进程正在重新载入并启动，请稍候约 3-5 秒后发送 /status 验证……")
@@ -770,49 +845,6 @@ class Bridge:
                 return
 
             self.queue_reply(chat_id, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>")
-            return
-        if command == "/effort":
-            parts = text.split(maxsplit=1)
-            target = parts[1].strip().lower() if len(parts) > 1 else ""
-            if not target or target in {"show", "current", "list", "help"}:
-                curr = self.store.get_effort(user)
-                curr_display = f"{curr.capitalize()} 思考" if curr else "默认（跟随模型原生强度）"
-                lines = [
-                    f"⚡ 思考强度调节 ｜ 当前：{curr_display}",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "• ⚡ 极速 (Low)：低思考强度，响应迅速，适合简单问答与代码补全",
-                    "• ⚖️ 均衡 (Medium)：中等思考强度，平衡响应耗时与推理深度",
-                    "• 🧠 深度 (High)：高思考深度，最强复杂逻辑分析与大型重构",
-                    "• 🔄 默认 (Default)：恢复默认强度配置",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "💡 你可以点击下方按钮一键切换，或输入：/effort <low|medium|high|default>",
-                ]
-                keyboard = {
-                    "inline_keyboard": [
-                        [
-                            {"text": f"{'🔘' if curr == 'low' else '⚪'} ⚡ 极速 (Low)", "callback_data": "effort:low"},
-                            {"text": f"{'🔘' if curr == 'medium' else '⚪'} ⚖️ 均衡 (Med)", "callback_data": "effort:medium"},
-                        ],
-                        [
-                            {"text": f"{'🔘' if curr == 'high' else '⚪'} 🧠 深度 (High)", "callback_data": "effort:high"},
-                            {"text": f"{'🔘' if not curr else '⚪'} 🔄 恢复默认", "callback_data": "effort:default"},
-                        ],
-                    ]
-                }
-                self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
-                return
-
-            alias_map = {"低": "low", "中": "medium", "高": "high", "med": "medium"}
-            val = alias_map.get(target, target)
-            if val in {"default", "reset", "clear", "auto"}:
-                self.store.set_effort(user, None)
-                self.queue_reply(chat_id, "🔄 已恢复为默认思考强度配置（由模型或系统决定）。")
-                return
-            if val not in {"low", "medium", "high"}:
-                self.queue_reply(chat_id, "⚠️ 不支持的思考强度。可选值：`low` (极速), `medium` (均衡), `high` (深度), `default` (恢复默认)")
-                return
-            self.store.set_effort(user, val)
-            self.queue_reply(chat_id, f"🎯 已成功设置思考强度为：`{val.capitalize()}`\n🚀 后续任务将以此强度调用 agy。")
             return
         if command == "/mode":
             parts = text.split(maxsplit=1)
@@ -968,6 +1000,18 @@ class Bridge:
         me = await self.api.call("getMe")
         if not isinstance(me, dict) or me.get("is_bot") is not True:
             raise TelegramError()
+        try:
+            await self.api.set_commands([
+                {"command": "help", "description": "查看帮助与使用说明"},
+                {"command": "status", "description": "查看当前任务状态"},
+                {"command": "cancel", "description": "取消正在执行的任务"},
+                {"command": "model", "description": "选择 AI 模型"},
+                {"command": "new", "description": "新建对话并清除上下文"},
+                {"command": "usage", "description": "查看 Token 用量"},
+                {"command": "last", "description": "查看最近一次结果"},
+            ])
+        except (TelegramError, AttributeError):
+            LOG.warning("telegram_command_menu_unavailable")
         webhook = await self.api.call("getWebhookInfo")
         if not isinstance(webhook, dict) or webhook.get("url"):
             raise RuntimeError("An active webhook must be removed explicitly before polling")
