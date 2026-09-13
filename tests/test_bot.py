@@ -487,9 +487,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(update("check a safe task"))
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
+        self.assertEqual(self.runner.last_model, "claude-sonnet-4-6")
         self.assertIsNone(self.store.get_effort(12345))
         record = self.store.load(12345)
-        self.assertEqual(record.get("model"), "gemini-3.1-pro-high")
+        self.assertEqual(record.get("model"), "claude-sonnet-4-6")
 
     async def test_result_includes_duration_tag(self):
         record = {
@@ -626,7 +627,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_opus")
         self.assertIn("claude-opus-4-6-thinking", self.api.answered_callbacks[0][1])
         self.assertIn("已切换至：claude-opus-4-6-thinking｜思考强度：模型内置", self.api.messages[-1][1])
-        self.assertIsNone(self.api.messages[-1][2])
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
 
     async def test_callback_query_resets_model_default(self):
         self.store.set_model(12345, "claude-sonnet-4-6")
