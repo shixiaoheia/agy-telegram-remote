@@ -43,7 +43,7 @@ usage() {
  Antigravity Telegram Remote 安装与管理脚本
 =============================================
 用法：
-  bash install.sh                         显示管理菜单（安装/更新、卸载、退出）
+  bash install.sh                         显示管理菜单（安装、更新、彻底卸载、退出）
   bash install.sh --install               👑 极简 Root 模式安装/更新（直接以 root 运行）
   bash install.sh --root                  👑 极简 Root 模式安装/更新（快捷别名）
   bash install.sh --enable-auto-approve    更新时明确启用自动审批（跳过权限确认弹窗）
@@ -61,22 +61,25 @@ choose_operation() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 管理菜单'
   echo '============================================='
-  echo '  1) 安装 / 更新'
-  echo '  2) 卸载服务'
+  echo '  1) 安装'
+  echo '  2) 更新'
+  echo '  3) 彻底卸载（清除部署与配置）'
   echo '  0) 退出'
   echo
   while true; do
-    printf '请输入选项 [0/1/2]： '
+    printf '请输入选项 [0/1/2/3]： '
     if IFS= read -r choice; then
       case "$choice" in
         1) MODE=install; return 0 ;;
-        2) MODE=uninstall; return 0 ;;
+        # 安装和更新走同一套原子部署流程；更新会自动保留现有配置。
+        2) MODE=install; return 0 ;;
+        3) MODE=uninstall; PURGE=1; return 0 ;;
         0)
           MODE="exit"
           echo '已退出，未开始任何安装或卸载操作。'
           return 0
           ;;
-        *) echo '请输入 1、2 或 0，然后回车。' ;;
+        *) echo '请输入 1、2、3 或 0，然后回车。' ;;
       esac
     else
       rc=$?
@@ -272,6 +275,10 @@ main() {
   [[ "$MODE" != exit ]] || return 0
   if [[ "$EUID" -ne 0 ]]; then
     command -v sudo >/dev/null || fail '请使用 root 或具备 sudo 权限的账户。'
+    if [[ "$PURGE" == 1 ]]; then
+      exec sudo /usr/bin/env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
+        /bin/bash "$0" "${original_args[@]}" "--purge" "--$MODE"
+    fi
     exec sudo /usr/bin/env SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
       /bin/bash "$0" "${original_args[@]}" "--$MODE"
   fi

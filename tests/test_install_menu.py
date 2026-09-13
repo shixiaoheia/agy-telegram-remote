@@ -37,8 +37,8 @@ class InstallMenuTests(unittest.TestCase):
         self.assertNotIn("Token", r.stdout)
         self.assertNotIn("Google", r.stdout)
 
-    def test_uninstall_choice(self):
-        r = self.menu("2\n")
+    def test_purge_uninstall_choice(self):
+        r = self.menu("3\n")
         self.assertEqual(r.returncode, 0)
         self.assertIn("MODE=uninstall", r.stdout)
 
@@ -50,13 +50,13 @@ class InstallMenuTests(unittest.TestCase):
     def test_blank_reprompts_not_default_install(self):
         r = self.menu("\n0\n")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.count("[0/1/2]"), 2)
+        self.assertEqual(r.stdout.count("[0/1/2/3]"), 2)
         self.assertIn("MODE=exit", r.stdout)
 
     def test_invalid_reprompts(self):
-        r = self.menu("3\nwrong\n1\n")
+        r = self.menu("4\nwrong\n1\n")
         self.assertEqual(r.returncode, 0)
-        self.assertEqual(r.stdout.count("[0/1/2]"), 3)
+        self.assertEqual(r.stdout.count("[0/1/2/3]"), 3)
         self.assertIn("MODE=install", r.stdout)
 
     def test_eof_cancels(self):
@@ -80,7 +80,7 @@ class InstallMenuTests(unittest.TestCase):
                            capture_output=True, text=True, timeout=5)
         self.assertEqual(r.returncode, 0)
         self.assertIn("--install", r.stdout)
-        self.assertNotIn("[0/1/2]", r.stdout)
+        self.assertNotIn("[0/1/2/3]", r.stdout)
 
     def run_main_until_privilege_boundary(self, args=(), text=""):
         # Stop at the privilege/deploy boundary, before any real system operation.
@@ -94,7 +94,7 @@ source "$1"
 export PATH="$2:$PATH"
 shift 2
 acquire_deploy_lock() {
-  printf 'BOUNDARY mode=%s auto=%s reauth=%s ref=%s\n' "$MODE" "$ENABLE_AUTO" "$REAUTH" "$REF"
+  printf 'BOUNDARY mode=%s purge=%s auto=%s reauth=%s ref=%s\n' "$MODE" "$PURGE" "$ENABLE_AUTO" "$REAUTH" "$REF"
   exit 88
 }
 main "$@"
@@ -152,58 +152,64 @@ main "$@"
     def test_main_one_routes_install_once(self):
         rc, output = self.run_main_until_privilege_boundary(text="1\n")
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertEqual(output.count("[0/1/2]"), 1)
+        self.assertEqual(output.count("[0/1/2/3]"), 1)
 
-    def test_main_two_routes_uninstall_once(self):
+    def test_main_two_routes_update_once(self):
         rc, output = self.run_main_until_privilege_boundary(text="2\n")
+        self.assert_mode_at_boundary(rc, output, "install")
+        self.assertEqual(output.count("[0/1/2/3]"), 1)
+
+    def test_main_three_routes_purge_uninstall_once(self):
+        rc, output = self.run_main_until_privilege_boundary(text="3\n")
         self.assert_mode_at_boundary(rc, output, "uninstall")
-        self.assertEqual(output.count("[0/1/2]"), 1)
+        self.assertIn("purge=1" if os.geteuid() == 0 else "<--purge>", output)
+        self.assertEqual(output.count("[0/1/2/3]"), 1)
 
     def test_main_explicit_install_skips_menu(self):
         rc, output = self.run_main_until_privilege_boundary(("--install",))
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
 
     def test_main_explicit_uninstall_skips_menu(self):
         rc, output = self.run_main_until_privilege_boundary(("--uninstall",))
         self.assert_mode_at_boundary(rc, output, "uninstall")
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
 
     def test_main_auto_approve_shortcut_preserved(self):
         rc, output = self.run_main_until_privilege_boundary(("--enable-auto-approve",))
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
         self.assertIn("auto=1" if os.geteuid() == 0 else "<--enable-auto-approve>", output)
 
     def test_main_reauth_shortcut_preserved(self):
         rc, output = self.run_main_until_privilege_boundary(("--reauth",))
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
         self.assertIn("reauth=1" if os.geteuid() == 0 else "<--reauth>", output)
 
     def test_main_ref_main_shortcut_preserved(self):
         rc, output = self.run_main_until_privilege_boundary(("--ref", "main"))
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
 
     def test_main_purge_without_uninstall_still_rejected(self):
         rc, output = self.run_main_until_privilege_boundary(("--purge",))
         self.assertNotEqual(rc, 0)
         self.assertNotIn("BOUNDARY", output)
         self.assertNotIn("FAKE_SUDO", output)
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
 
     def test_main_confirmed_purge_route_keeps_uninstall(self):
         rc, output = self.run_main_until_privilege_boundary(("--uninstall", "--purge"))
         self.assert_mode_at_boundary(rc, output, "uninstall")
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
 
     def test_unknown_flag_rejected_before_menu(self):
         rc, output = self.run_main_until_privilege_boundary(("--unknown",))
         self.assertNotEqual(rc, 0)
         self.assertNotIn("BOUNDARY", output)
         self.assertNotIn("FAKE_SUDO", output)
-        self.assertNotIn("[0/1/2]", output)
+        self.assertNotIn("[0/1/2/3]", output)
 
 
 class WizardOrderTests(unittest.TestCase):
