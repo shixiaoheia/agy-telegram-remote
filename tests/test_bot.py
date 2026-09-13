@@ -886,7 +886,8 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
     async def test_gemini_reasoning_buttons_switch_catalog_variant_without_cli_effort(self):
         self.store.set_model(12345, "gemini-3.7-flash-high")
         await self.bridge.handle(callback_update("effort:medium", user=12345))
-        await self.bridge.reply_worker
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
         self.assertEqual(self.store.get_model(12345), "gemini-3.7-flash-medium")
         self.assertIsNone(self.store.get_effort(12345))
         self.assertIn("思考强度：均衡", self.api.messages[-1][1])
