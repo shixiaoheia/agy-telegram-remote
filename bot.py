@@ -393,10 +393,15 @@ class Bridge:
         try:
             await self.api.send(chat, text, parse_mode="HTML")
             return True
-        except (TelegramError, TypeError) as error:
-            if isinstance(error, TelegramError):
-                LOG.warning("telegram_html_delivery_failed code=%s", error.code)
+        except TypeError:
             return await self.send_text(chat, clean_model_reply(re.sub(r"<[^>]+>", "", text)))
+        except TelegramError as error:
+            LOG.warning("telegram_html_delivery_failed code=%s", error.code)
+            # A malformed model fragment may be rejected by Telegram HTML parsing.
+            # Only that definite client-side failure safely falls back to plain text.
+            if error.code == 400:
+                return await self.send_text(chat, clean_model_reply(re.sub(r"<[^>]+>", "", text)))
+            return False
 
     def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None,
                     html_mode: bool = False) -> None:
