@@ -48,6 +48,11 @@ SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".sql", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb", ".xml", ".csv",
 })
 FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
+# Claude and GPT-OSS expose a fixed reasoning profile in agy. Passing --effort
+# for them is rejected by the CLI, so never offer a broken selector.
+EFFORT_UNSUPPORTED_MODELS = frozenset({
+    "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
+})
 
 
 def clean_model_reply(text: str) -> str:
@@ -296,6 +301,16 @@ def history_summary(records: list[dict]) -> tuple[str, dict | None]:
             keyboard.append([{"text": label, "callback_data": f"history:{job_id}"}])
     lines.append("━━━━━━━━━━━━━━━━━━━━\n点击下方任务可查看完整结果。")
     return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
+
+
+def supports_effort(model: str) -> bool:
+    return not model or model not in EFFORT_UNSUPPORTED_MODELS
+
+
+def effort_label(effort: str | None, model: str) -> str:
+    if not supports_effort(model):
+        return "模型内置"
+    return {"low": "极速", "medium": "均衡", "high": "深度"}.get(effort or "", "默认")
 
 
 def describe(record: dict) -> str:
@@ -782,7 +797,7 @@ class Bridge:
             except OSError:
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
-    def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
+    def _effort_picker(self, user: int, model_label: str) -> tuple[str, dict]:
         curr = self.store.get_effort(user)
         lines = [
             f"🎯 已选择模型：{model_label}",
@@ -802,7 +817,23 @@ class Bridge:
                 {"text": f"{'🔘' if not curr else '⚪'} 🔄 默认", "callback_data": "effort:default"},
             ],
         ]}
-        self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
+        return "\n".join(lines), keyboard
+
+    def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
+        text, keyboard = self._effort_picker(user, model_label)
+        self.queue_reply(chat_id, text, reply_markup=keyboard)
+
+    async def _collapse_selector(self, chat_id: int, message: dict, text: str,
+                                 reply_markup: dict | None = None) -> bool:
+        message_id = message.get("message_id")
+        if type(message_id) is not int or message_id <= 0:
+            return False
+        try:
+            await self.api.edit(chat_id, message_id, text,
+                                reply_markup=reply_markup if reply_markup is not None else {"inline_keyboard": []})
+            return True
+        except (TelegramError, AttributeError):
+            return False
 
     async def handle_callback(self, cq: dict) -> None:
         cq_id = str(cq.get("id") or "")
@@ -844,7 +875,9 @@ class Bridge:
                 self.store.set_model(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text="🔄 已恢复为默认模型")
-                self._show_effort_picker(chat_id, user, "默认（由 agy 决定）")
+                picker, keyboard = self._effort_picker(user, "默认（由 agy 决定）")
+                if not await self._collapse_selector(chat_id, message, picker, keyboard):
+                    self._show_effort_picker(chat_id, user, "默认（由 agy 决定）")
                 return
             resolved = resolve_model(target)
             if not MODEL_RE.fullmatch(resolved):
@@ -852,24 +885,46 @@ class Bridge:
                     await self.api.answer_callback_query(cq_id, text="⚠️ 模型名称格式错误", show_alert=True)
                 return
             self.store.set_model(user, resolved)
+            if not supports_effort(resolved):
+                self.store.set_effort(user, None)
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {resolved}")
-            self._show_effort_picker(chat_id, user, resolved)
+            if not supports_effort(resolved):
+                collapsed = f"✅ 已切换至：{resolved}｜思考强度：模型内置"
+                if not await self._collapse_selector(chat_id, message, collapsed):
+                    self.queue_reply(chat_id, collapsed)
+                return
+            picker, keyboard = self._effort_picker(user, resolved)
+            if not await self._collapse_selector(chat_id, message, picker, keyboard):
+                self._show_effort_picker(chat_id, user, resolved)
             return
 
         if data.startswith("effort:"):
             target = data[7:].strip().lower()
+            model = self.store.get_model(user) or self.settings.model or ""
+            if not supports_effort(model):
+                self.store.set_effort(user, None)
+                collapsed = f"✅ 已切换至：{model}｜思考强度：模型内置"
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="该模型使用内置思考强度")
+                if not await self._collapse_selector(chat_id, message, collapsed):
+                    self.queue_reply(chat_id, collapsed)
+                return
             if target in {"default", "reset", "clear"}:
                 self.store.set_effort(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text="🔄 已恢复默认思考强度")
-                self.queue_reply(chat_id, "🔄 已恢复为默认思考强度。")
+                collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：默认"
+                if not await self._collapse_selector(chat_id, message, collapsed):
+                    self.queue_reply(chat_id, collapsed)
                 return
             if target in {"low", "medium", "high"}:
                 self.store.set_effort(user, target)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text=f"🎯 已设置思考强度为: {target.capitalize()}")
-                self.queue_reply(chat_id, f"🎯 已切换思考强度为：`{target.capitalize()}`\n🚀 后续任务将以此强度调用 agy。")
+                collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：{effort_label(target, model)}"
+                if not await self._collapse_selector(chat_id, message, collapsed):
+                    self.queue_reply(chat_id, collapsed)
                 return
 
         if data.startswith("mode:"):
@@ -1122,6 +1177,10 @@ class Bridge:
                 return
             self.store.set_model(user, resolved)
             alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
+            if not supports_effort(resolved):
+                self.store.set_effort(user, None)
+                self.queue_reply(chat_id, f"✅ 已切换至：{resolved}｜思考强度：模型内置")
+                return
             self._show_effort_picker(chat_id, user, f"{resolved}{alias_note}")
             return
         if command in {"/sys", "/system"}:
@@ -1342,6 +1401,10 @@ class Bridge:
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
         effort = self.store.get_effort(user) or ""
+        if not supports_effort(user_model):
+            # Repair preferences saved by older versions before invoking agy.
+            effort = ""
+            self.store.set_effort(user, None)
         mode = self.store.get_mode(user) or ""
         fallback_title = f"分析附件：{attachment.get('file_name', '截图')}" if attachment else "未命名任务"
         job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort,

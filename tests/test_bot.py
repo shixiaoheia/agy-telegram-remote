@@ -38,13 +38,14 @@ def attachment_update(*, photo=None, document=None, caption="", user=12345, upda
         message["caption"] = caption
     return {"update_id": update_id, "message": message}
 
-def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int = 12345) -> dict:
+def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int = 12345,
+                    message_id: int = 1) -> dict:
     return {
         "update_id": 1,
         "callback_query": {
             "id": cq_id,
             "from": {"id": user, "is_bot": False},
-            "message": {"chat": {"id": chat_id, "type": "private"}},
+            "message": {"message_id": message_id, "chat": {"id": chat_id, "type": "private"}},
             "data": data,
         }
     }
@@ -440,10 +441,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_command_switch_and_reset(self):
         await self.handle(update("/model claude-sonnet-4-6"))
-        self.assertIn("已选择模型：claude-sonnet-4-6", self.api.messages[-1][1])
-        self.assertIn("请选择该模型的思考强度", self.api.messages[-1][1])
-        self.assertIsNotNone(self.api.messages[-1][2])
+        self.assertIn("已切换至：claude-sonnet-4-6｜思考强度：模型内置", self.api.messages[-1][1])
+        self.assertIsNone(self.api.messages[-1][2])
         self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        self.assertIsNone(self.store.get_effort(12345))
 
         # Check /model reflects the new choice
         await self.handle(update("/model"))
@@ -460,7 +461,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
 
         await self.handle(update("/model opus"))
-        self.assertIn("已选择模型：claude-opus-4-6-thinking", self.api.messages[-1][1])
+        self.assertIn("已切换至：claude-opus-4-6-thinking｜思考强度：模型内置", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
 
         await self.handle(update("/model pro"))
@@ -479,6 +480,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runner.calls, 1)
         self.assertEqual(self.runner.last_model, "gemini-3.1-pro-high")
         self.assertIn("gemini-3.1-pro-high", self.api.messages[-1][1])
+
+    async def test_fixed_effort_model_clears_legacy_effort_before_task(self):
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_effort(12345, "high")
+        await self.handle(update("check a safe task"))
+        await self.finish_job()
+        self.assertEqual(self.runner.calls, 1)
+        self.assertIsNone(self.store.get_effort(12345))
         record = self.store.load(12345)
         self.assertEqual(record.get("model"), "gemini-3.1-pro-high")
 
@@ -616,8 +625,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.api.answered_callbacks), 1)
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_opus")
         self.assertIn("claude-opus-4-6-thinking", self.api.answered_callbacks[0][1])
-        self.assertIn("已选择模型", self.api.messages[-1][1])
-        self.assertIn("请选择该模型的思考强度", self.api.messages[-1][1])
+        self.assertIn("已切换至：claude-opus-4-6-thinking｜思考强度：模型内置", self.api.messages[-1][1])
+        self.assertIsNone(self.api.messages[-1][2])
 
     async def test_callback_query_resets_model_default(self):
         self.store.set_model(12345, "claude-sonnet-4-6")
@@ -869,7 +878,8 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(callback_update("effort:low", user=12345))
         await self.bridge.reply_worker
         self.assertEqual(self.store.get_effort(12345), "low")
-        self.assertIn("已切换思考强度为：`Low`", self.api.messages[-1][1])
+        self.assertIn("已切换至：gemini-3.8-flash-high｜思考强度：极速", self.api.messages[-1][1])
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
 
     async def test_mode_command_and_callback(self):
         # 1. View mode menu
