@@ -470,7 +470,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("　• 子项", rich)
 
     async def test_long_html_reply_keeps_rich_formatting_on_every_page(self):
-        delivered = await self.bridge.send_html(12345, "<b>重点</b> " + "内容 " * 1800)
+        delivered = await self.bridge.send_html(12345, "<b>" + "重点内容 " * 1800 + "</b>")
         self.assertTrue(delivered)
         self.assertGreater(len(self.api.messages), 1)
         self.assertTrue(all(mode == "HTML" for mode in self.api.parse_modes))
