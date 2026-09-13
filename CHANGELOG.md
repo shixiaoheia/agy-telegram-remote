@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased — audit fix for OAuth diagnostics, CI test environment, callback queries, primary owner ID, and root security
+## Unreleased — OAuth lifecycle & error classification, root runtime alignment, single runner execution guarantee, and credential backup preservation
+
+- **Bot Root 运行环境与 systemd 单元冲突对齐（Root Mode Service Runtime Alignment）**（`bot.py`、`tests/test_bot.py`）：
+  - 修复 `bot.py` 在 `os.geteuid() == 0` 时主动抛出 `ConfigError` 并退出导致 systemd 服务崩溃且因 `RestartPreventExitStatus=78` 永久停机的矛盾；
+  - 调整为在 Root 模式下输出清晰审计告警（`running_as_root: ...`）并正常启动服务，与宿主机部署架构和 systemd 单元配置一致；
+  - 新增 `test_bot_runtime_allows_root_service` 自动化测试。
+- **任务异常禁止自动重跑与执行结果字段防御校验（Runner Single-Execution & Strict Schema Validation）**（`bot.py`、`agy_runner.py`、`tests/test_bot.py`、`tests/test_runner.py`）：
+  - 彻底移除 `bot.Bridge._work()` 中 4 层嵌套 `except TypeError` 自动重试机制，确保每个任务在执行失败或异常时只执行一次，坚决防止副作用放大与重复计费；
+  - 在 `agy_runner.parse_result()` 中强化对 `num_turns`、`usage` 字典及其各数值计数器（`input_tokens`、`output_tokens`、`thinking_tokens`、`total_tokens`）以及 `conversation_id` 的类型与范围校验；当字段格式不合法时立即返回明确的 `protocol` 协议错误并提示可能已执行、不可自动重跑；
+  - 优化错误分类器 `classify()`，使网络错误模式优先于宽泛的 `oauth`/`credentials` 关键字，避免将网络断开误判为认证失败；
+  - 补充针对单次执行保证与格式异常防御的回归测试。
+- **Google OAuth PTY 包装器输入与生命周期管理深度加固（OAuth PTY Wrapper Lifecycle & Diagnostics）**（`manage.py`、`tests/test_installer.py`）：
+  - 增加空行与仅空白输入校验，循环重新提示，不得向 PTY 写入空行，且在未成功写入前不得过早提示「正在验证」；
+  - 支持从用户直接粘贴的回调 URL（含 `?code=...`）中自动提取合法授权码；
+  - 用户输入期间保持对底层 CLI 进程状态的并发检测；若 CLI 提前异常退出，即刻终止输入并明确告警避免用户误在宿主机 Shell 粘贴敏感授权码；
+  - 拆分超时语义为独立阶段（用户输入超时 vs 换票网络超时），并在进程退出时通过 `drain_pty()` 完整排空残留缓冲区，杜绝末尾诊断信息丢失；
+  - 强化进程组终止逻辑，在 `kill_process_group()` 中顶层安全引入 `subprocess`，使用 SIGTERM 并阶梯升级至 SIGKILL 清理整个进程组；
+  - 增强敏感凭据全面脱敏（包含授权码、Bearer Token、Bot Token、代理密码等），并在交互界面提示用户不要将授权码粘贴至 Shell。
+- **安装器认证流隔离与凭据备份安全回滚（Installer Re-auth & Credential Backup Safety）**（`install.sh`、`tests/test_installer.py`）：
+  - 在步骤 3/3 中，仅当自检返回 10（需重新认证）、全新安装或显式指定 `--reauth` 时触发交互式登录；遇配额受限（12）或网络失败（13）时保留现有凭据，禁止误删；
+  - 建立全局凭据备份机制（`TOKEN_BACKUP`），在用户主动取消（Ctrl+C）、收到 SIGTERM 或任何错误回滚时自动恢复原 Token 凭据，防止凭据丢失；
+  - `as_user()` 完整保留 `SSH_CLIENT`、`SSH_CONNECTION`、`SSH_TTY` 与 `TMPDIR` 环境变量，保障远程环境检测无损透传。
+
+## Previous Releases — audit fix for OAuth diagnostics, CI test environment, callback queries, primary owner ID, and root security
 
 - **OAuth 授权包装器诊断增强与进程生命周期加固（OAuth Wrapper Diagnostics & Process Lifecycle）**（`manage.py`、`tests/test_installer.py`）：
   - **环境最小化透传与凭据脱敏**：实现 `oauth_environment()` 严格过滤环境变量，仅保留 SSH 远程识别变量（`SSH_CLIENT`、`SSH_CONNECTION`、`SSH_TTY`）与网络代理环境变量（`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`），彻底剥离 Telegram Bot Token、SSH Agent、云密钥及 AI API Key 等敏感凭据；

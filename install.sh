@@ -34,6 +34,8 @@ LEGACY=
 BACKUP=
 STAGE=
 CANDIDATE=
+TOKEN_ORIGINAL=
+TOKEN_BACKUP=
 
 fail() { printf '\n错误：%s\n' "$*" >&2; exit 1; }
 
@@ -156,6 +158,8 @@ as_user() {
     HOME="$APP_HOME" USER="root" LOGNAME="root" \
     PATH="$APP_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" LANG=C.UTF-8 \
     TERM="${TERM:-xterm-256color}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
+    SSH_CLIENT="${SSH_CLIENT-}" SSH_CONNECTION="${SSH_CONNECTION-}" SSH_TTY="${SSH_TTY-}" \
     HTTP_PROXY="${HTTP_PROXY-}" HTTPS_PROXY="${HTTPS_PROXY-}" ALL_PROXY="${ALL_PROXY-}" NO_PROXY="${NO_PROXY-}" \
     http_proxy="${http_proxy-}" https_proxy="${https_proxy-}" all_proxy="${all_proxy-}" no_proxy="${no_proxy-}" \
     "$@"
@@ -195,6 +199,10 @@ rollback() {
   if [[ "$OLD_ACTIVE" == 1 ]]; then
     systemctl restart "$SERVICE" || echo '旧服务恢复启动失败，请人工检查。' >&2
   fi
+  if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
+    mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
+    TOKEN_BACKUP=
+  fi
   echo '已尝试回退；依赖安装、Google 登录及已经发生的任务修改不会被撤销。' >&2
 }
 
@@ -202,6 +210,10 @@ on_exit() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
+  if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
+    mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
+    TOKEN_BACKUP=
+  fi
   if [[ "$TRANSACTION" == 1 && "$COMMITTED" == 0 ]]; then
     rollback
     (( rc != 0 )) || rc=1
@@ -451,23 +463,39 @@ _ONBOARDING_EOF
       smoke_rc=$?
     fi
   fi
-  if [[ "$smoke_rc" -ne 0 || "$REAUTH" == 1 ]]; then
+  if [[ "$smoke_rc" -eq 10 || "$installed_now" == 1 || "$REAUTH" == 1 ]]; then
     local auth_rc=0
-    local _token_file="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
-    # 若已有凭证失效或主动重授，移开旧凭据以确保直接输出全新授权链接
-    if [[ -f "$_token_file" ]]; then
-      mv -f -- "$_token_file" "$_token_file.bak.$$" 2>/dev/null || rm -f -- "$_token_file"
+    TOKEN_ORIGINAL="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+    TOKEN_BACKUP="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token.bak.$$"
+    # 仅在确认需要授权或显式重授时，暂时移开旧凭据文件以获取全新授权链接
+    if [[ -f "$TOKEN_ORIGINAL" ]]; then
+      mv -f -- "$TOKEN_ORIGINAL" "$TOKEN_BACKUP" 2>/dev/null || rm -f -- "$TOKEN_ORIGINAL"
     fi
     as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
     if [[ "$auth_rc" -ne 0 ]]; then
-      [[ ! -f "$_token_file.bak.$$" ]] || mv -f -- "$_token_file.bak.$$" "$_token_file" 2>/dev/null || true
+      if [[ -f "$TOKEN_BACKUP" ]]; then
+        mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL" 2>/dev/null || true
+        TOKEN_BACKUP=
+      fi
       fail 'Google 账号授权未完成或失败。'
     fi
-    rm -f -- "$_token_file.bak.$$" 2>/dev/null || true
+    rm -f -- "$TOKEN_BACKUP" 2>/dev/null || true
+    TOKEN_BACKUP=
     if as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" smoke --config "$CANDIDATE" --allow-root; then
       smoke_rc=0
     else
       smoke_rc=$?
+    fi
+  elif [[ "$smoke_rc" -ne 0 ]]; then
+    # 配额、网络、权限或协议问题，绝对不移走凭据，不触发重新授权，直接明确报错
+    if [[ "$smoke_rc" -eq 12 ]]; then
+      fail 'agy 自检未通过：Google 账号配额受限（代码 12）。已保留现有凭据，请稍后重试，无需重新授权。'
+    elif [[ "$smoke_rc" -eq 13 ]]; then
+      fail 'agy 自检未通过：网络连接或通信超时（代码 13）。已保留现有凭据，请检查网络或代理配置，无需重新授权。'
+    elif [[ "$smoke_rc" -eq 14 ]]; then
+      fail 'agy 自检未通过：工具权限拒绝（代码 14）。已保留现有凭据，无需重新授权。'
+    else
+      fail "agy 自检未通过（代码 $smoke_rc）。已保留现有凭据，配额、网络和协议问题不能靠反复重新授权解决。"
     fi
   fi
   [[ "$smoke_rc" == 0 ]] || fail \

@@ -80,9 +80,11 @@ class FakeRunner:
         self.last_model = None
         self.last_conversation_id = None
 
-    async def run(self, prompt, cancel, model=None, conversation_id=None):
+    async def run(self, prompt, cancel, model=None, conversation_id=None, effort=None, mode=None):
         self.last_model = model
         self.last_conversation_id = conversation_id
+        self.last_effort = effort
+        self.last_mode = mode
         self.calls += 1
         if cancel.is_set():
             return Result("cancelled", detail="cancelled before launch", model=model or "")
@@ -130,11 +132,39 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         if self.bridge.slot and self.bridge.slot.worker:
             await self.bridge.slot.worker
 
-    async def test_bot_runtime_refuses_root(self):
+    async def test_bot_runtime_allows_root_service(self):
         from bot import start
-        from settings import ConfigError
-        with patch("bot.os.geteuid", return_value=0), self.assertRaises(ConfigError):
+        with patch("bot.os.geteuid", return_value=0), \
+             patch("state_store.os.geteuid", return_value=os.geteuid()), \
+             patch("bot.Bridge.run", return_value=None):
             await start(self.settings, None)
+
+    async def test_runner_typeerror_job_executed_only_once(self):
+        # When runner.run raises TypeError, the job must execute exactly once without retrying
+        call_count = 0
+        async def fake_run_fail(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            raise TypeError("internal runner argument failure")
+        self.runner.run = fake_run_fail
+        await self.handle(update("compute task", user=12345))
+        await self.finish_job()
+        self.assertEqual(call_count, 1)
+        self.assertTrue(self.runner.blocked)
+        self.assertIn("内部处理异常", self.api.messages[-1][1])
+
+    async def test_simulated_side_effect_with_invalid_numeric_fields_not_rerun(self):
+        # If runner returns an invalid result (e.g. from protocol error), job must not be rerun
+        call_count = 0
+        async def fake_run_invalid(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return Result("invalid", detail="agy 返回的数值字段不符合协议格式；任务可能已经执行，不能自动重跑。", category="protocol")
+        self.runner.run = fake_run_invalid
+        await self.handle(update("run side effect", user=12345))
+        await self.finish_job()
+        self.assertEqual(call_count, 1)
+        self.assertIn("不能自动重跑", self.api.messages[-1][1])
 
     async def test_unauthorized_user_and_group_ignored(self):
         await self.handle(update("task", user=999))

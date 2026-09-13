@@ -350,23 +350,11 @@ class Bridge:
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
-            try:
-                result = await self.runner.run(
-                    prompt, job.cancel, model=job.model or None,
-                    conversation_id=job.conversation_id or None,
-                    effort=job.effort or None, mode=job.mode or None,
-                )
-            except TypeError:
-                try:
-                    result = await self.runner.run(
-                        prompt, job.cancel, model=job.model or None,
-                        conversation_id=job.conversation_id or None,
-                    )
-                except TypeError:
-                    try:
-                        result = await self.runner.run(prompt, job.cancel, model=job.model or None)
-                    except TypeError:
-                        result = await self.runner.run(prompt, job.cancel)
+            result = await self.runner.run(
+                prompt, job.cancel, model=job.model or None,
+                conversation_id=job.conversation_id or None,
+                effort=job.effort or None, mode=job.mode or None,
+            )
 
             if result.outcome == "success" and getattr(result, "conversation_id", None):
                 self.store.set_conversation(job.user, result.conversation_id, getattr(result, "num_turns", 1))
@@ -1066,7 +1054,7 @@ class Bridge:
 
 async def start(settings: Settings, ready_file: Path | None) -> None:
     if os.geteuid() == 0:
-        raise ConfigError("Bot 和 agy 禁止以 root 运行。")
+        LOG.warning("running_as_root: Bot 和 agy 以 root 特权运行于宿主机（纯 Root 部署模式）；请确保白名单内的 Telegram 账户完全受信任。")
     if not settings.workspace.is_dir() or not os.access(settings.workspace, os.R_OK | os.W_OK | os.X_OK):
         raise ConfigError("工作目录不可用。")
     store = Store(settings.state_dir, settings.allowed, settings.max_reply,
