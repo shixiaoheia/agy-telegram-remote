@@ -847,6 +847,7 @@ as_user() {{
 
 as_user python3 -c "
 import os, sys
+sys.path.insert(0, '{ROOT}')
 from manage import oauth_environment
 from pathlib import Path
 env = oauth_environment(Path('{base}'), os.environ)
@@ -861,7 +862,7 @@ assert 'AWS_SECRET_ACCESS_KEY' not in env
 print('ENV_CHAIN_SUCCESS')
 "
 '''
-            res = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, cwd=str(Path.cwd()))
+            res = subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, cwd=str(ROOT))
             self.assertEqual(res.returncode, 0, res.stderr)
             self.assertIn("ENV_CHAIN_SUCCESS", res.stdout)
 
