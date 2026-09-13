@@ -130,7 +130,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         if self.bridge.slot and self.bridge.slot.worker:
             await self.bridge.slot.worker
 
-    async def test_bot_runtime_allows_root(self): from bot import start; root=patch("bot.os.geteuid", return_value=0); runner=patch("bot.Bridge.run", new_callable=AsyncMock); root.start(); runner.start(); await start(self.settings, None); runner.stop(); root.stop()
+    async def test_bot_runtime_allows_root(self): from types import SimpleNamespace; from bot import start; bot_os=SimpleNamespace(**vars(os)); bot_os.geteuid=lambda:0; p1=patch("bot.os",bot_os); p2=patch("bot.Bridge.run",new_callable=AsyncMock); p1.start(); run=p2.start(); await start(self.settings,None); run.assert_awaited_once(); p2.stop(); p1.stop()
 
     async def test_unauthorized_user_and_group_ignored(self):
         await self.handle(update("task", user=999))
