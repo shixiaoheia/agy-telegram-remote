@@ -45,6 +45,7 @@ class FakeAPI:
         self.webhook = ""
         self.accept_gate = None
         self.answered_callbacks = []
+        self.calls = []
 
     async def send(self, chat_id, text, reply_markup=None):
         self.sent_count += 1
@@ -58,6 +59,7 @@ class FakeAPI:
         self.answered_callbacks.append((callback_query_id, text, show_alert))
 
     async def call(self, method, **payload):
+        self.calls.append((method, payload))
         if method == "getMe":
             return {"id": 100, "is_bot": True}
         if method == "getWebhookInfo":
@@ -798,3 +800,66 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("守护进程正在重新载入并启动", self.api.messages[-1][1])
             await asyncio.sleep(1.0)
             mock_execv.assert_called_once()
+
+    async def test_owner_id_first_in_list_controls_admin_permissions(self):
+        from dataclasses import replace
+        # First ID in configuration is 99999, which is numerically greater than 11111.
+        owner_settings = replace(self.settings, allowed=frozenset({11111, 99999}), owner_id=99999)
+        bridge = Bridge(owner_settings, self.api, self.store, self.runner)
+
+        # 1. Numerically smaller user (11111) is rejected from /restart
+        await bridge.handle(update("/restart", user=11111))
+        await bridge.reply_worker
+        self.assertIn("仅主管理员（ID: 99999）可以重启守护进程", self.api.messages[-1][1])
+
+        # 2. Numerically smaller user (11111) is rejected from /whitelist add
+        await bridge.handle(update("/whitelist add 77777", user=11111))
+        await bridge.reply_worker
+        self.assertIn("仅主管理员（ID: 99999）可管理动态白名单", self.api.messages[-1][1])
+
+        # 3. Owner (99999) views /whitelist with crown mark
+        await bridge.handle(update("/whitelist", user=99999))
+        await bridge.reply_worker
+        self.assertIn("• ID: `99999` 👑 (主管理员)", self.api.messages[-1][1])
+        self.assertIn("• ID: `11111`\n", self.api.messages[-1][1])
+
+        # 4. Owner (99999) successfully adds to whitelist
+        await bridge.handle(update("/whitelist add 77777", user=99999))
+        await bridge.reply_worker
+        self.assertIn("已成功添加用户 `77777`", self.api.messages[-1][1])
+        self.assertTrue(bridge._is_allowed(77777))
+
+    async def test_polling_and_init_requests_callback_queries(self):
+        # 1. Initialize requests callback_query
+        await self.bridge.initialize()
+        init_calls = [p for m, p in self.api.calls if m == "getUpdates"]
+        self.assertTrue(len(init_calls) >= 1)
+        self.assertEqual(init_calls[0].get("allowed_updates"), ["message", "callback_query"])
+
+        # 2. consume_updates processes callback_query and updates store
+        updates = [
+            {"update_id": 10, "callback_query": {
+                "id": "cq_run_1",
+                "from": {"id": 12345, "is_bot": False},
+                "message": {"chat": {"id": 12345, "type": "private"}},
+                "data": "effort:high",
+            }}
+        ]
+        await self.bridge.consume_updates(updates)
+        self.assertEqual(self.store.get_effort(12345), "high")
+
+    async def test_callback_query_unauthorized_user_rejected_with_alert(self):
+        # User 98765 is not in allowed whitelist
+        self.assertFalse(self.bridge._is_allowed(98765))
+
+        # 1. Try changing model
+        await self.bridge.handle(callback_update("model:gemini-2.5-pro", user=98765, cq_id="cq_unauth_1"))
+        self.assertEqual(self.api.answered_callbacks[-1], ("cq_unauth_1", "⚠️ 无操作权限", True))
+
+        # 2. Try changing effort
+        await self.bridge.handle(callback_update("effort:high", user=98765, cq_id="cq_unauth_2"))
+        self.assertEqual(self.api.answered_callbacks[-1], ("cq_unauth_2", "⚠️ 无操作权限", True))
+
+        # 3. Try changing mode
+        await self.bridge.handle(callback_update("mode:plan", user=98765, cq_id="cq_unauth_3"))
+        self.assertEqual(self.api.answered_callbacks[-1], ("cq_unauth_3", "⚠️ 无操作权限", True))

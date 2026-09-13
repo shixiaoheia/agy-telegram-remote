@@ -682,7 +682,7 @@ class Bridge:
             self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at))
             return
         if command == "/restart":
-            admin_id = sorted(self.settings.allowed)[0] if self.settings.allowed else 0
+            admin_id = self.settings.owner_id
             if user != admin_id:
                 self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。")
                 return
@@ -704,7 +704,7 @@ class Bridge:
             asyncio.create_task(_do_restart())
             return
         if command == "/whitelist":
-            admin_id = sorted(self.settings.allowed)[0] if self.settings.allowed else 0
+            admin_id = self.settings.owner_id
             parts = text.split(maxsplit=2)
             subcmd = parts[1].lower() if len(parts) > 1 else ""
             target_str = parts[2].strip() if len(parts) > 2 else ""
@@ -973,7 +973,7 @@ class Bridge:
             raise RuntimeError("An active webhook must be removed explicitly before polling")
         # Drop pre-start backlog. Negative offset is documented by Telegram.
         updates = await self.api.call(
-            "getUpdates", offset=-1, limit=1, timeout=0, allowed_updates=["message"]
+            "getUpdates", offset=-1, limit=1, timeout=0, allowed_updates=["message", "callback_query"]
         )
         if not isinstance(updates, list):
             raise TelegramError()
@@ -1023,7 +1023,7 @@ class Bridge:
                 try:
                     updates = await self.api.call(
                         "getUpdates", offset=self.offset, limit=25, timeout=10,
-                        allowed_updates=["message"],
+                        allowed_updates=["message", "callback_query"],
                     )
                     if not isinstance(updates, list):
                         raise TelegramError()

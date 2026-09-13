@@ -166,6 +166,11 @@ class Settings:
     state_dir: Path = Path("/var/lib/agy-telegram-remote")
     retention_days: int = 7
     model: str = ""
+    owner_id: int = 0
+
+    def __post_init__(self) -> None:
+        if self.owner_id == 0 and self.allowed:
+            object.__setattr__(self, "owner_id", sorted(self.allowed)[0])
 
     @classmethod
     def from_mapping(cls, original: Mapping[str, str]) -> "Settings":
@@ -178,16 +183,19 @@ class Settings:
         ids = values.get("ALLOWED_USER_IDS", "").split(",")
         if not 1 <= len(ids) <= 32 or any(not re.fullmatch(r"[0-9]+", x.strip()) for x in ids):
             raise ConfigError("白名单必须包含 1..32 个以逗号分隔的数字用户 ID。")
-        allowed = frozenset(int(x.strip()) for x in ids)
+        parsed_ids = [int(x.strip()) for x in ids]
+        allowed = frozenset(parsed_ids)
+        owner_id = parsed_ids[0]
         if any(not 0 < uid < 2**53 for uid in allowed):
             raise ConfigError("Telegram 数字 ID 超出范围。")
         permission = values["AGY_SKIP_PERMISSIONS"].strip().lower()
         if permission not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
             raise ConfigError("AGY_SKIP_PERMISSIONS 必须是 true 或 false。")
         work = absolute_path(values["AGY_WORKSPACE"], "AGY_WORKSPACE")
-        base = Path("/root")
+        home = absolute_path(values.get("AGY_HOME", "/root"), "AGY_HOME")
+        base = home if str(home) != "/" else Path("/root")
         if work != base and base not in work.parents:
-            raise ConfigError("工作目录必须在 /root 内。")
+            raise ConfigError(f"工作目录必须在 {base} 内。")
         state = absolute_path(values["STATE_DIR"], "STATE_DIR")
         state_base = Path("/var/lib/agy-telegram-remote")
         if state != state_base and state_base not in state.parents:
@@ -198,7 +206,7 @@ class Settings:
         return cls(
             token=token, allowed=allowed,
             agy=absolute_path(values["AGY_PATH"], "AGY_PATH"),
-            home=absolute_path(values["AGY_HOME"], "AGY_HOME"),
+            home=home,
             workspace=work,
             timeout=integer(values, "AGY_TIMEOUT_SECONDS", 10, 86400),
             max_prompt=integer(values, "MAX_PROMPT_CHARS", 1, 100000),
@@ -208,6 +216,7 @@ class Settings:
             state_dir=state,
             retention_days=integer(values, "RESULT_RETENTION_DAYS", 1, 30),
             model=model,
+            owner_id=owner_id,
         )
 
     @classmethod
@@ -248,5 +257,8 @@ def serialize_env(values: Mapping[str, str]) -> str:
 def check_no_symlink(path: Path) -> None:
     """Check each existing component; installer also controls parent ownership."""
     for item in [*reversed(path.parents), path]:
-        if item.is_symlink():
-            raise ConfigError("部署路径包含符号链接，已停止。")
+        try:
+            if item.is_symlink():
+                raise ConfigError("部署路径包含符号链接，已停止。")
+        except PermissionError:
+            pass

@@ -12,7 +12,8 @@ try:
 except ImportError:
     from common import ROOT, config_values, settings_at
 from agy_runner import Result, SMOKE_PROMPT, build_command
-from manage import auth_login, main, service_unit, smoke
+from manage import (auth_login, classify_auth_error, main, oauth_environment,
+                    redact_auth_data, service_unit, smoke)
 from settings import ConfigError, Settings, parse_env
 
 class InstallerTests(unittest.TestCase):
@@ -100,21 +101,25 @@ class InstallerTests(unittest.TestCase):
 
     def test_prepare_config_preserves_old_settings(self):
         with tempfile.TemporaryDirectory() as temp:
-            old, dest = Path(temp) / "old", Path(temp) / "candidate"
+            base = Path(temp)
+            old, dest = base / "old", base / "candidate"
+            work_dir = base / "project"
+            work_dir.mkdir()
             old.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
-                "AGY_WORKSPACE": "/root/project",
+                "AGY_WORKSPACE": str(work_dir),
+                "AGY_HOME": str(base),
                 "AGY_SKIP_PERMISSIONS": "false", "AGY_TIMEOUT_SECONDS": "321",
             }).items()))
             dest.touch()
             argv = ["manage.py", "prepare-config", "--old", str(old),
-                    "--output", str(dest), "--home", "/root"]
+                    "--output", str(dest), "--home", str(base)]
             with patch("sys.argv", argv), \
                  patch("builtins.input", return_value=""), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
             value = Settings.load(dest)
             self.assertFalse(value.skip_permissions)
             self.assertEqual(value.timeout, 321)
-            self.assertEqual(value.workspace, Path("/root/project"))
+            self.assertEqual(value.workspace, work_dir)
 
     def test_rollback_restores_files_in_temporary_directory(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -408,8 +413,8 @@ sleep 10
             dest = base / "candidate"
             dest.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
                 "AGY_PATH": str(mock_agy),
-                "AGY_HOME": "/root",
-                "AGY_WORKSPACE": "/root",
+                "AGY_HOME": str(base),
+                "AGY_WORKSPACE": str(base),
                 "STATE_DIR": "/var/lib/agy-telegram-remote",
             }).items()))
             argv_config = ["manage.py", "auth-login", "--config", str(dest)]
@@ -421,3 +426,145 @@ sleep 10
                           "--home", str(base), "--workspace", str(base)]
             with patch("sys.argv", argv_flags), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
+
+    def test_auth_login_child_closed_before_write(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+exit 1
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            import time
+            def fake_input(prompt):
+                time.sleep(0.05)
+                return "some_code"
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
+                 patch("builtins.input", side_effect=fake_input):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 1)
+            self.assertIn("授权会话已结束，请重新开始", buf_err.getvalue())
+            self.assertNotIn("正在验证授权码", buf_out.getvalue())
+
+    def test_auth_login_write_oserror_fails_cleanly(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Or, paste the authorization code here and press Enter:"
+sleep 10
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
+                 patch("builtins.input", return_value="some_code"), \
+                 patch("os.write", side_effect=OSError(5, "Input/output error")):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 1)
+            self.assertIn("授权会话已结束，请重新开始", buf_err.getvalue())
+            self.assertNotIn("正在验证授权码", buf_out.getvalue())
+
+    def test_auth_login_slow_token_exchange(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+sleep 1
+if [[ "$code" == "valid_code" ]]; then
+  echo "AGY ready."
+  exit 0
+fi
+exit 1
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf = io.StringIO()
+            with patch("sys.stdout", buf), patch("builtins.input", return_value="valid_code"):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=10)
+            self.assertEqual(rc, 0)
+            self.assertIn("Google 账号授权成功", buf.getvalue())
+
+    def test_auth_login_unknown_error_redacted_and_bounded(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            secret_code = "4/0Abc1234567890XYZ_SuperSecretAuthCode"
+            secret_token = "ya29.a0AfH6SMD_TokenXYZSecret123"
+            script = f'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+echo "Internal CLI dump: code={secret_code} token={secret_token} unexpected_err_code_xyz" >&2
+exit 42
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_out = io.StringIO()
+            buf_err = io.StringIO()
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
+                 patch("builtins.input", return_value=secret_code):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            self.assertEqual(rc, 1)
+            err = buf_err.getvalue()
+            self.assertNotIn(secret_code, err)
+            self.assertNotIn(secret_token, err)
+            self.assertIn("[REDACTED_CODE]", err)
+            self.assertIn("[REDACTED_TOKEN]", err)
+            self.assertIn("unexpected_err_code_xyz", err)
+
+    def test_oauth_environment_preserves_ssh_and_proxy_but_strips_secrets(self):
+        with tempfile.TemporaryDirectory() as td:
+            inherited = {
+                "HOME": "/root",
+                "PATH": "/bin:/usr/bin",
+                "SSH_CLIENT": "1.2.3.4 5678 22",
+                "SSH_CONNECTION": "1.2.3.4 5678 10.0.0.1 22",
+                "SSH_TTY": "/dev/pts/1",
+                "HTTPS_PROXY": "http://127.0.0.1:7890",
+                "HTTP_PROXY": "http://127.0.0.1:7890",
+                "ALL_PROXY": "socks5://127.0.0.1:1080",
+                "NO_PROXY": "localhost,127.0.0.1",
+                "TELEGRAM_BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234567",
+                "BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234567",
+                "SSH_AUTH_SOCK": "/tmp/ssh-secret/agent.123",
+                "AWS_ACCESS_KEY_ID": "AKIAIOSFODNN7EXAMPLE",
+                "OPENAI_API_KEY": "sk-secret123456",
+            }
+            env = oauth_environment(Path(td), inherited)
+            self.assertEqual(env["HOME"], td)
+            self.assertEqual(env["SSH_CLIENT"], "1.2.3.4 5678 22")
+            self.assertEqual(env["SSH_CONNECTION"], "1.2.3.4 5678 10.0.0.1 22")
+            self.assertEqual(env["SSH_TTY"], "/dev/pts/1")
+            self.assertEqual(env["HTTPS_PROXY"], "http://127.0.0.1:7890")
+            self.assertEqual(env["HTTP_PROXY"], "http://127.0.0.1:7890")
+            self.assertEqual(env["ALL_PROXY"], "socks5://127.0.0.1:1080")
+            self.assertEqual(env["NO_PROXY"], "localhost,127.0.0.1")
+            self.assertNotIn("TELEGRAM_BOT_TOKEN", env)
+            self.assertNotIn("BOT_TOKEN", env)
+            self.assertNotIn("SSH_AUTH_SOCK", env)
+            self.assertNotIn("AWS_ACCESS_KEY_ID", env)
+            self.assertNotIn("OPENAI_API_KEY", env)
+
+    def test_auth_login_timeout_terminates_process_group(self):
+        with tempfile.TemporaryDirectory() as td:
+            mock_agy = Path(td) / "mock_agy"
+            script = r'''#!/bin/bash
+echo "Authentication required. Please visit the URL to log in:"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+sleep 30
+'''
+            mock_agy.write_text(script)
+            mock_agy.chmod(0o755)
+            buf_err = io.StringIO()
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err), \
+                 patch("builtins.input", return_value="slow_code"):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.3)
+            self.assertEqual(rc, 1)
+            self.assertIn("超时", buf_err.getvalue())

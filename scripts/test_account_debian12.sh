@@ -47,7 +47,7 @@ echo "$env_output" | grep -q "^LOGNAME=root$" || fail "as_user LOGNAME 不为 ro
 echo "PASS: as_user 环境变量符合 root 模式预期"
 
 echo "=== Test 4: Verify install.sh --help execution ==="
-help_output="$("$ROOT_DIR/install.sh" --help)"
+help_output="$(bash "$ROOT_DIR/install.sh" --help)"
 echo "$help_output" | grep -q "Antigravity Telegram Remote 安装与管理脚本" || fail "帮助输出异常"
 echo "$help_output" | grep -q "极简 Root 模式" || fail "帮助输出未包含 Root 模式说明"
 echo "PASS: install.sh --help 正常执行"

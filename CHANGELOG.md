@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — audit fix for OAuth diagnostics, CI test environment, callback queries, primary owner ID, and root security
+
+- **OAuth 授权包装器诊断增强与进程生命周期加固（OAuth Wrapper Diagnostics & Process Lifecycle）**（`manage.py`、`tests/test_installer.py`）：
+  - **环境最小化透传与凭据脱敏**：实现 `oauth_environment()` 严格过滤环境变量，仅保留 SSH 远程识别变量（`SSH_CLIENT`、`SSH_CONNECTION`、`SSH_TTY`）与网络代理环境变量（`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`），彻底剥离 Telegram Bot Token、SSH Agent、云密钥及 AI API Key 等敏感凭据；
+  - **进程组干净终止**：通过 `start_new_session=True` 与 `kill_process_group()` 在会话超时或中断时对进程组发送 SIGTERM 及 fallback SIGKILL，彻底杜绝 PTY 子进程失控残留；
+  - **PTY 管道状态检测与即时反馈**：在向 PTY master 写入前及写入异常时精确感知子进程退出或 EIO 异常，即时给出「授权会话已结束，请重新开始」明确错误，消除写入失败假象；
+  - **可配置与充裕的令牌交换超时**：替换原固定的 30+5 秒超时，改为总超时 180 秒并专为令牌网络交换预留 90 秒，避免慢网络与复杂交换被误杀；
+  - **精准细分错误分类与脱敏摘要**：新增 `classify_auth_error()` 与 `redact_auth_data()`，细分鉴别 `invalid_grant`（授权码错误/已过期）、网络连接失败、超时、地区/资格受限、协议提示变更及未知错误，脱敏抹除输出中的 code 与 token 并严格限制未知错误输出长度；
+  - **测试覆盖**：新增写入端提前关闭、EIO 写入异常、慢成功令牌交换、凭据脱敏与未知错误截断、环境变量最小化透传以及超时杀死进程组等 6 项自动化测试。
+- **GitHub Actions CI 与跨平台权限环境修复（CI & Non-Root Environment Fixes）**（`scripts/test_account_debian12.sh`、`install.sh`、`scripts/verify.sh`、`settings.py`、`tests/test_installer.py`）：
+  - **可执行权限修复**：在 Git 索引中为 `install.sh`、`scripts/test_account_debian12.sh`、`scripts/verify.sh` 补充可执行位（`chmod +x`），并在 `test_account_debian12.sh` 中采用 `bash "$ROOT_DIR/install.sh" --help` 防御性调用，消除 CI 报 Permission denied (126)；
+  - **解耦非 Root CI 运行环境**：重构 `tests/test_installer.py` 中 `test_auth_login_cli_dispatch` 与 `test_prepare_config_preserves_old_settings`，使用 `tempfile.TemporaryDirectory()` 替代硬编码 `/root`，避免非 root CI runner 因权限不足报错 21；
+  - **软链接防御异常兼容**：在 `settings.py` 的 `check_no_symlink()` 中增加对不可访问父路径的 `PermissionError` 防御捕获，适配非 root CI 测试。
+- **Telegram 行内键盘回调事件恢复（Inline Keyboard Callback Queries Fix）**（`bot.py`、`tests/test_bot.py`）：
+  - 修复 `bot.py` 中两处 `getUpdates()`（启动丢弃积压与常规长轮询）将 `allowed_updates` 写死为 `["message"]` 的缺陷，扩充为 `allowed_updates=["message", "callback_query"]`，确保 Telegram 行内键盘点击回调事件正常投递；
+  - 补充自动化回归测试，验证授权用户点击按钮正确变更模型/effort/mode，未授权用户回调请求被严格拒绝。
+- **多白名单用户主管理员判定一致性对齐（Consistent Primary Owner ID Selection）**（`settings.py`、`bot.py`、`tests/test_settings.py`、`tests/test_bot.py`）：
+  - 在 `Settings` 中新增不可变属性 `owner_id: int`，以配置中声明的第一个合法 ID 确定为主管理员（而非对 set 排序后的数值最小者），与配置说明完全一致；
+  - 统一 `bot.py` 中的 `/restart` 与 `/whitelist` 权限鉴权，使用 `self.settings.owner_id` 进行校验；
+  - 增加「第一个用户 ID 数值非最小」的解析与权限控制测试，以及默认 fallback 逻辑测试。
+- **Root 运行更新供应链加固与安全边界规范（Root Supply Chain Hardening & Security Docs）**（`install.sh`、`SECURITY.md`、`README.md`）：
+  - **不可变 Commit 追踪与版本锁定**：安装与更新流程中记录并展示不可变 git commit SHA，将版本号写入 `$release/.commit` 与 `$CONFIG_DIR/current_commit`，提供 `--ref <commit-sha>` 确定性版本部署与回滚机制；
+  - **官方安装脚本完整性验证**：在下载底层官方 `agy` 安装脚本时校验 HTTPS 协议、bash header 及核心结构标记，支持可选 `AGY_INSTALLER_SHA256` 环境变量哈希校验；
+  - **安全文档透明化与风险说明**：更新 `SECURITY.md` 与 `README.md`，真实阐述 Root 特权模式与 `--dangerously-skip-permissions` 的高信任模型，明确白名单凭据泄露或 Prompt Injection 的系统级影响范围与边界。
+
 ## Unreleased — pure Root mode architecture consolidation and installer fix
 
 - **步骤 3/3 Google 账号 OAuth 授权流完全汉化与交互式 CLI 包装（Localized Google OAuth CLI Wrapper）**（`manage.py`、`install.sh`、`tests/test_installer.py`、`README.md`）：

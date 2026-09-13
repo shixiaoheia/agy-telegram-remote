@@ -5,10 +5,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
+import signal
 import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Mapping
 
 from agy_runner import Runner, SMOKE_PROMPT
 from settings import (ConfigError, KEYS, Settings, check_no_symlink, merged_config,
@@ -132,7 +135,107 @@ def highlight_url(url: str) -> str:
     return f"\033[1;36m{url}\033[0m"
 
 
-def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -> int:
+def oauth_environment(home: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Provide a minimal, sanitized environment for agy OAuth login."""
+    inherited = os.environ if inherited is None else inherited
+    user = "root" if str(home) == "/root" else inherited.get("USER", "root")
+    env = {
+        "HOME": str(home),
+        "USER": user,
+        "LOGNAME": user,
+        "PATH": f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin:" + inherited.get("PATH", ""),
+        "TERM": inherited.get("TERM", "xterm-256color"),
+        "LANG": inherited.get("LANG", "C.UTF-8"),
+    }
+    for key in ("LC_ALL", "LC_CTYPE", "TMPDIR", "TZ"):
+        if key in inherited:
+            env[key] = inherited[key]
+    # Retain SSH context for remote CLI environment detection, excluding SSH_AUTH_SOCK
+    for key in ("SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"):
+        if key in inherited:
+            env[key] = inherited[key]
+    # Retain standard proxy environment for OAuth token exchange
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
+                "https_proxy", "http_proxy", "all_proxy", "no_proxy"):
+        if key in inherited:
+            env[key] = inherited[key]
+    return env
+
+
+def kill_process_group(proc: subprocess.Popen, timeout: float = 3.0) -> None:
+    """Terminate the process and its child process group safely."""
+    pgid = None
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        pass
+
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
+    else:
+        try:
+            proc.terminate()
+        except (ProcessLookupError, OSError):
+            pass
+
+    try:
+        proc.wait(timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+        else:
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+        try:
+            proc.wait(timeout=2.0)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def redact_auth_data(text: str, code: str = "") -> str:
+    """Ensure authorization codes, bearer tokens and secret parameters never leak."""
+    if code and len(code) >= 3:
+        text = text.replace(code, "[REDACTED_CODE]")
+    text = re.sub(r'4/[0-9A-Za-z_-]{20,}', '[REDACTED_CODE]', text)
+    text = re.sub(r'ya29\.[0-9A-Za-z_-]+', '[REDACTED_TOKEN]', text)
+    text = re.sub(r'(code=)[^&\s]+', r'\1[REDACTED_CODE]', text)
+    return text
+
+
+def classify_auth_error(raw_output: str, exit_code: int, code: str = "") -> str:
+    """Categorize OAuth failures and return a clean, user-friendly diagnostic message."""
+    clean = redact_auth_data(raw_output, code=code)
+    low = clean.lower()
+    if any(k in low for k in ("invalid_grant", "malformed", "invalid code", "unauthorized_client", "expired")):
+        return "授权失败：授权码无效或格式不正确，请确保完整复制网页上的最新授权码。"
+    if any(k in low for k in ("timeout", "timed out", "deadline", "context canceled")):
+        return "授权失败：与 Google 认证服务器通信超时，请检查网络后重试。"
+    if any(k in low for k in ("not eligible", "location", "unsupported region", "country", "geographic")):
+        return "地区或资格受限：当前 IP 或账号所在地区暂不支持 Antigravity 服务。"
+    if any(k in low for k in ("network", "connection", "dns", "reset by peer", "broken pipe", "eof", "dial tcp", "no route to host", "certificate", "ssl", "tls")):
+        return "授权失败：网络连接失败，无法与 Google 认证服务器建立通信，请检查服务器网络或代理配置。"
+    if any(k in low for k in ("unknown flag", "unexpected argument", "syntax error", "panic:", "protocol")):
+        return "CLI 协议或参数异常：Google CLI 输出格式变化或未在预期步骤完成换票。"
+
+    lines = [line.strip().replace("\r", "") for line in clean.splitlines() if line.strip()]
+    diag_lines = [
+        l for l in lines
+        if not any(p in l.lower() for p in ("authentication required", "waiting for", "paste the authorization", "agy ready"))
+    ]
+    detail = f"（{diag_lines[-1][:100]}）" if diag_lines else f"（退出代码 {exit_code}）"
+    return f"Google 账号授权未成功完成{detail}，请重试。"
+
+
+def auth_login(agy: Path, home: Path, workspace: Path,
+               timeout: float = 180.0, exchange_timeout: float = 90.0) -> int:
     try:
         import pty
         import select
@@ -157,10 +260,7 @@ def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -
     except OSError:
         pass
 
-    env = os.environ.copy()
-    env["HOME"] = str(home)
-    env["PATH"] = f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
-    env["TERM"] = "xterm-256color"
+    env = oauth_environment(home)
 
     master, slave = pty.openpty()
     try:
@@ -172,6 +272,7 @@ def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -
             stdout=slave,
             stderr=slave,
             close_fds=True,
+            start_new_session=True,
         )
     finally:
         os.close(slave)
@@ -208,12 +309,16 @@ def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -
                 if auth_prompted:
                     break
             except OSError:
+                if "paste the authorization code" in buffer.lower():
+                    auth_prompted = True
                 break
         if "paste the authorization code" in buffer.lower():
             auth_prompted = True
             buffer = ""
             break
         if proc.poll() is not None:
+            if "paste the authorization code" in buffer.lower():
+                auth_prompted = True
             break
 
     if auth_prompted:
@@ -221,30 +326,44 @@ def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -
             code = input("👉 请在此处粘贴浏览器显示的授权码并按回车：").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n已取消授权流程。")
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except (OSError, subprocess.TimeoutExpired):
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+            kill_process_group(proc)
             try:
                 os.close(master)
             except OSError:
                 pass
             return 20
 
+        if proc.poll() is not None:
+            print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
+            kill_process_group(proc)
+            try:
+                os.close(master)
+            except OSError:
+                pass
+            return 1
+
+        write_ok = False
         try:
             os.write(master, (code + "\n").encode("utf-8"))
+            write_ok = True
         except OSError:
-            pass
+            write_ok = False
+
+        if not write_ok or proc.poll() is not None:
+            print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
+            kill_process_group(proc)
+            try:
+                os.close(master)
+            except OSError:
+                pass
+            return 1
 
         print("🔄 正在验证授权码并完成配置，请稍候……")
 
         post_buf = ""
-        deadline = time.time() + 30
-        while time.time() < deadline:
+        exchange_start = time.time()
+        timed_out = False
+        while time.time() - exchange_start < exchange_timeout:
             if proc.poll() is not None:
                 break
             r, _, _ = select.select([master], [], [], 0.2)
@@ -256,36 +375,32 @@ def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -
                     post_buf += data.decode("utf-8", errors="replace")
                 except OSError:
                     break
-
-        try:
-            rc = proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-            rc = 1
+        else:
+            if proc.poll() is None:
+                timed_out = True
 
         try:
             os.close(master)
         except OSError:
             pass
 
+        if timed_out:
+            kill_process_group(proc)
+            print(f"\n❌ 授权失败：等待换票认证超时（{int(exchange_timeout)} 秒），请检查网络连接后重试。", file=sys.stderr)
+            return 1
+
+        try:
+            rc = proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            kill_process_group(proc)
+            rc = 1
+
         if rc == 0:
             print("\n✅ Google 账号授权成功！")
             return 0
 
-        low = post_buf.lower()
-        if "invalid_grant" in low or "malformed" in low:
-            print("\n❌ 授权失败：授权码无效或格式不正确，请确保完整复制网页上的授权码。", file=sys.stderr)
-        elif "timeout" in low or "timed out" in low:
-            print("\n❌ 授权失败：等待授权超时，请重试。", file=sys.stderr)
-        elif "not eligible" in low or "location" in low:
-            print("\n❌ 地区或资格受限：当前 IP 或账号所在地区暂不支持 Antigravity 服务。", file=sys.stderr)
-        elif any(s in low for s in ("network", "connection", "eof")):
-            print("\n❌ 授权失败：连接 Google 认证服务器失败，请检查网络或代理配置。", file=sys.stderr)
-        else:
-            print("\n❌ Google 账号授权未成功完成，请重试。", file=sys.stderr)
+        err_msg = classify_auth_error(post_buf, rc, code=code)
+        print(f"\n❌ {err_msg}", file=sys.stderr)
         return 1
 
     try:
@@ -294,25 +409,17 @@ def auth_login(agy: Path, home: Path, workspace: Path, timeout: float = 120.0) -
         pass
 
     try:
-        rc = proc.wait(timeout=3)
+        rc = proc.wait(timeout=3.0)
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        kill_process_group(proc)
         rc = 1
 
     if rc == 0:
         print("\n✅ 已检测到有效的 Google 账号授权，无需重新登录！")
         return 0
 
-    low = buffer.lower()
-    if "not eligible" in low or "location" in low:
-        print("\n❌ 地区或资格受限：当前 IP 或账号所在地区暂不支持 Antigravity 服务。", file=sys.stderr)
-    elif any(s in low for s in ("network", "connection", "dns")):
-        print("\n❌ 网络连接失败：无法连接至 Google 认证服务，请检查网络或代理配置。", file=sys.stderr)
-    else:
-        print(f"\n❌ agy 启动异常（退出代码 {rc}）。", file=sys.stderr)
+    err_msg = classify_auth_error(buffer, rc)
+    print(f"\n❌ {err_msg}", file=sys.stderr)
     return 1
 
 
@@ -336,6 +443,8 @@ def main() -> int:
     auth_cmd.add_argument("--agy", type=Path, default=None)
     auth_cmd.add_argument("--home", type=Path, default=None)
     auth_cmd.add_argument("--workspace", type=Path, default=None)
+    auth_cmd.add_argument("--timeout", type=float, default=180.0)
+    auth_cmd.add_argument("--exchange-timeout", type=float, default=90.0)
     ready = sub.add_parser("check-ready")
     ready.add_argument("--file", type=Path, required=True)
     ready.add_argument("--pid", type=int, required=True)
@@ -363,7 +472,8 @@ def main() -> int:
                 home_path = args.home or Path(os.environ.get("HOME", "/root"))
                 agy_path = args.agy or (home_path / ".local" / "bin" / "agy")
                 work_path = args.workspace or home_path
-            return auth_login(agy_path, home_path, work_path)
+            return auth_login(agy_path, home_path, work_path,
+                              timeout=args.timeout, exchange_timeout=args.exchange_timeout)
         settings = Settings.load(args.config)
         if args.command == "fields":
             print(settings.home)

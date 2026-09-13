@@ -48,7 +48,7 @@ usage() {
   bash install.sh --root                  👑 极简 Root 模式安装/更新（快捷别名）
   bash install.sh --enable-auto-approve    更新时明确启用自动审批（跳过权限确认弹窗）
   bash install.sh --reauth                 重新进入 Google 账号授权流程
-  bash install.sh --ref COMMIT_OR_BRANCH   安装指定 Git 提交 SHA 或分支
+  bash install.sh --ref COMMIT_OR_BRANCH   安装/升级指定不可变 Git 提交 SHA 或分支（推荐生产使用 Commit SHA）
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
   bash install.sh --uninstall --purge      彻底清理（需输入 PURGE 二次确认，清除部署与配置）
   bash install.sh --help                   显示此帮助说明
@@ -395,6 +395,23 @@ main() {
     curl --proto '=https' --tlsv1.2 -fsSL https://antigravity.google/cli/install.sh \
       -o "$official_installer"
     chmod 0644 "$official_installer"
+    if [[ ! -s "$official_installer" ]] || ! head -n 1 "$official_installer" | grep -q '^#!/bin/bash'; then
+      rm -f -- "$official_installer"
+      fail '官方 agy 安装器校验失败：下载内容为空或缺少合法的 bash 头部。'
+    fi
+    if ! grep -q 'DOWNLOAD_BASE_URL=' "$official_installer" || ! grep -q 'Antigravity CLI' "$official_installer"; then
+      rm -f -- "$official_installer"
+      fail '官方 agy 安装器校验失败：未包含官方受信任的结构特征。'
+    fi
+    local expected_hash="${AGY_INSTALLER_SHA256:-}"
+    if [[ -n "$expected_hash" ]]; then
+      local actual_hash
+      actual_hash="$(sha256sum "$official_installer" | cut -d' ' -f1)"
+      if [[ "$actual_hash" != "$expected_hash" ]]; then
+        rm -f -- "$official_installer"
+        fail "官方 agy 安装器哈希校验失败：实际哈希 $actual_hash 与预期 $expected_hash 不符。"
+      fi
+    fi
     as_user /bin/bash "$official_installer"
     rm -f -- "$official_installer"
     [[ -x "$agy" ]] || fail '官方安装器未在预期位置生成 agy。'
@@ -460,6 +477,8 @@ _ONBOARDING_EOF
   release="$RELEASES/$commit-$(date +%s)-$$"
   mv -- "$STAGE" "$release"
   STAGE=
+  echo "$commit" > "$release/.commit"
+  echo "$commit" > "$CONFIG_DIR/current_commit" 2>/dev/null || true
   SWITCHED=1
   if [[ -d "$APP" && ! -L "$APP" ]]; then
     LEGACY="$BACKUP/legacy-app"
@@ -499,6 +518,7 @@ _ONBOARDING_EOF
   echo "• ⚙️ 配置文件：$CONFIG"
   echo "• 📁 核心工作目录：$work"
   echo "• 👤 运行系统账户：$APP_USER"
+  echo "• 🔖 部署版本 Commit：$commit"
   echo "• 💾 升级回退备份：$BACKUP (root 私有，包含旧配置，请勿上传)"
   echo "• 📋 查看服务状态：sudo systemctl status $SERVICE --no-pager"
   echo "• 📜 查看实时日志：sudo journalctl -u $SERVICE -f"

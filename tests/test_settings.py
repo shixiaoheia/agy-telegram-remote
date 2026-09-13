@@ -116,3 +116,19 @@ class ConfigurationTests(unittest.TestCase):
             path.write_text("X=" + "a" * 70000)
             with self.assertRaises(ConfigError):
                 read_private_text(path)
+
+    def test_owner_id_first_in_list_not_smallest(self):
+        values = config_values() | {"ALLOWED_USER_IDS": "99999,11111,55555"}
+        settings = Settings.from_mapping(values)
+        self.assertEqual(settings.owner_id, 99999)
+        self.assertEqual(settings.allowed, frozenset({11111, 55555, 99999}))
+
+    def test_owner_id_default_fallback(self):
+        s = Settings(
+            token=config_values()["TELEGRAM_BOT_TOKEN"],
+            allowed=frozenset({88888, 22222}),
+            agy=Path("/bin/true"),
+            home=Path("/root"),
+            workspace=Path("/root"),
+        )
+        self.assertEqual(s.owner_id, 22222)
