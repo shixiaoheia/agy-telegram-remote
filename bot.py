@@ -283,15 +283,19 @@ class Bridge:
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
         self.restarting = False
+        self._restart_task: asyncio.Task | None = None
 
     def _is_allowed(self, user: int) -> bool:
         return user in self.settings.allowed or user in self.store.allowed
 
-    async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
+    async def send_text(self, chat: int, text: str, reply_markup: dict | None = None, job: Job | None = None) -> bool:
         try:
             chunks = chunks_utf16(self.store.redact(text))
             total = len(chunks)
             for i, chunk in enumerate(chunks):
+                if job is not None and (getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user)):
+                    LOG.info("send_text_aborted_unwhitelist job=%s user=%s chunk=%d/%d", job.job_id, job.user, i + 1, total)
+                    return False
                 suffix = f"\n\n📄 [第 {i+1}/{total} 页]" if total > 1 else ""
                 markup = reply_markup if i == total - 1 else None
                 try:
@@ -346,7 +350,13 @@ class Bridge:
                 f"━━━━━━━━━━━━━━━━━━━━{conv_tag}{effort_info}{mode_info}\n"
                 f"⏳ 正在调用 Antigravity 执行任务，请稍候..."
             )
-            accepted = await self.send_text(job.chat, accept_msg)
+            accepted = await self.send_text(job.chat, accept_msg, job=job)
+
+            # Re-check whitelist/cancellation right after awaiting send_text
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_in_accept id=%s user=%s, dropping job", job.job_id, job.user)
+                return
+
             if not accepted or self.stop.is_set() or job.cancel.is_set():
                 self.store.save(job.user, {
                     "job_id": job.job_id, "outcome": "not_started",
@@ -359,6 +369,9 @@ class Bridge:
                 return
             await self._work(job, prompt)
         except Exception as error:
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_accept_unwhitelisted_exception id=%s user=%s", job.job_id, job.user)
+                return
             self.runner.blocked = True
             LOG.error("job_accept_failed id=%s type=%s", job.job_id, type(error).__name__)
             self.queue_reply(job.chat, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。")
@@ -376,8 +389,8 @@ class Bridge:
             )
 
             # Check if user was unwhitelisted during execution
-            if job.user not in self.store.allowed or getattr(job, "cancelled_by_unwhitelist", False):
-                LOG.info("job_user_unwhitelisted id=%s user=%s, dropping result", job.job_id, job.user)
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_during_run id=%s user=%s, dropping result", job.job_id, job.user)
                 return
 
             if not getattr(job, "reset_requested", False) and result.outcome == "success" and getattr(result, "conversation_id", None):
@@ -390,6 +403,11 @@ class Bridge:
                     getattr(result, "thinking_tokens", 0),
                 )
 
+            # Check again right before store.save in case user was unwhitelisted
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_before_save id=%s user=%s, dropping result", job.job_id, job.user)
+                return
+
             record = self.store.save(
                 job.user, result.to_dict() | {
                     "job_id": job.job_id, "delivery": "pending",
@@ -399,7 +417,13 @@ class Bridge:
                 }
             )
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
-            delivered = await self.send_text(job.chat, describe(record))
+            delivered = await self.send_text(job.chat, describe(record), job=job)
+
+            # Re-check unwhitelist status after awaiting result delivery
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("job_user_unwhitelisted_after_send id=%s user=%s, dropping delivery update", job.job_id, job.user)
+                return
+
             self.store.save(job.user, record | {
                 "delivery": "sent" if delivered else "failed_or_partial"
             })
@@ -409,6 +433,9 @@ class Bridge:
             LOG.warning("worker_cancelled id=%s", job.job_id)
             raise
         except Exception as error:
+            if getattr(job, "cancelled_by_unwhitelist", False) or not self._is_allowed(job.user):
+                LOG.info("worker_exception_unwhitelisted id=%s user=%s", job.job_id, job.user)
+                return
             # Never print raw exception text: it may contain request URLs or secrets.
             LOG.error("worker_failed id=%s type=%s", job.job_id, type(error).__name__)
             self.runner.blocked = True
@@ -714,8 +741,8 @@ class Bridge:
             if user != admin_id:
                 self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。")
                 return
-            if self.restarting:
-                self.queue_reply(chat_id, "⚠️ 守护进程正在重启中，请稍候……")
+            if self.restarting or (self._restart_task is not None and not self._restart_task.done()):
+                self.queue_reply(chat_id, "⚠️ 守护进程已在重启流程中，请勿重复操作。")
                 return
             if self.slot is not None and not self.slot.cancel.is_set():
                 self.queue_reply(
@@ -725,31 +752,68 @@ class Bridge:
                 return
 
             self.restarting = True
-            if self.slot is not None and self.slot.cancel.is_set():
+            target_slot = self.slot
+            if target_slot is not None and target_slot.cancel.is_set():
                 self.queue_reply(
                     chat_id,
-                    f"🔄 已请求重启。正在等待已取消任务（任务 {self.slot.job_id}）的进程清理与状态持久化完成……"
+                    f"🔄 已请求重启。正在等待已取消任务（任务 {target_slot.job_id}）的进程清理与状态持久化完成……"
                 )
             else:
                 self.queue_reply(chat_id, "🔄 守护进程正在重新载入并启动，请稍候约 3-5 秒后发送 /status 验证……")
 
             async def _do_restart():
                 try:
-                    if self.slot is not None and self.slot.worker and not self.slot.worker.done():
+                    if target_slot is not None and target_slot.worker and not target_slot.worker.done():
                         try:
-                            await asyncio.wait_for(asyncio.shield(self.slot.worker), timeout=15.0)
+                            await asyncio.wait_for(asyncio.shield(target_slot.worker), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            LOG.error("restart_aborted_worker_timeout job=%s", target_slot.job_id)
+                            self.restarting = False
+                            self.queue_reply(chat_id, f"❌ 重启已中止：任务 {target_slot.job_id} 未能在 15 秒内完成退出与清理。")
+                            return
+                        except asyncio.CancelledError:
+                            LOG.warning("restart_cancelled_waiting_worker job=%s", target_slot.job_id)
+                            self.restarting = False
+                            raise
                         except Exception as e:
                             LOG.warning("wait_worker_during_restart_error: %s", e)
+
+                    if target_slot is not None and target_slot.worker and not target_slot.worker.done():
+                        LOG.error("restart_aborted_worker_not_done job=%s", target_slot.job_id)
+                        self.restarting = False
+                        self.queue_reply(chat_id, f"❌ 重启已中止：任务 {target_slot.job_id} 仍在运行中。")
+                        return
+
+                    if self.runner.blocked:
+                        LOG.error("restart_aborted_runner_blocked")
+                        self.restarting = False
+                        self.queue_reply(
+                            chat_id,
+                            "❌ 重启已中止：检测到底层任务进程清理未确认，服务处于安全阻断状态。请排查服务器残留进程。"
+                        )
+                        return
+
+                    if self.slot is not None and self.slot is not target_slot:
+                        LOG.error("restart_aborted_slot_occupied")
+                        self.restarting = False
+                        self.queue_reply(chat_id, "❌ 重启已中止：任务槽位未释放。")
+                        return
+                    self.slot = None
+
                     await asyncio.sleep(0.8)
                     exec_args = get_restart_argv()
                     LOG.info("execv_restarting args=%s", exec_args)
                     os.execv(exec_args[0], exec_args)
+                except asyncio.CancelledError:
+                    LOG.warning("restart_coroutine_cancelled")
+                    self.restarting = False
+                    raise
                 except Exception as err:
                     LOG.error("restart_execv_failed: %s", err)
                     self.restarting = False
                     self.queue_reply(chat_id, f"❌ 重启守护进程失败：{err}")
 
-            asyncio.create_task(_do_restart())
+            self._restart_task = asyncio.create_task(_do_restart())
             return
         if command == "/whitelist":
             admin_id = self.settings.owner_id

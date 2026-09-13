@@ -25,6 +25,7 @@ PURGE=0
 TRANSACTION=0
 COMMITTED=0
 SWITCHED=0
+COMMIT_CHANGED=0
 CONFIG_CHANGED=0
 UNIT_CHANGED=0
 OLD_ACTIVE=0
@@ -36,8 +37,29 @@ STAGE=
 CANDIDATE=
 TOKEN_ORIGINAL=
 TOKEN_BACKUP=
+AUTH_PID=
 
 fail() { printf '\n错误：%s\n' "$*" >&2; exit 1; }
+
+stop_auth_helper() {
+  if [[ -n "$AUTH_PID" ]] && kill -0 "$AUTH_PID" 2>/dev/null; then
+    echo "正在等待授权助手及相关子进程退出……" >&2
+    kill -TERM "$AUTH_PID" 2>/dev/null || true
+    local wait_count=0
+    while kill -0 "$AUTH_PID" 2>/dev/null && (( wait_count < 30 )); do
+      sleep 0.1
+      (( wait_count++ ))
+    done
+    if kill -0 "$AUTH_PID" 2>/dev/null; then
+      kill -KILL "$AUTH_PID" 2>/dev/null || true
+      sleep 0.2
+    fi
+    if kill -0 "$AUTH_PID" 2>/dev/null; then
+      echo "⚠️ 警告：授权助手 (PID: $AUTH_PID) 清理未确认，可能仍在后台运行。" >&2
+    fi
+    AUTH_PID=
+  fi
+}
 
 usage() {
   cat <<'EOF'
@@ -176,23 +198,31 @@ rollback() {
       ln -s -- "$OLD_TARGET" "$APP"
     fi
   fi
+  if [[ "$COMMIT_CHANGED" == 1 || "$SWITCHED" == 1 ]]; then
+    if [[ -f "$BACKUP/current_commit" ]]; then
+      if ! cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"; then
+        echo "❌ 版本记录恢复失败：无法将备份还原至 $CONFIG_DIR/current_commit。备份文件保留在：$BACKUP/current_commit" >&2
+      fi
+    else
+      rm -f -- "$CONFIG_DIR/current_commit" 2>/dev/null || true
+    fi
+  fi
   if [[ "$CONFIG_CHANGED" == 1 ]]; then
     if [[ -f "$BACKUP/config.env" ]]; then
-      cp -p -- "$BACKUP/config.env" "$CONFIG"
+      if ! cp -p -- "$BACKUP/config.env" "$CONFIG"; then
+        echo "❌ 配置恢复失败：无法将备份还原至 $CONFIG。备份文件保留在：$BACKUP/config.env" >&2
+      fi
     else
-      rm -f -- "$CONFIG"
-    fi
-    if [[ -f "$BACKUP/current_commit" ]]; then
-      cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"
-    else
-      rm -f -- "$CONFIG_DIR/current_commit"
+      rm -f -- "$CONFIG" 2>/dev/null || true
     fi
   fi
   if [[ "$UNIT_CHANGED" == 1 ]]; then
     if [[ -f "$BACKUP/service" ]]; then
-      cp -p -- "$BACKUP/service" "$UNIT"
+      if ! cp -p -- "$BACKUP/service" "$UNIT"; then
+        echo "❌ 服务配置恢复失败：无法将备份还原至 $UNIT。备份文件保留在：$BACKUP/service" >&2
+      fi
     else
-      rm -f -- "$UNIT"
+      rm -f -- "$UNIT" 2>/dev/null || true
     fi
   fi
   systemctl daemon-reload || true
@@ -204,6 +234,7 @@ rollback() {
   if [[ "$OLD_ACTIVE" == 1 ]]; then
     systemctl restart "$SERVICE" || echo '旧服务恢复启动失败，请人工检查。' >&2
   fi
+  stop_auth_helper
   if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
     if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
       TOKEN_BACKUP=
@@ -218,6 +249,7 @@ on_exit() {
   local rc=$?
   trap - EXIT INT TERM
   set +e
+  stop_auth_helper
   if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" && -n "$TOKEN_ORIGINAL" ]]; then
     if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
       TOKEN_BACKUP=
@@ -486,7 +518,10 @@ _ONBOARDING_EOF
         fail "凭据备份失败：无法将旧凭据移动至备份路径，已保留原件，安装中止。"
       fi
     fi
-    as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
+    as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" &
+    AUTH_PID=$!
+    wait "$AUTH_PID" || auth_rc=$?
+    AUTH_PID=
     if [[ "$auth_rc" -ne 0 ]]; then
       if [[ -n "$TOKEN_BACKUP" && -f "$TOKEN_BACKUP" ]]; then
         if mv -f -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"; then
@@ -536,9 +571,14 @@ _ONBOARDING_EOF
   fi
   ln -s -- "$release" "$APP.next.$$"
   mv -Tf -- "$APP.next.$$" "$APP"
-  echo "$commit" > "$CONFIG_DIR/current_commit" 2>/dev/null || true
-  CONFIG_CHANGED=1
+  echo "$commit" > "$CONFIG_DIR/current_commit.next.$$"
+  if ! mv -f -- "$CONFIG_DIR/current_commit.next.$$" "$CONFIG_DIR/current_commit"; then
+    rm -f -- "$CONFIG_DIR/current_commit.next.$$" 2>/dev/null || true
+    fail "版本记录写入失败：无法更新 $CONFIG_DIR/current_commit，中止部署并回滚。"
+  fi
+  COMMIT_CHANGED=1
   mv -f -- "$CANDIDATE" "$CONFIG"
+  CONFIG_CHANGED=1
   CANDIDATE=
   chown root:root "$CONFIG"; chmod 0600 "$CONFIG"
   /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" --user root > "$BACKUP/new.service"

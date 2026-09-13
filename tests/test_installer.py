@@ -347,8 +347,8 @@ fi
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf = io.StringIO()
-            with patch("sys.stdout", buf), patch("builtins.input", return_value="good_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "good_code")
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             self.assertIn("Google 账号授权成功", out)
@@ -371,9 +371,8 @@ exit 1
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="bad_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "bad_code")
             self.assertEqual(rc, 1)
             self.assertIn("授权码无效或格式不正确", buf_err.getvalue())
 
@@ -389,8 +388,10 @@ sleep 10
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf = io.StringIO()
-            with patch("sys.stdout", buf), patch("builtins.input", side_effect=KeyboardInterrupt):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            def _raise_ki():
+                raise KeyboardInterrupt
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=_raise_ki)
             self.assertEqual(rc, 20)
             self.assertIn("已取消授权流程", buf.getvalue())
 
@@ -441,12 +442,11 @@ exit 1
             buf_out = io.StringIO()
             buf_err = io.StringIO()
             import time
-            def fake_input(prompt):
+            def fake_input(prompt=None):
                 time.sleep(0.05)
                 return "some_code"
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", side_effect=fake_input):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=fake_input)
             self.assertEqual(rc, 1)
             self.assertIn("授权会话已结束，请重新开始", buf_err.getvalue())
             self.assertNotIn("正在验证授权码", buf_out.getvalue())
@@ -463,9 +463,8 @@ sleep 10
             buf_out = io.StringIO()
             buf_err = io.StringIO()
             with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="some_code"), \
                  patch("os.write", side_effect=OSError(5, "Input/output error")):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "some_code")
             self.assertEqual(rc, 1)
             self.assertIn("授权会话已结束，请重新开始", buf_err.getvalue())
             self.assertNotIn("正在验证授权码", buf_out.getvalue())
@@ -487,8 +486,8 @@ exit 1
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf = io.StringIO()
-            with patch("sys.stdout", buf), patch("builtins.input", return_value="valid_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=10)
+            with patch("sys.stdout", buf):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=10, input_fn=lambda: "valid_code")
             self.assertEqual(rc, 0)
             self.assertIn("Google 账号授权成功", buf.getvalue())
 
@@ -508,9 +507,8 @@ exit 42
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value=secret_code):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: secret_code)
             self.assertEqual(rc, 1)
             err = buf_err.getvalue()
             self.assertNotIn(secret_code, err)
@@ -564,9 +562,8 @@ sleep 30
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf_err = io.StringIO()
-            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="slow_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.3)
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.3, input_fn=lambda: "slow_code")
             self.assertEqual(rc, 1)
             self.assertIn("超时", buf_err.getvalue())
 
@@ -591,10 +588,9 @@ exit 1
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            inputs = ["", "   ", "valid_code"]
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", side_effect=inputs):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            inputs = iter(["", "   ", "valid_code"])
+            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=inputs.__next__)
             self.assertEqual(rc, 0)
             out = buf_out.getvalue()
             self.assertIn("输入为空", out)
@@ -618,9 +614,8 @@ exit 1
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
-            with patch("sys.stdout", buf_out), \
-                 patch("builtins.input", return_value="http://localhost:8080/oauth/callback?state=xyz&code=extracted_code_123"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "http://localhost:8080/oauth/callback?state=xyz&code=extracted_code_123")
             self.assertEqual(rc, 0)
 
     def test_cli_exits_before_user_input_promptly_detected(self):
@@ -674,9 +669,8 @@ sleep 10
 
             # 2. Exchange timeout
             buf_err2 = io.StringIO()
-            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err2), \
-                 patch("builtins.input", return_value="my_code"):
-                rc2 = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.2)
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err2):
+                rc2 = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.2, input_fn=lambda: "my_code")
             self.assertEqual(rc2, 1)
             self.assertIn("通信换票超时", buf_err2.getvalue())
 
@@ -699,8 +693,8 @@ exit 1
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf_out = io.StringIO()
-            with patch("sys.stdout", buf_out), patch("builtins.input", return_value="chunk_ok"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", buf_out):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "chunk_ok")
             self.assertEqual(rc, 0)
             self.assertIn("https://accounts.google.com/o/oauth2/auth?test=split", buf_out.getvalue())
             self.assertIn("Google 账号授权成功", buf_out.getvalue())
@@ -718,9 +712,8 @@ exit 33
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
             buf_err = io.StringIO()
-            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err), \
-                 patch("builtins.input", return_value="any_code"):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", buf_err):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=lambda: "any_code")
             self.assertEqual(rc, 1)
             self.assertIn("FATAL_CLI_DIAGNOSTIC_TRAILING_ERROR_XYZ", buf_err.getvalue())
 
@@ -762,9 +755,10 @@ wait $!
 '''
             mock_agy.write_text(script)
             mock_agy.chmod(0o755)
-            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()), \
-                 patch("builtins.input", side_effect=KeyboardInterrupt):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            def _raise_ki():
+                raise KeyboardInterrupt
+            with patch("sys.stdout", io.StringIO()), patch("sys.stderr", io.StringIO()):
+                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, input_fn=_raise_ki)
             self.assertEqual(rc, 20)
             if pid_file.exists() and pid_file.read_text().strip():
                 child_pid = int(pid_file.read_text().strip())

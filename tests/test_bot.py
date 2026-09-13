@@ -1038,3 +1038,210 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(1.0)
             self.assertTrue(worker_finished)
             mock_execv.assert_called_once()
+
+    async def test_restart_worker_timeout_aborts(self):
+        from bot import Job
+        job = Job(12345, 12345)
+        job.cancel.set()
+        job.worker = asyncio.create_task(asyncio.sleep(100))
+        self.bridge.slot = job
+
+        with patch("bot.asyncio.wait_for", side_effect=asyncio.TimeoutError()), \
+             patch("bot.os.execv") as mock_execv:
+            await self.bridge.handle(update("/restart", user=12345))
+            await self.bridge.reply_worker
+            if self.bridge._restart_task:
+                await self.bridge._restart_task
+            await self.bridge.reply_worker
+
+            self.assertFalse(self.bridge.restarting)
+            mock_execv.assert_not_called()
+            self.assertTrue(any("未能在 15 秒内完成退出与清理" in text for _, text, _ in self.api.messages))
+        job.worker.cancel()
+        try:
+            await job.worker
+        except asyncio.CancelledError:
+            pass
+
+    async def test_restart_worker_cancelled_error(self):
+        from bot import Job
+        job = Job(12345, 12345)
+        job.cancel.set()
+        job.worker = asyncio.create_task(asyncio.sleep(100))
+        self.bridge.slot = job
+
+        with patch("bot.asyncio.wait_for", side_effect=asyncio.CancelledError()), \
+             patch("bot.os.execv") as mock_execv:
+            await self.bridge.handle(update("/restart", user=12345))
+            await self.bridge.reply_worker
+            if self.bridge._restart_task:
+                try:
+                    await self.bridge._restart_task
+                except asyncio.CancelledError:
+                    pass
+
+            self.assertFalse(self.bridge.restarting)
+            mock_execv.assert_not_called()
+        job.worker.cancel()
+        try:
+            await job.worker
+        except asyncio.CancelledError:
+            pass
+
+    async def test_restart_blocked_runner_aborts(self):
+        self.bridge.runner.blocked = True
+        with patch("bot.os.execv") as mock_execv:
+            await self.bridge.handle(update("/restart", user=12345))
+            await self.bridge.reply_worker
+            if self.bridge._restart_task:
+                await self.bridge._restart_task
+            await self.bridge.reply_worker
+
+            self.assertFalse(self.bridge.restarting)
+            self.assertTrue(self.bridge.runner.blocked)
+            mock_execv.assert_not_called()
+            self.assertTrue(any("检测到底层任务进程清理未确认" in text for _, text, _ in self.api.messages))
+
+    async def test_restart_duplicate_request_rejected(self):
+        self.bridge.restarting = True
+        await self.bridge.handle(update("/restart", user=12345))
+        await self.bridge.reply_worker
+        self.assertTrue(any("守护进程已在重启流程中，请勿重复操作" in text for _, text, _ in self.api.messages))
+
+    async def test_restart_execv_failure_recovers_state(self):
+        with patch("bot.os.execv", side_effect=OSError("Exec failed")), \
+             patch("bot.asyncio.sleep", new_callable=AsyncMock):
+            await self.bridge.handle(update("/restart", user=12345))
+            await self.bridge.reply_worker
+            if self.bridge._restart_task:
+                await self.bridge._restart_task
+            await self.bridge.reply_worker
+
+            self.assertFalse(self.bridge.restarting)
+            self.assertTrue(any("重启守护进程失败：Exec failed" in text for _, text, _ in self.api.messages))
+
+    async def test_unwhitelist_during_accept_message_wait(self):
+        # User 88888 is authorized via dynamic whitelist
+        self.store.add_whitelist(88888)
+        self.assertTrue(self.bridge._is_allowed(88888))
+
+        unwhitelisted_event = asyncio.Event()
+        original_send = self.api.send
+
+        async def gated_send(chat_id, text, reply_markup=None):
+            if chat_id == 88888 and "已接收" in text:
+                self.store.remove_whitelist(88888)
+                unwhitelisted_event.set()
+            return await original_send(chat_id, text, reply_markup=reply_markup)
+
+        self.api.send = gated_send
+        await self.bridge.handle(update("Task from user 88888", user=88888))
+        await unwhitelisted_event.wait()
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+
+        self.assertFalse(self.bridge.runner.blocked)
+        self.assertFalse((self.store.directory / "result-88888.json").exists())
+
+        # Another authorized user (12345) can run tasks normally without being blocked
+        self.runner.run = AsyncMock(return_value=Result(outcome="success", text="OK from admin"))
+        await self.bridge.handle(update("Admin task", user=12345))
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
+        self.assertFalse(self.bridge.runner.blocked)
+        self.assertTrue(any("OK from admin" in text for chat, text, _ in self.api.messages if chat == 12345))
+
+    async def test_unwhitelist_during_runner_execution(self):
+        self.store.add_whitelist(88888)
+        self.assertTrue(self.bridge._is_allowed(88888))
+
+        runner_started = asyncio.Event()
+        unwhitelisted_done = asyncio.Event()
+
+        async def mock_runner_run(prompt, cancel_event, **kwargs):
+            runner_started.set()
+            await unwhitelisted_done.wait()
+            return Result(outcome="success", text="Confidential computation result")
+
+        self.runner.run = mock_runner_run
+
+        task = asyncio.create_task(self.bridge.handle(update("Work payload", user=88888)))
+        await runner_started.wait()
+
+        # Admin revokes whitelist during runner execution
+        await self.bridge.handle(update("/whitelist remove 88888", user=12345))
+        await self.bridge.reply_worker
+        unwhitelisted_done.set()
+        await task
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+
+        self.assertFalse(self.bridge.runner.blocked)
+        self.assertFalse((self.store.directory / "result-88888.json").exists())
+        self.assertFalse(any(chat == 88888 and "Confidential" in text for chat, text, _ in self.api.messages))
+
+        # Admin can run normally
+        self.runner.run = AsyncMock(return_value=Result(outcome="success", text="Admin OK"))
+        await self.bridge.handle(update("Admin prompt", user=12345))
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+        self.assertFalse(self.bridge.runner.blocked)
+
+    async def test_unwhitelist_during_result_send_wait(self):
+        self.store.add_whitelist(88888)
+        self.assertTrue(self.bridge._is_allowed(88888))
+
+        original_send = self.api.send
+        result_send_reached = asyncio.Event()
+        whitelist_removed = asyncio.Event()
+
+        async def gated_send(chat_id, text, reply_markup=None):
+            if chat_id == 88888 and "Secret Result" in text:
+                result_send_reached.set()
+                await whitelist_removed.wait()
+            return await original_send(chat_id, text, reply_markup=reply_markup)
+
+        self.api.send = gated_send
+        self.runner.run = AsyncMock(return_value=Result(outcome="success", text="Secret Result"))
+
+        task = asyncio.create_task(self.bridge.handle(update("Do task", user=88888)))
+        await result_send_reached.wait()
+
+        self.store.remove_whitelist(88888)
+        whitelist_removed.set()
+        await task
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+
+        self.assertFalse(self.bridge.runner.blocked)
+
+    async def test_unwhitelist_during_multipart_result_send(self):
+        self.store.add_whitelist(88888)
+        self.assertTrue(self.bridge._is_allowed(88888))
+
+        chunk1_text = "A" * 4000
+        chunk2_text = "B" * 4000
+        long_text = f"{chunk1_text}\n{chunk2_text}"
+
+        self.runner.run = AsyncMock(return_value=Result(outcome="success", text=long_text))
+
+        sent_chunks = []
+        original_send = self.api.send
+
+        async def gated_send(chat_id, text, reply_markup=None):
+            if chat_id == 88888 and ("AAA" in text or "BBB" in text):
+                sent_chunks.append(text[:20])
+                if len(sent_chunks) == 1:
+                    self.store.remove_whitelist(88888)
+            return await original_send(chat_id, text, reply_markup=reply_markup)
+
+        self.api.send = gated_send
+        await self.bridge.handle(update("Long task", user=88888))
+        if self.bridge.slot and self.bridge.slot.worker:
+            await self.bridge.slot.worker
+
+        self.assertFalse(self.bridge.runner.blocked)
+        self.assertEqual(len(sent_chunks), 1)
+        self.assertNotIn("BBB", "".join(text for chat, text, _ in self.api.messages if chat == 88888))

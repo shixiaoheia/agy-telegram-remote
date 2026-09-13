@@ -7,6 +7,7 @@ import io
 import os
 import pty
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -494,6 +495,308 @@ fi
 '''
             subprocess.run(["bash", "-c", snippet], check=True)
             self.assertEqual(current_commit.read_text(encoding="utf-8"), "commit_v1\n")
+
+    def test_real_pty_echo_suppression_on_master(self):
+        import select
+        master, slave = pty.openpty()
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        secret_code = "4/0AY0e-SECRET_TEST_CODE_NO_ECHO"
+        try:
+            with os.fdopen(slave, "r", encoding="utf-8") as terminal, \
+                 patch("sys.stdin", terminal):
+                def feed_input():
+                    import time
+                    time.sleep(0.05)
+                    os.write(master, (secret_code + "\n").encode("utf-8"))
+
+                import threading
+                t = threading.Thread(target=feed_input)
+                t.start()
+                code, status = _read_code_line(dummy_proc, timeout=2.0)
+                t.join()
+
+            self.assertEqual(status, "ok")
+            self.assertEqual(code, secret_code)
+
+            echoed = ""
+            while True:
+                r, _, _ = select.select([master], [], [], 0.05)
+                if not r:
+                    break
+                try:
+                    chunk = os.read(master, 1024)
+                    if not chunk:
+                        break
+                    echoed += chunk.decode("utf-8", errors="replace")
+                except OSError:
+                    break
+            self.assertNotIn(secret_code, echoed)
+        finally:
+            try:
+                os.close(master)
+            except OSError:
+                pass
+
+    def test_oversized_input_without_newline_is_bounded_and_reprompted(self):
+        dummy_proc = Mock()
+        dummy_proc.poll.return_value = None
+        long_garbage = "X" * 3000
+        valid_code = "4/0AY0e-ValidCodeAfterLongGarbage"
+        buf_out = io.StringIO()
+        with input_pipe(f"{long_garbage}\n{valid_code}\n", close_writer=True) as reader, \
+             patch("sys.stdin", reader), \
+             contextlib.redirect_stdout(buf_out):
+            code, status = _read_code_line(dummy_proc, timeout=2.0)
+        self.assertEqual(status, "ok")
+        self.assertEqual(code, valid_code)
+        self.assertIn("超过长度限制", buf_out.getvalue())
+
+
+class AuthLoginSigtermTests(unittest.TestCase):
+    def test_sigterm_during_await_prompt_kills_process_group(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            grandchild_pid_file = base / "grandchild.pid"
+            mock_agy = base / "mock_agy"
+            mock_agy.write_text(f"""#!/bin/bash
+sleep 100 &
+echo $! > "{grandchild_pid_file}"
+sleep 100
+""", encoding="utf-8")
+            mock_agy.chmod(0o755)
+
+            script = f"""
+import sys, time
+from pathlib import Path
+from manage import auth_login
+auth_login(Path("{mock_agy}"), Path("{base}"), Path("{base}"), timeout=30.0)
+"""
+            runner = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            import time
+            for _ in range(50):
+                if grandchild_pid_file.exists() and grandchild_pid_file.read_text().strip():
+                    break
+                time.sleep(0.05)
+            self.assertTrue(grandchild_pid_file.exists())
+            gpid = int(grandchild_pid_file.read_text().strip())
+
+            import signal
+            runner.terminate()
+            ret = runner.wait(timeout=5.0)
+            self.assertEqual(ret, 143)
+
+            time.sleep(0.2)
+            try:
+                os.kill(gpid, 0)
+                os.kill(gpid, signal.SIGKILL)
+                self.fail("Grandchild process survived SIGTERM")
+            except ProcessLookupError:
+                pass
+
+    def test_sigterm_during_await_input_kills_process_group(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            child_pid_file = base / "child.pid"
+            mock_agy = base / "mock_agy"
+            mock_agy.write_text(f"""#!/bin/bash
+echo $$ > "{child_pid_file}"
+echo "Authentication required. Please visit the URL to log in:"
+echo "  https://accounts.google.com/o/oauth2/auth?test=1"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+sleep 100
+""", encoding="utf-8")
+            mock_agy.chmod(0o755)
+
+            script = f"""
+import sys
+from pathlib import Path
+from manage import auth_login
+auth_login(Path("{mock_agy}"), Path("{base}"), Path("{base}"), timeout=30.0)
+"""
+            runner = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                text=True,
+            )
+            import time
+            for _ in range(50):
+                if child_pid_file.exists() and child_pid_file.read_text().strip():
+                    break
+                time.sleep(0.05)
+            self.assertTrue(child_pid_file.exists())
+            cpid = int(child_pid_file.read_text().strip())
+
+            import signal
+            runner.terminate()
+            ret = runner.wait(timeout=5.0)
+            self.assertEqual(ret, 143)
+
+            time.sleep(0.2)
+            try:
+                os.kill(cpid, 0)
+                os.kill(cpid, signal.SIGKILL)
+                self.fail("Child process survived SIGTERM during await_input")
+            except ProcessLookupError:
+                pass
+
+    def test_sigterm_during_await_result_kills_process_group(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            child_pid_file = base / "child.pid"
+            mock_agy = base / "mock_agy"
+            mock_agy.write_text(f"""#!/bin/bash
+echo $$ > "{child_pid_file}"
+echo "Authentication required. Please visit the URL to log in:"
+echo "  https://accounts.google.com/o/oauth2/auth?test=1"
+echo "Or, paste the authorization code here and press Enter:"
+read -r code
+sleep 100
+""", encoding="utf-8")
+            mock_agy.chmod(0o755)
+
+            script = f"""
+import sys
+from pathlib import Path
+from manage import auth_login
+auth_login(Path("{mock_agy}"), Path("{base}"), Path("{base}"), timeout=30.0, input_fn=lambda: "good_code")
+"""
+            runner = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            import time
+            for _ in range(50):
+                if child_pid_file.exists() and child_pid_file.read_text().strip():
+                    break
+                time.sleep(0.05)
+            self.assertTrue(child_pid_file.exists())
+            cpid = int(child_pid_file.read_text().strip())
+
+            import signal
+            runner.terminate()
+            ret = runner.wait(timeout=5.0)
+            self.assertEqual(ret, 143)
+
+            time.sleep(0.2)
+            try:
+                os.kill(cpid, 0)
+                os.kill(cpid, signal.SIGKILL)
+                self.fail("Child process survived SIGTERM during await_result")
+            except ProcessLookupError:
+                pass
+
+
+class CurrentCommitTransactionTests(unittest.TestCase):
+    def test_atomic_current_commit_write_failure_causes_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            config_dir = base / "etc"
+            config_dir.mkdir()
+            current_commit = config_dir / "current_commit"
+            current_commit.write_text("commit_old\n", encoding="utf-8")
+
+            backup_dir = base / "backup"
+            backup_dir.mkdir()
+
+            snippet = f'''
+CONFIG_DIR="{config_dir}"
+BACKUP="{backup_dir}"
+COMMIT_CHANGED=0
+SWITCHED=0
+
+rollback() {{
+  if [[ "$COMMIT_CHANGED" -eq 1 || "$SWITCHED" -eq 1 ]]; then
+    if [[ -f "$BACKUP/current_commit" ]]; then
+      cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"
+    else
+      rm -f -- "$CONFIG_DIR/current_commit"
+    fi
+  fi
+}}
+
+cp -p -- "$CONFIG_DIR/current_commit" "$BACKUP/current_commit"
+
+# Simulate write failure by making current_commit.next.$$ an existing directory
+mkdir "$CONFIG_DIR/current_commit.next.$$"
+if printf '%s\\n' "commit_new" > "$CONFIG_DIR/current_commit.next.$$" 2>/dev/null && \\
+   mv -f -- "$CONFIG_DIR/current_commit.next.$$" "$CONFIG_DIR/current_commit"; then
+  COMMIT_CHANGED=1
+else
+  rm -rf "$CONFIG_DIR/current_commit.next.$$"
+  COMMIT_CHANGED=1
+  rollback
+  echo "CURRENT_COMMIT_WRITE_FAILED" >&2
+  exit 1
+fi
+'''
+            res = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True)
+            self.assertEqual(res.returncode, 1)
+            self.assertIn("CURRENT_COMMIT_WRITE_FAILED", res.stderr)
+            self.assertEqual(current_commit.read_text(encoding="utf-8"), "commit_old\n")
+
+    def test_rollback_stops_auth_helper_before_restoring_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            token = base / "oauth_token"
+            token.write_text("ORIGINAL_TOKEN", encoding="utf-8")
+            token_backup = base / "oauth_token.bak"
+            token_backup.write_text("ORIGINAL_TOKEN", encoding="utf-8")
+
+            pid_file = base / "auth.pid"
+            auth_proc = subprocess.Popen(
+                ["bash", "-c", f'echo $$ > "{pid_file}"; while true; do echo "ROGUE_WRITE" > "{token}"; sleep 0.05; done'],
+                start_new_session=True,
+            )
+            import time
+            for _ in range(50):
+                if pid_file.exists() and pid_file.read_text().strip():
+                    break
+                time.sleep(0.02)
+            auth_pid = int(pid_file.read_text().strip())
+
+            snippet = f'''
+AUTH_PID="{auth_proc.pid}"
+TOKEN_ORIGINAL="{token}"
+TOKEN_BACKUP="{token_backup}"
+
+stop_auth_helper() {{
+  if [[ -n "$AUTH_PID" ]] && kill -0 "$AUTH_PID" 2>/dev/null; then
+    kill -TERM "$AUTH_PID" 2>/dev/null || true
+    for _ in {{1..20}}; do
+      if ! kill -0 "$AUTH_PID" 2>/dev/null; then
+        break
+      fi
+      sleep 0.05
+    done
+    if kill -0 "$AUTH_PID" 2>/dev/null; then
+      kill -KILL "$AUTH_PID" 2>/dev/null || true
+    fi
+  fi
+}}
+
+stop_auth_helper
+cp -p -- "$TOKEN_BACKUP" "$TOKEN_ORIGINAL"
+'''
+            subprocess.run(["bash", "-c", snippet], check=True)
+            import signal
+            try:
+                os.kill(auth_pid, signal.SIGKILL)
+            except OSError:
+                pass
+            auth_proc.poll()
+            time.sleep(0.1)
+            self.assertEqual(token.read_text(encoding="utf-8"), "ORIGINAL_TOKEN")
 
 
 if __name__ == "__main__":
