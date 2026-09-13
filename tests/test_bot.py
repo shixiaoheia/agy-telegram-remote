@@ -130,11 +130,25 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         if self.bridge.slot and self.bridge.slot.worker:
             await self.bridge.slot.worker
 
-    async def test_bot_runtime_refuses_root(self):
+    async def test_bot_runtime_allows_root_service(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
         from bot import start
-        from settings import ConfigError
-        with patch("bot.os.geteuid", return_value=0), self.assertRaises(ConfigError):
+
+        real_uid = os.geteuid()
+        # bot.os and state_store.os normally reference the SAME module.
+        # Replace only bot's module binding; never patch shared os.geteuid.
+        bot_os = SimpleNamespace(**vars(os))
+        bot_os.geteuid = lambda: 0
+        with patch("bot.os", bot_os), \
+             patch("bot.LOG.warning") as warning, \
+             patch("bot.Bridge.run", new_callable=AsyncMock) as run:
+            self.assertEqual(os.geteuid(), real_uid)
+            self.assertEqual(self.settings.state_dir.stat().st_uid, real_uid)
             await start(self.settings, None)
+            run.assert_awaited_once()
+            warning.assert_called_once()
+        self.assertEqual(os.geteuid(), real_uid)
 
     async def test_unauthorized_user_and_group_ignored(self):
         await self.handle(update("task", user=999))

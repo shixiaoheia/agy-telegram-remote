@@ -1066,7 +1066,7 @@ class Bridge:
 
 async def start(settings: Settings, ready_file: Path | None) -> None:
     if os.geteuid() == 0:
-        raise ConfigError("Bot 和 agy 禁止以 root 运行。")
+        LOG.warning("running_as_root: Bot 和 agy 以 root 特权运行于宿主机（纯 Root 部署模式）；请确保白名单内的 Telegram 账户完全受信任。")
     if not settings.workspace.is_dir() or not os.access(settings.workspace, os.R_OK | os.W_OK | os.X_OK):
         raise ConfigError("工作目录不可用。")
     store = Store(settings.state_dir, settings.allowed, settings.max_reply,
