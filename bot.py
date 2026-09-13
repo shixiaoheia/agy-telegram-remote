@@ -70,6 +70,7 @@ INLINE_MARKDOWN = re.compile(
 
 def render_inline_markdown(text: str) -> str:
     """Render the small, safe Markdown subset supported by Telegram HTML."""
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
     result: list[str] = []
     cursor = 0
     for match in INLINE_MARKDOWN.finditer(text):
@@ -90,13 +91,53 @@ def render_inline_markdown(text: str) -> str:
     return "".join(result)
 
 
+MERMAID_START = re.compile(
+    r"^\s*(?:flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline)\b",
+    re.IGNORECASE,
+)
+
+
+def table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def is_table_separator(line: str) -> bool:
+    cells = table_cells(line)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
 def render_markdown_html(text: str) -> str:
     """Convert common model Markdown to Telegram's conservative HTML subset."""
     lines: list[str] = []
+    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     code_lines: list[str] = []
     code_language = ""
     in_code_block = False
-    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+    index = 0
+    while index < len(raw_lines):
+        raw_line = raw_lines[index]
+        if (raw_line.strip().startswith("|") and raw_line.strip().endswith("|")
+                and index + 1 < len(raw_lines) and is_table_separator(raw_lines[index + 1])):
+            headers = table_cells(raw_line)
+            index += 2
+            while (index < len(raw_lines) and raw_lines[index].strip().startswith("|")
+                   and raw_lines[index].strip().endswith("|")):
+                cells = table_cells(raw_lines[index])
+                fields = [
+                    f"<b>{render_inline_markdown(header)}</b>：{render_inline_markdown(value)}"
+                    for header, value in zip(headers, cells)
+                ]
+                lines.append("\n".join(fields))
+                index += 1
+            continue
+        if MERMAID_START.match(raw_line):
+            diagram = [raw_line]
+            index += 1
+            while index < len(raw_lines) and raw_lines[index].strip():
+                diagram.append(raw_lines[index])
+                index += 1
+            lines.append(f"<pre><code>{html.escape(chr(10).join(diagram))}</code></pre>")
+            continue
         fence = re.match(r"^\s*```([A-Za-z0-9_+-]{0,32})\s*$", raw_line)
         if fence:
             if in_code_block:
@@ -108,9 +149,11 @@ def render_markdown_html(text: str) -> str:
             else:
                 code_language = fence.group(1)
                 in_code_block = True
+            index += 1
             continue
         if in_code_block:
             code_lines.append(raw_line)
+            index += 1
             continue
         heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", raw_line)
         bullet = re.match(r"^\s*[-*+]\s+(.+)$", raw_line)
@@ -125,6 +168,7 @@ def render_markdown_html(text: str) -> str:
             lines.append("")
         else:
             lines.append(render_inline_markdown(raw_line))
+        index += 1
     if in_code_block:
         language = f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
         lines.append(f"<pre><code{language}>{html.escape(chr(10).join(code_lines))}</code></pre>")

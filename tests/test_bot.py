@@ -445,6 +445,19 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('<a href="https://example.com">文档</a>', rich)
         self.assertIn("<pre><code class=\"language-python\"># 代码注释</code></pre>", rich)
 
+    async def test_result_renders_tables_breaks_and_mermaid_readably(self):
+        rich = describe_html({
+            "outcome": "success",
+            "text": (
+                "| 类别 | 工具 |\n| :--- | :--- |\n| 文件 | write<br>view |\n\n"
+                "flowchart TD\n    A[开始] --> B[结束]"
+            ),
+        })
+        self.assertIn("<b>类别</b>：文件", rich)
+        self.assertIn("<b>工具</b>：write\nview", rich)
+        self.assertNotIn("| :--- |", rich)
+        self.assertIn("<pre><code>flowchart TD", rich)
+
     async def test_task_result_uses_telegram_html(self):
         self.runner.result = Result("success", text="# 标题\n\n**加粗内容**")
         await self.handle(update("format this"))
