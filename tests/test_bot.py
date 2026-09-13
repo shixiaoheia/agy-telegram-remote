@@ -460,8 +460,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         text, keyboard = self.api.messages[0][1:]
         self.assertNotIn(self.bridge.slot.job_id, text)
         self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "🛑 取消任务")
-        await self.handle(callback_update(f"cancel:{self.bridge.slot.job_id}"))
-        self.assertTrue(self.bridge.slot.cancel.is_set())
+        job = self.bridge.slot
+        await self.handle(callback_update(f"cancel:{job.job_id}"))
+        self.assertTrue(job.cancel.is_set())
 
     async def test_initialize_registers_telegram_command_menu(self):
         await self.bridge.initialize()
@@ -474,14 +475,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.api.answered_callbacks), 1)
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_opus")
         self.assertIn("claude-opus-4-6-thinking", self.api.answered_callbacks[0][1])
-        self.assertIn("已切换模型为", self.api.messages[-1][1])
+        self.assertIn("已选择模型", self.api.messages[-1][1])
+        self.assertIn("请选择该模型的思考强度", self.api.messages[-1][1])
 
     async def test_callback_query_resets_model_default(self):
         self.store.set_model(12345, "claude-sonnet-4-6")
         await self.handle(callback_update("model:default", cq_id="cq_def"))
         self.assertIsNone(self.store.get_model(12345))
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_def")
-        self.assertIn("已恢复为默认模型", self.api.messages[-1][1])
+        self.assertIn("已选择模型：默认", self.api.messages[-1][1])
+        self.assertIn("请选择该模型的思考强度", self.api.messages[-1][1])
 
     async def test_conversation_memory_is_persisted_and_passed(self):
         self.runner.result = Result("success", text="Turn 1 ok", conversation_id="conv-turn-1", num_turns=1)

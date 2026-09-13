@@ -121,6 +121,7 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
                 (200, {"ok": True, "result": {"id": 10, "is_bot": True}}),
                 (200, {"ok": True, "result": {"url": ""}}),
                 (200, {"ok": True, "result": []}),
+                (200, {"ok": True, "result": True}),
                 (200, {"ok": True, "result": {"message_id": 1}}),
                 (502, b"temporary gateway error"),
                 (200, {"ok": True, "result": {"message_id": 2}}),
