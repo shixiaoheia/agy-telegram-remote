@@ -635,9 +635,19 @@ exit 7
             mock_agy.chmod(0o755)
             buf_err = io.StringIO()
             buf_out = io.StringIO()
-            with patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
-                rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            # An open, silent input pipe models a user who has not typed yet.
+            # In CI the inherited stdin may be /dev/null: that is EOF/cancel,
+            # a different scenario from "CLI exited before user input".
+            read_fd, write_fd = os.pipe()
+            try:
+                with os.fdopen(read_fd, "r", encoding="utf-8") as terminal_input, \
+                     patch("sys.stdin", terminal_input), \
+                     patch("sys.stdout", buf_out), patch("sys.stderr", buf_err):
+                    rc = auth_login(mock_agy, Path(td), Path(td), timeout=5)
+            finally:
+                os.close(write_fd)
             self.assertEqual(rc, 1)
+            self.assertNotIn("正在验证授权码", buf_out.getvalue())
             err = buf_err.getvalue()
             self.assertIn("授权会话已结束", err)
             self.assertIn("请勿在 Shell 提示符后继续粘贴授权码", err)

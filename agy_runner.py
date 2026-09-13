@@ -47,6 +47,15 @@ class Result:
 def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
+    # Explicit service eligibility denial is NOT an expired credential.
+    # Do not classify a bare "location" or "country" as a rejection.
+    if any(s in low for s in (
+        "not eligible for antigravity",
+        "not currently available in your location",
+        "not available in your country",
+        "unsupported region",
+    )):
+        return "eligibility"
     is_network = any(s in low for s in (
         "connection", "network", "dns", "timed out", "timeout", "deadline exceeded",
         "certificate", "unable to resolve", "dial tcp", "reset by peer", "broken pipe",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import io
 import os
 import re
 import signal
@@ -16,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
 
-from agy_runner import Runner, SMOKE_PROMPT
+from agy_runner import Runner, SMOKE_PROMPT, classify
 from settings import (ConfigError, KEYS, Settings, check_no_symlink, merged_config,
                       parse_env, read_private_text, serialize_env)
 from state_store import read_json
@@ -122,7 +123,8 @@ async def smoke(settings: Settings, allow_root: bool = True) -> int:
         print(result.text.strip())
     if result.category == "auth":
         return 10
-    return {"quota": 12, "network": 13, "permission": 14}.get(result.category, 15)
+    return {"quota": 12, "network": 13, "permission": 14,
+            "eligibility": 18}.get(result.category, 15)
 
 
 async def check_token(settings: Settings) -> int:
@@ -287,6 +289,11 @@ def classify_auth_error(raw_output: str, exit_code: int, code: str = "",
     """Categorize OAuth failures and return a clean, user-friendly diagnostic message."""
     clean = redact_auth_data(raw_output, code=code)
     low = clean.lower()
+
+    if classify(clean) == "eligibility":
+        return ("地区或资格受限：Google 拒绝了当前账号或访问环境的 Antigravity 资格。"
+                "请核对官方支持地区和账号资格；此提示不能单独判定是账号还是 IP 问题。"
+                "不要反复删除凭据或重新授权。")
 
     if phase == "await_input" and not submitted:
         if "timeout" in low or "timed out" in low:
@@ -472,7 +479,7 @@ def auth_login(agy: Path, home: Path, workspace: Path,
 
             low = buffer.lower()
             if not waiting_shown and "waiting for authentication" in low:
-                print("⏳ 正在等待授权（有效时间约 60 秒）……")
+                print("⏳ 正在等待授权；有效期限由 CLI 控制，请在当前会话内完成。")
                 waiting_shown = True
 
             if any(p in low for p in ("paste the authorization code", "paste the code", "authorization code:")):
@@ -510,6 +517,11 @@ def auth_login(agy: Path, home: Path, workspace: Path,
         if status == "process_exited":
             buffer += drain_pty(master)
             print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
+            err_msg = classify_auth_error(
+                buffer, proc.returncode if proc.returncode is not None else 1,
+                phase="await_input", submitted=False,
+            )
+            print(err_msg, file=sys.stderr)
             print("👉 提示：当前授权会话已终止，请勿在 Shell 提示符后继续粘贴授权码。", file=sys.stderr)
             return 1
 

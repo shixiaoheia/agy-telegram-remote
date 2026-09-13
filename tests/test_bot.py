@@ -133,11 +133,24 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.slot.worker
 
     async def test_bot_runtime_allows_root_service(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
         from bot import start
-        with patch("bot.os.geteuid", return_value=0), \
-             patch("state_store.os.geteuid", return_value=os.geteuid()), \
-             patch("bot.Bridge.run", return_value=None):
+
+        real_uid = os.geteuid()
+        # bot.os and state_store.os normally reference the SAME module.
+        # Replace only bot's module binding; never patch shared os.geteuid.
+        bot_os = SimpleNamespace(**vars(os))
+        bot_os.geteuid = lambda: 0
+        with patch("bot.os", bot_os), \
+             patch("bot.LOG.warning") as warning, \
+             patch("bot.Bridge.run", new_callable=AsyncMock) as run:
+            self.assertEqual(os.geteuid(), real_uid)
+            self.assertEqual(self.settings.state_dir.stat().st_uid, real_uid)
             await start(self.settings, None)
+            run.assert_awaited_once()
+            warning.assert_called_once()
+        self.assertEqual(os.geteuid(), real_uid)
 
     async def test_runner_typeerror_job_executed_only_once(self):
         # When runner.run raises TypeError, the job must execute exactly once without retrying

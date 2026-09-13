@@ -494,9 +494,14 @@ _ONBOARDING_EOF
       fail 'agy 自检未通过：网络连接或通信超时（代码 13）。已保留现有凭据，请检查网络或代理配置，无需重新授权。'
     elif [[ "$smoke_rc" -eq 14 ]]; then
       fail 'agy 自检未通过：工具权限拒绝（代码 14）。已保留现有凭据，无需重新授权。'
+    elif [[ "$smoke_rc" -eq 18 ]]; then
+      fail 'agy 自检未通过：Google 返回账号或访问地区资格拒绝（代码 18）。已保留现有凭据，未自动重新授权；请核对官方资格要求。'
     else
       fail "agy 自检未通过（代码 $smoke_rc）。已保留现有凭据，配额、网络和协议问题不能靠反复重新授权解决。"
     fi
+  fi
+  if [[ "$smoke_rc" -eq 18 ]]; then
+    fail 'Google 登录后，Antigravity 资格检查仍被拒绝（代码 18）。不会自动再次授权；请核对账号及访问地区资格。'
   fi
   [[ "$smoke_rc" == 0 ]] || fail \
     "agy 自检未通过（代码 $smoke_rc）。配额、网络和协议问题不能靠反复重新授权解决。"
