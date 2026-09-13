@@ -161,8 +161,11 @@ flowchart LR
   - 任务接收与结果回传全面升级为卡片式排版、双分割线与动态状态徽标；
   - 告别生硬的命令行报错，提供自然优雅的交互感知。
 - 🔘 **Telegram 行内按钮一键直切模型与引擎调优（Inline Keyboard）**：
-  - 发送 `/model`、`/effort`、`/mode` 弹出交互式按钮面板，手指轻点即刻切换模型、思考深度（low/med/high）与模式（plan/code）；
+  - 发送 `/model` 后先选择模型，再选择思考强度（极速 / 均衡 / 深度）；`/mode` 可单独切换计划或落地模式；
   - 切换即时弹出顶部 Toast 气泡反馈，同时保留文本别名输入习惯。
+- 📚 **任务历史与安全附件分析**：
+  - `/history` 展示最近 10 条任务的标题、状态与耗时，点击按钮可打开该条完整结果；
+  - 可直接发送截图、日志或常见代码文件，单文件最大 10MB；文件仅临时放入本次任务的私有目录，任务结束自动清理。
 - 🧠 **连续对话与多轮记忆能力（Context Continuity）**：
   - 自动维护并持久化用户会话，底层注入 `agy --conversation <id>` 保持多轮上下文；
   - 支持 `/new` / `/reset` 一键遗忘并开启全新任务会话。
@@ -189,7 +192,7 @@ flowchart LR
   - 引入有界异步队列解耦任务与控制通道，长任务执行期间 `/cancel`、`/status` 秒级响应，彻底杜绝网络卡顿引发的假死；
   - 启动阶段内置网络退避重试，优雅吸收突发 429 或瞬态网络抖动。
 - 📦 **极简三步交互式部署向导**：
-  - 自带交互式管理菜单（安装/更新、卸载、退出）；
+  - 自带交互式管理菜单（`1` 安装、`2` 更新、`3` 彻底卸载、`0` 退出）；
   - 极简三步走：`Bot Token` → `Telegram 数字 ID` → `Google 授权`，自动配置 systemd 守护进程。
 
 ---
@@ -260,7 +263,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 ```
 
 > [!TIP]
-> **平滑升级**：后续版本更新时，直接重新执行 `bash install.sh` 并选 `1`，步骤 1 和步骤 2 直接按回车即可完整保留原有的 Token、白名单与运行配置，平滑无缝升级！详见 [管理菜单说明文档](docs/INSTALL_MENU.md)。
+> **平滑升级**：后续版本更新时，直接重新执行 `bash install.sh` 并选 `2`（更新），步骤 1 和步骤 2 直接按回车即可完整保留原有的 Token、白名单与运行配置，平滑无缝升级！详见 [管理菜单说明文档](docs/INSTALL_MENU.md)。
 
 ---
 
@@ -270,8 +273,8 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 | 运维场景 | 执行命令 | 功能说明 |
 | :--- | :--- | :--- |
-| 🎮 **打开交互管理菜单** | `bash install.sh` | 弹出管理菜单，支持一键升级、更新配置或安全卸载 |
-| 🔄 **一键无缝平滑升级** | `bash install.sh` 选 `1` | 自动保留原 Token、白名单、多用户偏好与登录凭据，静默升级代码 |
+| 🎮 **打开交互管理菜单** | `bash install.sh` | 菜单：`1` 安装、`2` 更新、`3` 彻底卸载、`0` 退出 |
+| 🔄 **一键无缝平滑升级** | `bash install.sh` 选 `2` | 自动保留原 Token、白名单、多用户偏好与登录凭据，静默升级代码 |
 | 👑 **升级并切换为 Root 模式** | `bash install.sh --root` | 保留配置并平滑切换到 Root 极简模式运行 |
 | 🔑 **重新进行 Google 授权** | `bash install.sh --reauth` | 强制唤起 Google 浏览器 OAuth 重新授权 |
 | 📊 **查看后台服务实时状态** | `sudo systemctl status agy-telegram-remote` | 查看 systemd 守护进程状态、PID 与内存 |
@@ -300,7 +303,7 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 
 1. `/start`：验证机器人是否在线，返回欢迎界面与命令说明；
 2. 发送测试任务：`只回复“连接成功”，不要使用工具或修改任何文件。`，验证基础执行流程与结果回传；
-3. `/last`：取回上一条任务保存的完整结果，验证状态持久化与本地存储。
+3. `/history`：确认可查看最近任务并点开结果；或发送一张截图/一个 `.log` 文件验证附件分析。
 
 ---
 
@@ -350,9 +353,9 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 | | `claude-opus-4-6-thinking` | `opus` | Claude Opus 4.6 顶级旗舰思考模型 |
 | 🌐 **开源顶级基座** | `gpt-oss-120b-medium` | `gpt` / `120b` | 1200 亿参数开源大模型基座 |
 
-### 💡 `/model` 交互操作方式
+### 💡 `/model` 与思考强度交互方式
 
-- **🔘 行内按钮一键直切**：发送 `/model`，界面即刻下发包含 8 个快捷选项的行内键盘。当前选中的模型前将标有 `🔘` 高亮，其余未激活项标有 `⚪`。手指轻点即可切换，并伴随 Telegram 顶部 Toast 气泡即时确认反馈。
+- **🔘 两步选择**：发送 `/model`，先从行内键盘选择模型；确认后机器人立刻展示思考强度按钮。当前选项前会标有 `🔘`，其余未激活项标有 `⚪`，切换后会显示 Telegram 顶部 Toast 提示。
 - **⌨️ 快捷别名与指令输入**：
   - 切换到 Gemini 3.8 高思考版：`/model 3.8` 或 `/model flash`
   - 切换到 Gemini 3.1 Pro 旗舰版：`/model pro`
@@ -365,25 +368,11 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 
 ---
 
-## ⚡ 思考深度与执行模式调优（`/effort` 与 `/mode`）
+## ⚡ 执行模式调优（`/mode`）
 
-通过指令或行内按钮微调底层 `agy` CLI 推理行为，实现速度、成本与安全性的最佳平衡：
+模型与思考强度统一通过 `/model` 两步选择；`/mode` 用于控制任务以“只读分析推演”还是“落地编辑执行”的方式运行：
 
-### 1. 思考深度微调（`/effort`）
-
-控制底座大模型在输出前所进行的思维链推理（Reasoning / Thinking）深度：
-
-| 思考等级 | 适用场景与性能特征 | 快捷命令与别名 |
-| :--- | :--- | :--- |
-| ⚡ **Low（极速）** | 简单单步任务、语法修饰、正则编写、日常轻量答疑，响应耗时极短 | `/effort low`、`/effort 低` |
-| ⚖️ **Medium（均衡）** | 标准特性开发、Bug 修复、常见脚本编写，兼顾推理深度与时间 | `/effort medium`、`/effort med`、`/effort 中` |
-| 🧠 **High（深度）** | 大型项目重构、底层性能瓶颈攻坚、系统架构推演、复杂算法设计 | `/effort high`、`/effort 高` |
-| 🔄 **Default（默认）** | 清空用户自定义配置，跟随模型自身原生默认策略 | `/effort default`、`/effort reset` |
-
-> [!TIP]
-> 发送单独的 `/effort` 指令将直接弹出 Telegram 行内按钮面板（`[🔘 ⚡ 极速 (Low)] [⚪ ⚖️ 均衡 (Med)]` / `[⚪ 🧠 深度 (High)] [⚪ 🔄 恢复默认]`），点选后后续所有任务均自动注入 `--effort <level>`。
-
-### 2. 执行模式控制（`/mode`）
+### 执行模式控制（`/mode`）
 
 控制 `agy` 是以“只读分析推演”还是以“落地编辑执行”的方式工作：
 
@@ -501,7 +490,7 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 
 ---
 
-## 🛑 任务控制与状态查询（`/status`、`/cancel`、`/last`、`/id`）
+## 🛑 任务控制、历史与附件输入（`/status`、`/cancel`、`/last`、`/history`、`/id`）
 
 - **实时状态聚合（`/status`）**：
   - 汇报当前任务槽位状态（空闲 / 正在执行某 ID 任务 / 正在取消清理）；
@@ -515,6 +504,13 @@ sudo journalctl -u agy-telegram-remote -n 80 --no-pager
 - **本地零算力回溯（`/last`）**：
   - 重新取回上一次任务执行完成的完整结果报告卡片；
   - 直接读取本地原子持久化的 `state/last-{user}.json`，不消耗任何 Google API 配额或算力。
+- **任务历史（`/history`）**：
+  - 展示当前用户最近 10 条任务的标题、最终状态与执行耗时；历史严格按 Telegram 用户隔离，默认保留 7 天；
+  - 点击任务对应的 Telegram 行内按钮即可重新打开完整结果，不会重新执行 agy，也不会消耗配额。
+- **截图、日志与代码文件输入**：
+  - 直接向机器人发送截图，或发送常见文本、日志和代码文件；可在附件说明中写明“分析这个报错”“检查这段代码”等要求；
+  - 单文件最大 **10MB**。支持 `.txt`、`.log`、`.md`、`.json`、`.yaml`、`.py`、`.js`、`.ts`、`.sh`、`.sql`、`.java`、`.go`、`.rs`、`.c`、`.cpp` 等常见格式；
+  - 为避免误传敏感或可执行内容，`.env`、密钥文件、压缩包、可执行程序及未知格式会被拒绝。通过校验的附件仅临时存入本次任务的私有目录，任务结束后自动删除。
 - **身份识别（`/id`）**：
   - 回显当前发消息账号的 Telegram 数字用户 ID，便于初次部署时填入白名单；
   - 内置全局 2 秒限频防刷机制，避免陌生未授权用户高频调用消耗 Bot API 带宽。
@@ -557,9 +553,10 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 | ├── `model-{user_id}.json` | `0600` | 用户独立的 AI 模型偏好文件 |
 | ├── `effort-{user_id}.json` | `0600` | 用户独立的思考深度偏好文件 |
 | ├── `mode-{user_id}.json` | `0600` | 用户独立的执行模式偏好文件 |
-| ├── `conversation-{user_id}.json` | `0600` | 用户活动会话上下文标识与轮次持久化 |
+| ├── `conv-{user_id}.json` | `0600` | 用户活动会话上下文标识与轮次持久化 |
 | ├── `usage-{user_id}.json` | `0600` | 用户历史累计 Token 资源消耗记录 |
 | ├── `last-{user_id}.json` | `0600` | 用户最近一次任务交付结果的持久化缓存 |
+| ├── `history-{user_id}.json` | `0600` | 最近 10 条任务的私有历史与可回看的完整结果 |
 | └── `watermark.json` | `0600` | Telegram 更新轮询 offset 水位持久化 |
 | `/run/lock/agy-telegram-remote-deploy.lock` | `root:root` | 安装、更新、卸载部署排他锁，防止并发操作踩踏 |
 | `/var/backups/agy-telegram-remote/` | `root:root` (0700) | root 专有升级备份目录，保障失败时可安全回滚 |
@@ -597,7 +594,7 @@ sudo systemctl restart agy-telegram-remote
    ```bash
    bash install.sh
    ```
-   输入 `1` 进入安装/更新流程。脚本会自动检测已有配置并提示，**在步骤 1 和步骤 2 中直接回车**，将完整保留原有 Token、白名单、动态授权文件、工作目录与 Google 登录凭据，并在通过离线测试后平滑就绪。
+   首次部署输入 `1`（安装）；已有部署输入 `2`（更新）。更新时在步骤 1 和步骤 2 中直接回车，将完整保留原有 Token、白名单、动态授权文件、工作目录与 Google 登录凭据，并在通过离线测试后平滑就绪。
 
 2. **常用维护选项**：
    - **强制重新登录 Google 授权**：`bash install.sh --reauth`
