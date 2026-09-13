@@ -878,9 +878,24 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
 
         await self.bridge.handle(callback_update("effort:low", user=12345))
         await self.bridge.reply_worker
-        self.assertEqual(self.store.get_effort(12345), "low")
-        self.assertIn("已切换至：gemini-3.8-flash-high｜思考强度：极速", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-low")
+        self.assertIsNone(self.store.get_effort(12345))
+        self.assertIn("已切换至：gemini-3.8-flash-low｜思考强度：极速", self.api.messages[-1][1])
         self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+
+    async def test_gemini_reasoning_buttons_switch_catalog_variant_without_cli_effort(self):
+        self.store.set_model(12345, "gemini-3.7-flash-high")
+        await self.bridge.handle(callback_update("effort:medium", user=12345))
+        await self.bridge.reply_worker
+        self.assertEqual(self.store.get_model(12345), "gemini-3.7-flash-medium")
+        self.assertIsNone(self.store.get_effort(12345))
+        self.assertIn("思考强度：均衡", self.api.messages[-1][1])
+
+    async def test_effort_picker_has_only_three_reasoning_buttons(self):
+        await self.bridge.handle(update("/model gemini-3.8-flash-high"))
+        await self.bridge.reply_worker
+        buttons = [button["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
+        self.assertEqual(buttons, ["effort:low", "effort:medium", "effort:high"])
 
     async def test_mode_command_and_callback(self):
         # 1. View mode menu

@@ -48,11 +48,13 @@ SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".sql", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb", ".xml", ".csv",
 })
 FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
-# Claude and GPT-OSS expose a fixed reasoning profile in agy. Passing --effort
-# for them is rejected by the CLI, so never offer a broken selector.
-EFFORT_UNSUPPORTED_MODELS = frozenset({
-    "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium",
-})
+# Every official agy catalog entry already contains its reasoning profile in
+# the model identifier.  Passing a second --effort argument makes the CLI
+# reject several providers.  Flash variants can still use the same friendly
+# picker: it switches the *model* suffix instead of passing --effort.
+OFFICIAL_MODEL_IDS = frozenset(model_id for _, model_id, _ in OFFICIAL_MODELS)
+FLASH_VARIANT_RE = re.compile(r"^(gemini-3\.(?:6|7|8)-flash)-(high|medium|low)$")
+PRO_VARIANT_RE = re.compile(r"^(gemini-3\.1-pro)-(high|low)$")
 
 
 def clean_model_reply(text: str) -> str:
@@ -304,13 +306,37 @@ def history_summary(records: list[dict]) -> tuple[str, dict | None]:
 
 
 def supports_effort(model: str) -> bool:
-    return not model or model not in EFFORT_UNSUPPORTED_MODELS
+    """Only future/custom models may receive the separate CLI --effort flag."""
+    return not model or model not in OFFICIAL_MODEL_IDS
+
+
+def variant_model_for_effort(model: str, effort: str) -> str | None:
+    """Return the catalog model selected by a Gemini reasoning button."""
+    flash = FLASH_VARIANT_RE.fullmatch(model)
+    if flash:
+        candidate = f"{flash.group(1)}-{effort}"
+        return candidate if candidate in OFFICIAL_MODEL_IDS else None
+    pro = PRO_VARIANT_RE.fullmatch(model)
+    if pro:
+        candidate = f"{pro.group(1)}-{effort}"
+        return candidate if candidate in OFFICIAL_MODEL_IDS else None
+    return None
+
+
+def selected_variant_effort(model: str) -> str | None:
+    match = FLASH_VARIANT_RE.fullmatch(model) or PRO_VARIANT_RE.fullmatch(model)
+    return match.group(2) if match else None
+
+
+def has_effort_picker(model: str) -> bool:
+    return bool(selected_variant_effort(model)) or supports_effort(model)
 
 
 def effort_label(effort: str | None, model: str) -> str:
-    if not supports_effort(model):
+    chosen = selected_variant_effort(model) or effort
+    if not supports_effort(model) and not chosen:
         return "模型内置"
-    return {"low": "极速", "medium": "均衡", "high": "深度"}.get(effort or "", "默认")
+    return {"low": "极速", "medium": "均衡", "high": "深度"}.get(chosen or "", "默认")
 
 
 def describe(record: dict) -> str:
@@ -798,7 +824,8 @@ class Bridge:
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
     def _effort_picker(self, user: int, model_label: str) -> tuple[str, dict]:
-        curr = self.store.get_effort(user)
+        current_model = self.store.get_model(user) or self.settings.model or ""
+        curr = selected_variant_effort(current_model) or self.store.get_effort(user)
         lines = [
             f"🎯 已选择模型：{model_label}",
             "━━━━━━━━━━━━━━━━━━━━",
@@ -814,7 +841,6 @@ class Bridge:
             ],
             [
                 {"text": f"{'🔘' if curr == 'high' else '⚪'} 🧠 深度", "callback_data": "effort:high"},
-                {"text": f"{'🔘' if not curr else '⚪'} 🔄 默认", "callback_data": "effort:default"},
             ],
         ]}
         return "\n".join(lines), keyboard
@@ -885,11 +911,11 @@ class Bridge:
                     await self.api.answer_callback_query(cq_id, text="⚠️ 模型名称格式错误", show_alert=True)
                 return
             self.store.set_model(user, resolved)
-            if not supports_effort(resolved):
+            if not has_effort_picker(resolved):
                 self.store.set_effort(user, None)
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {resolved}")
-            if not supports_effort(resolved):
+            if not has_effort_picker(resolved):
                 collapsed = f"✅ 已切换至：{resolved}｜思考强度：模型内置"
                 if not await self._collapse_selector(chat_id, message, collapsed):
                     self.queue_reply(chat_id, collapsed)
@@ -902,6 +928,21 @@ class Bridge:
         if data.startswith("effort:"):
             target = data[7:].strip().lower()
             model = self.store.get_model(user) or self.settings.model or ""
+            if target in {"low", "medium", "high"}:
+                variant = variant_model_for_effort(model, target)
+                if variant is not None:
+                    self.store.set_model(user, variant)
+                    self.store.set_effort(user, None)
+                    collapsed = f"✅ 已切换至：{variant}｜思考强度：{effort_label(None, variant)}"
+                    if cq_id and hasattr(self.api, "answer_callback_query"):
+                        await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {variant}")
+                    if not await self._collapse_selector(chat_id, message, collapsed):
+                        self.queue_reply(chat_id, collapsed)
+                    return
+                if selected_variant_effort(model):
+                    if cq_id and hasattr(self.api, "answer_callback_query"):
+                        await self.api.answer_callback_query(cq_id, text="该模型暂不提供这一思考档位", show_alert=True)
+                    return
             if not supports_effort(model):
                 self.store.set_effort(user, None)
                 collapsed = f"✅ 已切换至：{model}｜思考强度：模型内置"
@@ -1177,7 +1218,7 @@ class Bridge:
                 return
             self.store.set_model(user, resolved)
             alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
-            if not supports_effort(resolved):
+            if not has_effort_picker(resolved):
                 self.store.set_effort(user, None)
                 self.queue_reply(chat_id, f"✅ 已切换至：{resolved}｜思考强度：模型内置")
                 return
