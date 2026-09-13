@@ -371,7 +371,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_command_switch_and_reset(self):
         await self.handle(update("/model claude-sonnet-4-6"))
-        self.assertIn("已切换模型为：claude-sonnet-4-6", self.api.messages[-1][1])
+        self.assertIn("已选择模型：claude-sonnet-4-6", self.api.messages[-1][1])
+        self.assertIn("请选择该模型的思考强度", self.api.messages[-1][1])
+        self.assertIsNotNone(self.api.messages[-1][2])
         self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
 
         # Check /model reflects the new choice
@@ -385,15 +387,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_command_alias_resolution(self):
         await self.handle(update("/model 3.8"))
-        self.assertIn("已切换模型为：gemini-3.8-flash-high", self.api.messages[-1][1])
+        self.assertIn("已选择模型：gemini-3.8-flash-high", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
 
         await self.handle(update("/model opus"))
-        self.assertIn("已切换模型为：claude-opus-4-6-thinking", self.api.messages[-1][1])
+        self.assertIn("已选择模型：claude-opus-4-6-thinking", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
 
         await self.handle(update("/model pro"))
-        self.assertIn("已切换模型为：gemini-3.1-pro-high", self.api.messages[-1][1])
+        self.assertIn("已选择模型：gemini-3.1-pro-high", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-high")
 
     async def test_model_command_invalid_rejected(self):
@@ -458,6 +460,23 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("| :--- |", rich)
         self.assertIn("<pre><code>flowchart TD", rich)
 
+    async def test_result_renders_admonitions_and_nested_numbered_lists(self):
+        rich = describe_html({
+            "outcome": "success",
+            "text": "> [!TIP] 保持简洁\n\n1. 第一步\n  - 子项\n2. 第二步",
+        })
+        self.assertIn("<b>💡 提示</b>：保持简洁", rich)
+        self.assertIn("1. 第一步", rich)
+        self.assertIn("　• 子项", rich)
+
+    async def test_long_html_reply_keeps_rich_formatting_on_every_page(self):
+        delivered = await self.bridge.send_html(12345, "<b>重点</b> " + "内容 " * 1800)
+        self.assertTrue(delivered)
+        self.assertGreater(len(self.api.messages), 1)
+        self.assertTrue(all(mode == "HTML" for mode in self.api.parse_modes))
+        self.assertTrue(all("<b>" in message[1] or "</b>" in message[1]
+                            for message in self.api.messages))
+
     async def test_task_result_uses_telegram_html(self):
         self.runner.result = Result("success", text="# 标题\n\n**加粗内容**")
         await self.handle(update("format this"))
@@ -471,6 +490,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         msg = self.api.messages[-1][1]
         self.assertIn("👉 [当前使用] claude-sonnet-4-6", msg)
         self.assertIn("• gemini-3.8-flash-high", msg)
+
+    async def test_start_shows_new_user_welcome(self):
+        await self.handle(update("/start"))
+        message = self.api.messages[-1][1]
+        self.assertIn("欢迎使用 Antigravity Telegram Remote", message)
+        self.assertIn("发送 /model", message)
+        self.assertIn("仅白名单私聊可使用", message)
 
     async def test_status_includes_workspace_disk_space(self):
         await self.handle(update("/status"))
@@ -512,6 +538,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.initialize()
         command_call = next(payload for method, payload in self.api.calls if method == "setMyCommands")
         self.assertIn({"command": "cancel", "description": "取消正在执行的任务"}, command_call["commands"])
+        self.assertIn({"command": "start", "description": "欢迎页与快速开始"}, command_call["commands"])
 
     async def test_callback_query_switches_model_and_answers(self):
         await self.handle(callback_update("model:claude-opus-4-6-thinking", cq_id="cq_opus"))

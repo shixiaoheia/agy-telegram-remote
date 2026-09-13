@@ -106,6 +106,12 @@ def is_table_separator(line: str) -> bool:
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
 
 
+ADMONITION_LABELS = {
+    "NOTE": "📝 说明", "TIP": "💡 提示", "IMPORTANT": "❗ 重要",
+    "WARNING": "⚠️ 警告", "CAUTION": "🚨 注意",
+}
+
+
 def render_markdown_html(text: str) -> str:
     """Convert common model Markdown to Telegram's conservative HTML subset."""
     lines: list[str] = []
@@ -156,14 +162,26 @@ def render_markdown_html(text: str) -> str:
             index += 1
             continue
         heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", raw_line)
-        bullet = re.match(r"^\s*[-*+]\s+(.+)$", raw_line)
+        bullet = re.match(r"^(\s*)[-*+]\s+(.+)$", raw_line)
+        numbered = re.match(r"^(\s*)(\d{1,3})[.)]\s+(.+)$", raw_line)
         quote = re.match(r"^\s*>\s?(.*)$", raw_line)
         if heading:
             lines.append(f"<b>{render_inline_markdown(heading.group(1))}</b>")
         elif bullet:
-            lines.append(f"• {render_inline_markdown(bullet.group(1))}")
+            indent = "　" * min(3, len(bullet.group(1).expandtabs(2)) // 2)
+            lines.append(f"{indent}• {render_inline_markdown(bullet.group(2))}")
+        elif numbered:
+            indent = "　" * min(3, len(numbered.group(1).expandtabs(2)) // 2)
+            lines.append(f"{indent}{numbered.group(2)}. {render_inline_markdown(numbered.group(3))}")
         elif quote:
-            lines.append(f"│ {render_inline_markdown(quote.group(1))}")
+            quoted = quote.group(1).strip()
+            admonition = re.match(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)]\s*(.*)$", quoted, re.IGNORECASE)
+            if admonition:
+                label = ADMONITION_LABELS[admonition.group(1).upper()]
+                detail = admonition.group(2)
+                lines.append(f"<b>{label}</b>" + (f"：{render_inline_markdown(detail)}" if detail else ""))
+            else:
+                lines.append(f"│ {render_inline_markdown(quote.group(1))}")
         elif raw_line.strip() in {"---", "***", "___"}:
             lines.append("")
         else:
@@ -173,6 +191,62 @@ def render_markdown_html(text: str) -> str:
         language = f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
         lines.append(f"<pre><code{language}>{html.escape(chr(10).join(code_lines))}</code></pre>")
     return "\n".join(lines).strip()
+
+
+HTML_TAG = re.compile(r"<(\/)?(b|i|s|code|pre|a)(?:\s+[^>]*)?>", re.IGNORECASE)
+
+
+def html_chunks(text: str, units: int = 3400) -> list[str]:
+    """Split generated Telegram HTML without breaking tags or formatting."""
+    if len(text.encode("utf-16-le")) // 2 <= units:
+        return [text]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_units = 0
+    open_tags: list[tuple[str, str]] = []
+
+    def close_tags() -> str:
+        return "".join(f"</{name}>" for name, _opening in reversed(open_tags))
+
+    def flush() -> None:
+        nonlocal current, current_units
+        if current:
+            chunks.append("".join(current) + close_tags())
+        current = [opening for _name, opening in open_tags]
+        current_units = sum(len(opening.encode("utf-16-le")) // 2 for opening in current)
+
+    position = 0
+    for match in HTML_TAG.finditer(text):
+        for is_tag, piece in ((False, text[position:match.start()]), (True, match.group(0))):
+            if not piece:
+                continue
+            if is_tag:
+                closing, name = match.group(1), match.group(2).lower()
+                current.append(piece)
+                current_units += len(piece.encode("utf-16-le")) // 2
+                if closing and open_tags and open_tags[-1][0] == name:
+                    open_tags.pop()
+                elif not closing:
+                    open_tags.append((name, piece))
+                continue
+            for char in piece:
+                char_units = 2 if ord(char) > 0xFFFF else 1
+                reserve = len(close_tags().encode("utf-16-le")) // 2
+                if current and current_units + char_units + reserve > units:
+                    flush()
+                current.append(char)
+                current_units += char_units
+        position = match.end()
+    for char in text[position:]:
+        char_units = 2 if ord(char) > 0xFFFF else 1
+        reserve = len(close_tags().encode("utf-16-le")) // 2
+        if current and current_units + char_units + reserve > units:
+            flush()
+        current.append(char)
+        current_units += char_units
+    if current:
+        chunks.append("".join(current) + close_tags())
+    return chunks
 
 
 @dataclass
@@ -431,11 +505,12 @@ class Bridge:
             return False
 
     async def send_html(self, chat: int, text: str) -> bool:
-        # HTML must not be split mid-tag. Long replies fall back to readable plain text.
-        if len(text.encode("utf-16-le")) // 2 > 3500:
-            return await self.send_text(chat, clean_model_reply(re.sub(r"<[^>]+>", "", text)))
         try:
-            await self.api.send(chat, text, parse_mode="HTML")
+            chunks = html_chunks(self.store.redact(text))
+            total = len(chunks)
+            for index, chunk in enumerate(chunks, 1):
+                suffix = f"\n\n📄 [第 {index}/{total} 页]" if total > 1 else ""
+                await self.api.send(chat, chunk + suffix, parse_mode="HTML")
             return True
         except TypeError:
             return await self.send_text(chat, clean_model_reply(re.sub(r"<[^>]+>", "", text)))
@@ -749,7 +824,20 @@ class Bridge:
             return
         if not self._is_allowed(user) or sender.get("is_bot") is True:
             return
-        if command in {"/start", "/help"}:
+        if command == "/start":
+            self.queue_reply(
+                chat_id,
+                "👋 欢迎使用 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
+                "这是你的专属 agy 远程工作台：直接发送一句需求，即可在服务器工作区执行。\n\n"
+                "✅ 建议从这里开始：\n"
+                "1. 发送 /model，选择模型与思考强度\n"
+                "2. 直接发送任务，例如“检查当前项目的错误并修复”\n"
+                "3. 运行中可点“取消任务”，或发送 /status 查看状态\n\n"
+                "🔒 仅白名单私聊可使用；任务会在你的服务器工作区运行。\n"
+                "💡 发送 /help 查看全部指令，发送 /new 开启全新对话。",
+            )
+            return
+        if command == "/help":
             self.queue_reply(
                 chat_id,
                 "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
@@ -920,7 +1008,7 @@ class Bridge:
                 return
             self.store.set_model(user, resolved)
             alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
-            self.queue_reply(chat_id, f"🎯 已切换模型为：{resolved}{alias_note}\n🚀 后续任务将使用此模型。")
+            self._show_effort_picker(chat_id, user, f"{resolved}{alias_note}")
             return
         if command in {"/sys", "/system"}:
             self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at))
@@ -1171,10 +1259,11 @@ class Bridge:
             raise TelegramError()
         try:
             await self.api.set_commands([
+                {"command": "start", "description": "欢迎页与快速开始"},
                 {"command": "help", "description": "查看帮助与使用说明"},
                 {"command": "status", "description": "查看当前任务状态"},
                 {"command": "cancel", "description": "取消正在执行的任务"},
-                {"command": "model", "description": "选择 AI 模型"},
+                {"command": "model", "description": "选择模型与思考强度"},
                 {"command": "new", "description": "新建对话并清除上下文"},
                 {"command": "usage", "description": "查看 Token 用量"},
                 {"command": "last", "description": "查看最近一次结果"},
