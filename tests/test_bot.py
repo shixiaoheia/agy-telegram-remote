@@ -421,6 +421,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("⏱️ 12.4s", text)
         self.assertIn("gemini-3.8-flash-high", text)
 
+    async def test_result_flattens_markdown_for_telegram_chat(self):
+        text = describe({
+            "outcome": "success",
+            "text": "## 结论\n\n* **第一项**\n* `普通内容`\n\n```python\n# 保留代码注释\nprint('*')\n```",
+        })
+        self.assertIn("结论", text)
+        self.assertIn("• 第一项", text)
+        self.assertNotIn("##", text)
+        self.assertNotIn("**", text)
+        self.assertNotIn("```", text)
+        self.assertIn("# 保留代码注释", text)
+
     async def test_model_command_highlights_current_model(self):
         self.store.set_model(12345, "claude-sonnet-4-6")
         await self.handle(update("/model"))

@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import signal
 import sys
 import time
@@ -41,6 +42,25 @@ CATEGORY_HELP = {
 }
 
 
+def clean_model_reply(text: str) -> str:
+    """Make Markdown-oriented model output comfortable to read as Telegram plain text."""
+    lines: list[str] = []
+    in_code_block = False
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            lines.append(line)
+            continue
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+        line = re.sub(r"^\s*[-*+]\s+", "• ", line)
+        line = re.sub(r"(?<!\w)(\*{1,3}|_{1,3})(?=\S)(.+?)(?<=\S)\1", r"\2", line)
+        line = re.sub(r"^\s*>\s?", "│ ", line)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 @dataclass
 class Job:
     user: int
@@ -69,7 +89,7 @@ def describe(record: dict) -> str:
     parts.append("━━━━━━━━━━━━━━━━━━━━")
 
     if record.get("text"):
-        parts.append(str(record["text"]))
+        parts.append(clean_model_reply(str(record["text"])))
         parts.append("━━━━━━━━━━━━━━━━━━━━")
     elif record.get("detail"):
         parts.append(str(record["detail"]))
