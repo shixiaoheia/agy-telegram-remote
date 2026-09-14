@@ -286,6 +286,7 @@ class Job:
     started_at: float = field(default_factory=time.monotonic)
     status_message_id: int | None = None
     progress_task: asyncio.Task | None = None
+    activity: str = "正在准备任务"
     attachment_dir: Path | None = None
     attachments: list[Path] = field(default_factory=list)
     history_title: str = ""
@@ -712,10 +713,10 @@ class Bridge:
                 conv_tag = "\n🧠 会话记忆：全新独立会话"
 
             accept_msg = (
-                f"🚀 已接收任务{model_info}，准备调用 agy。\n"
+                f"🚀 任务已接收{model_info}\n"
                 f"━━━━━━━━━━━━━━━━━━━━{conv_tag}{effort_info}{mode_info}\n"
-                f"⏳ 正在调用 Antigravity 执行任务，请稍候...\n\n"
-                f"进度会每 5 秒自动更新；需要停止时请点下方按钮。"
+                f"阶段：正在准备执行环境\n"
+                f"⏳ 正在启动 Antigravity；状态会在此消息内更新。"
             )
             if job.attachments:
                 accept_msg += f"\n📎 已接收 {len(job.attachments)} 个附件，将在本次任务中读取。"
@@ -754,10 +755,13 @@ class Bridge:
         try:
             job.progress_task = asyncio.create_task(self._refresh_progress(job))
             try:
+                async def progress(activity: str) -> None:
+                    job.activity = activity
                 result = await self.runner.run(
                     prompt, job.cancel, model=job.model or None,
                     conversation_id=job.conversation_id or None,
                     effort=job.effort or None, mode=job.mode or None,
+                    progress=progress,
                 )
             except TypeError:
                 try:
@@ -819,10 +823,12 @@ class Bridge:
 
     def _progress_text(self, job: Job) -> str:
         elapsed = max(0, int(time.monotonic() - job.started_at))
-        state = "正在取消并清理进程..." if job.cancel.is_set() else "正在执行任务..."
+        state = "正在取消并清理进程" if job.cancel.is_set() else "任务执行中"
+        activity = "正在取消并清理资源" if job.cancel.is_set() else job.activity
         return (f"⏳ {state}\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"• 已运行：{elapsed}s\n"
-                f"• 每 5 秒自动更新\n━━━━━━━━━━━━━━━━━━━━")
+                f"阶段：{activity}\n"
+                f"已运行：{elapsed}s\n"
+                f"需要停止时可点下方按钮。")
 
     async def _refresh_progress(self, job: Job) -> None:
         while not self.stop.is_set() and not job.cancel.is_set():
@@ -841,7 +847,10 @@ class Bridge:
             return
         try:
             await self.api.edit(job.chat, job.status_message_id,
-                                f"{LABELS.get(outcome, '任务已结束')}｜已停止进度更新。")
+                                f"{LABELS.get(outcome, '任务已结束')}\n"
+                                "━━━━━━━━━━━━━━━━━━━━\n"
+                                "任务状态已结束，结果将在下一条消息展示。",
+                                {"inline_keyboard": []})
         except (TelegramError, AttributeError):
             pass
 

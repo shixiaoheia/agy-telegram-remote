@@ -8,7 +8,7 @@ import os
 import signal
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Awaitable, Callable, Mapping
 
 from settings import Settings
 
@@ -157,6 +157,31 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
     )
 
 
+def parse_stream_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
+    """Extract only the terminal result from agy's NDJSON event stream."""
+    terminal: dict | None = None
+    try:
+        for line in stdout.splitlines():
+            if not line:
+                continue
+            envelope = json.loads(
+                line.decode("utf-8"), object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant,
+            )
+            if isinstance(envelope, dict) and envelope.get("event") == "result":
+                candidate = envelope.get("result")
+                if isinstance(candidate, dict):
+                    terminal = candidate
+    except (ValueError, UnicodeError, RecursionError):
+        terminal = None
+    if terminal is None:
+        return Result(
+            "invalid", detail="agy 未返回完整、有效的事件流结果；任务可能已产生修改。",
+            category=classify(stderr.decode("utf-8", errors="replace")), exit_code=exit_code,
+        )
+    return parse_result(json.dumps(terminal, ensure_ascii=False).encode("utf-8"), stderr, exit_code)
+
+
 def child_environment(home: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
     # Deliberately exclude BOT_TOKEN, PYTHONPATH, SSH_AUTH_SOCK and cloud keys.
     inherited = os.environ if inherited is None else inherited
@@ -176,10 +201,10 @@ def child_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
 def build_command(settings: Settings, prompt: str, model: str | None = None,
                   conversation_id: str | None = None,
                   effort: str | None = None,
-                  mode: str | None = None) -> list[str]:
+                  mode: str | None = None, stream_json: bool = False) -> list[str]:
     command = [
         str(settings.agy), "--print-timeout", f"{math.ceil(settings.timeout)}s",
-        "--output-format", "json",
+        "--output-format", "stream-json" if stream_json else "json",
     ]
     if settings.skip_permissions:
         command.append("--dangerously-skip-permissions")
@@ -213,6 +238,71 @@ async def read_bounded(stream: asyncio.StreamReader, limit: int,
             kept.extend(chunk[:limit - len(kept)])
         if total > limit:
             overflow.set()
+    return Capture(bytes(kept), total)
+
+
+def stream_activity(event: object) -> str | None:
+    """Return a safe, user-visible phase without relaying reasoning or inputs."""
+    if not isinstance(event, dict):
+        return None
+    kind = event.get("event")
+    if kind == "init":
+        return "模型会话已启动"
+    if kind == "result":
+        return "正在整理最终结果"
+    if kind != "step_update" or not isinstance(event.get("step_update"), dict):
+        return None
+    step = event["step_update"]
+    state = str(step.get("state") or "").upper()
+    step_type = str(step.get("step_type") or "").lower()
+    if state == "ACTIVE":
+        for key in ("tool_name", "tool", "command_name"):
+            tool = step.get(key)
+            if isinstance(tool, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", tool):
+                return f"正在调用工具：{tool}"
+        if "tool" in step_type or "command" in step_type:
+            return "正在调用工具"
+        if "agent" in step_type or "response" in step_type:
+            return "正在分析并生成回复"
+    if state == "DONE" and ("tool" in step_type or "command" in step_type):
+        return "工具步骤已完成，继续处理"
+    return None
+
+
+async def read_stream_events(stream: asyncio.StreamReader, limit: int,
+                             overflow: asyncio.Event,
+                             progress: Callable[[str], Awaitable[None]]) -> Capture:
+    """Bound stdout while consuming line-delimited events for safe progress text."""
+    kept = bytearray()
+    pending = bytearray()
+    total = 0
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if len(kept) < limit:
+            kept.extend(chunk[:limit - len(kept)])
+        if total > limit:
+            overflow.set()
+        pending.extend(chunk)
+        while b"\n" in pending:
+            raw, _, tail = pending.partition(b"\n")
+            pending = bytearray(tail)
+            if len(raw) > 65536:
+                continue
+            try:
+                activity = stream_activity(json.loads(raw.decode("utf-8")))
+            except (ValueError, UnicodeError, RecursionError):
+                activity = None
+            if activity:
+                try:
+                    await progress(activity)
+                except Exception:
+                    # Telegram status delivery must never affect the task process.
+                    pass
+        if len(pending) > 65536:
+            pending.clear()
     return Capture(bytes(kept), total)
 
 
@@ -286,7 +376,8 @@ class Runner:
 
     async def run(self, prompt: str, cancel: asyncio.Event,
                   model: str | None = None, conversation_id: str | None = None,
-                  effort: str | None = None, mode: str | None = None) -> Result:
+                  effort: str | None = None, mode: str | None = None,
+                  progress: Callable[[str], Awaitable[None]] | None = None) -> Result:
         selected_model = model or self.settings.model or ""
         start_time = asyncio.get_running_loop().time()
         if self.blocked:
@@ -310,7 +401,8 @@ class Runner:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
                 *build_command(self.settings, prompt, model=selected_model or None,
                                conversation_id=conversation_id or None,
-                               effort=effort or None, mode=mode or None),
+                               effort=effort or None, mode=mode or None,
+                               stream_json=progress is not None),
                 cwd=self.settings.workspace,
                 env=child_environment(self.settings.home),
                 stdin=asyncio.subprocess.DEVNULL,
@@ -326,8 +418,11 @@ class Runner:
                 process = await spawn
             assert process.stdout is not None and process.stderr is not None
             overflow = asyncio.Event()
+            stdout_reader = (read_stream_events(process.stdout, self.settings.max_output, overflow, progress)
+                             if progress is not None
+                             else read_bounded(process.stdout, self.settings.max_output, overflow))
             readers = [
-                asyncio.create_task(read_bounded(process.stdout, self.settings.max_output, overflow)),
+                asyncio.create_task(stdout_reader),
                 asyncio.create_task(read_bounded(process.stderr, min(self.settings.max_output, 262144), overflow)),
             ]
             watchers = [
@@ -405,7 +500,8 @@ class Runner:
                     or captured[1].total > min(self.settings.max_output, 262144)):
                 result = Result("output_limit", detail="输出超过上限；没有解析或转发截断数据。")
             else:
-                result = parse_result(captured[0].data, captured[1].data, process.returncode or 0)
+                parser = parse_stream_result if progress is not None else parse_result
+                result = parser(captured[0].data, captured[1].data, process.returncode or 0)
         result.stdout_bytes = captured[0].total
         result.stderr_bytes = captured[1].total
         if selected_model:

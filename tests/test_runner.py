@@ -12,7 +12,8 @@ try:
 except ImportError:
     from common import settings_at
 from agy_runner import (Runner, build_command, child_environment, classify,
-                        live_group, parse_result, read_bounded)
+                        live_group, parse_result, parse_stream_result, read_bounded,
+                        stream_activity)
 
 class ParserTests(unittest.TestCase):
     def parse(self, value, err=b"", code=0):
@@ -66,6 +67,24 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(classify("invalid model selection"), "model")
         self.assertEqual(classify("DNS resolution failed"), "network")
         self.assertEqual(classify("unrelated error"), "unknown")
+
+    def test_stream_result_uses_only_terminal_event(self):
+        raw = b'\n'.join((
+            b'{"event":"init","init":{"model":"test"}}',
+            b'{"event":"step_update","step_update":{"text_delta":"private"}}',
+            b'{"event":"result","result":{"status":"SUCCESS","response":"done"}}',
+        ))
+        result = parse_stream_result(raw, b"", 0)
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(result.text, "done")
+
+    def test_stream_activity_never_returns_response_text(self):
+        self.assertEqual(stream_activity({"event": "init"}), "模型会话已启动")
+        activity = stream_activity({"event": "step_update", "step_update": {
+            "state": "ACTIVE", "step_type": "tool_call", "tool_name": "list_dir",
+            "text_delta": "private reasoning",
+        }})
+        self.assertEqual(activity, "正在调用工具：list_dir")
 
     def test_permission_not_hidden(self):
         value = self.parse({"status": "SUCCESS", "response": "I tried"}, b"tool soft-denied")
@@ -154,6 +173,21 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.text, "ok-model")
         self.assertEqual(result.model, "gemini-3.1-pro-high")
 
+    async def test_streaming_runner_reports_safe_activity(self):
+        self.executable(
+            "import json,sys\n"
+            "assert sys.argv[sys.argv.index('--output-format')+1] == 'stream-json'\n"
+            "print(json.dumps({'event':'init'}))\n"
+            "print(json.dumps({'event':'step_update','step_update':{'state':'ACTIVE','step_type':'tool_call','tool_name':'list_dir','text_delta':'private'}}))\n"
+            "print(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'streamed'}}))\n"
+        )
+        activities = []
+        async def progress(value):
+            activities.append(value)
+        result = await self.runner().run("hello", asyncio.Event(), progress=progress)
+        self.assertEqual(result.text, "streamed")
+        self.assertIn("正在调用工具：list_dir", activities)
+
     def test_build_command_model_option(self):
         cmd_default = build_command(self.settings, "prompt")
         self.assertNotIn("--model", cmd_default)
@@ -168,6 +202,8 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cmd[cmd.index("--effort") + 1], "high")
         self.assertIn("--mode", cmd)
         self.assertEqual(cmd[cmd.index("--mode") + 1], "plan")
+        stream = build_command(self.settings, "prompt", stream_json=True)
+        self.assertEqual(stream[stream.index("--output-format") + 1], "stream-json")
 
     async def test_no_shell_interpolation(self):
         marker = self.directory / "must-not-exist"

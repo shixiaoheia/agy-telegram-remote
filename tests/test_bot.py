@@ -11,7 +11,7 @@ try:
 except ImportError:
     from common import settings_at
 from agy_runner import Result
-from bot import Bridge, describe, describe_html
+from bot import Bridge, Job, describe, describe_html
 from state_store import Store
 from telegram_api import TelegramError
 
@@ -644,6 +644,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         job = self.bridge.slot
         await self.handle(callback_update(f"cancel:{job.job_id}"))
         self.assertTrue(job.cancel.is_set())
+
+    async def test_status_card_shows_safe_activity_and_finishes_in_place(self):
+        job = Job(12345, 12345, status_message_id=1, activity="正在调用工具：list_dir")
+        self.assertIn("正在调用工具：list_dir", self.bridge._progress_text(job))
+        await self.bridge._finish_progress(job, "success")
+        self.assertIn("任务完成", self.api.messages[-1][1])
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
 
     async def test_initialize_registers_telegram_command_menu(self):
         await self.bridge.initialize()
