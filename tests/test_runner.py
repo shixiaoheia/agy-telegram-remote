@@ -86,6 +86,30 @@ class ParserTests(unittest.TestCase):
         }})
         self.assertEqual(activity, "正在调用工具：list_dir")
 
+    def test_stream_activity_summarizes_command_without_secret(self):
+        activity = stream_activity({"event": "step_update", "step_update": {
+            "state": "DONE", "step_type": "tool_call", "tool_name": "run_command",
+            "duration_seconds": 0.74,
+            "tool_info": {"parameters": {
+                "command": "curl -H 'Authorization: Bearer ghp_verySecretValue1234' https://example.test"
+            }},
+        }})
+        self.assertIn("执行命令", activity)
+        self.assertIn("耗时 0.7 秒", activity)
+        self.assertIn("[已隐藏]", activity)
+        self.assertNotIn("ghp_verySecretValue1234", activity)
+
+    def test_stream_activity_summarizes_planning_and_final_response(self):
+        planning = stream_activity({"event": "step_update", "step_update": {
+            "state": "DONE", "step_type": "agent_response", "duration_seconds": 3.1,
+            "text_delta": "private reasoning",
+        }})
+        final = stream_activity({"event": "result", "result": {
+            "duration_seconds": 8.7, "response": "private final answer",
+        }})
+        self.assertEqual(planning, "✅ 🧠 规划步骤完成（耗时 3.1 秒）")
+        self.assertEqual(final, "✅ ✍️ 回答生成完毕（耗时 8.7 秒）")
+
     def test_permission_not_hidden(self):
         value = self.parse({"status": "SUCCESS", "response": "I tried"}, b"tool soft-denied")
         self.assertEqual(value.outcome, "permission")

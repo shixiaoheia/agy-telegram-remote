@@ -56,6 +56,11 @@ SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
     ".sql", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb", ".xml", ".csv",
 })
+LOG_SUFFIXES = frozenset({".log"})
+CODE_SUFFIXES = frozenset({
+    ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
+    ".sql", ".java", ".go", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".php", ".rb",
+})
 FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # Every official agy catalog entry already contains its reasoning profile in
 # the model identifier.  Passing a second --effort argument makes the CLI
@@ -289,7 +294,30 @@ class Job:
     activity: str = "正在准备任务"
     attachment_dir: Path | None = None
     attachments: list[Path] = field(default_factory=list)
+    attachment_feedback: str = ""
+    execution_steps: list[str] = field(default_factory=list)
     history_title: str = ""
+
+
+def attachment_kind(name: str, is_photo: bool) -> str:
+    if is_photo:
+        return "图片"
+    suffix = Path(name).suffix.lower()
+    if suffix in LOG_SUFFIXES:
+        return "日志文件"
+    if suffix in CODE_SUFFIXES:
+        return "代码文件"
+    if suffix in {".md", ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".xml", ".csv"}:
+        return "文本文件"
+    return "文件"
+
+
+def attachment_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
 
 
 def task_title(text: str, fallback: str = "未命名任务") -> str:
@@ -718,8 +746,8 @@ class Bridge:
                 f"阶段：正在准备执行环境\n"
                 f"⏳ 正在启动 Antigravity；状态会在此消息内更新。"
             )
-            if job.attachments:
-                accept_msg += f"\n📎 已接收 {len(job.attachments)} 个附件，将在本次任务中读取。"
+            if job.attachment_feedback:
+                accept_msg += f"\n{job.attachment_feedback}"
             cancel_markup = {"inline_keyboard": [[{
                 "text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"
             }]]}
@@ -756,7 +784,13 @@ class Bridge:
             job.progress_task = asyncio.create_task(self._refresh_progress(job))
             try:
                 async def progress(activity: str) -> None:
-                    job.activity = activity
+                    if activity.startswith(("✅", "⚠️")):
+                        if not job.execution_steps or job.execution_steps[-1] != activity:
+                            job.execution_steps.append(activity)
+                            del job.execution_steps[:-6]
+                        job.activity = "正在继续处理任务"
+                    else:
+                        job.activity = activity
                 result = await self.runner.run(
                     prompt, job.cancel, model=job.model or None,
                     conversation_id=job.conversation_id or None,
@@ -825,7 +859,10 @@ class Bridge:
         elapsed = max(0, int(time.monotonic() - job.started_at))
         state = "正在取消并清理进程" if job.cancel.is_set() else "任务执行中"
         activity = "正在取消并清理资源" if job.cancel.is_set() else job.activity
+        trace = "\n".join(job.execution_steps[-6:])
+        trace_block = f"执行过程：\n{trace}\n" if trace else ""
         return (f"⏳ {state}\n━━━━━━━━━━━━━━━━━━━━\n"
+                f"{trace_block}"
                 f"阶段：{activity}\n"
                 f"已运行：{elapsed}s\n"
                 f"需要停止时可点下方按钮。")
@@ -890,6 +927,10 @@ class Bridge:
             raise ValueError("attachment download failed") from None
         job.attachment_dir = directory
         job.attachments.append(destination)
+        job.attachment_feedback = (
+            f"📎 已收到：{attachment_kind(name, is_photo)}「{name}」，"
+            f"{attachment_size(downloaded)}。本次任务会读取它。"
+        )
         return destination, name
 
     def _cleanup_attachments(self, job: Job) -> None:

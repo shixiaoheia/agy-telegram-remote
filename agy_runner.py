@@ -246,15 +246,58 @@ async def read_bounded(stream: asyncio.StreamReader, limit: int,
     return Capture(bytes(kept), total)
 
 
+SENSITIVE_VALUE = re.compile(
+    r"(?i)(bearer\s+|(?:token|password|secret|api[_-]?key)\s*[=:]\s*|"
+    r"--(?:token|password|secret|api-key)\s+)([^\s'\"&;]+)"
+)
+TOKEN_LITERAL = re.compile(r"(?i)\b(?:ghp|github_pat|AIza|sk)_[A-Za-z0-9_-]{8,}\b")
+
+
+def _duration_text(value: object) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+        return f"（耗时 {value:.1f} 秒）"
+    return ""
+
+
+def _safe_command(value: object) -> str | None:
+    """Return a compact command preview with credentials and long inputs removed."""
+    if not isinstance(value, str):
+        return None
+    command = " ".join(value.replace("\x00", "").split())
+    if not command:
+        return None
+    command = SENSITIVE_VALUE.sub(r"\1[已隐藏]", command)
+    command = TOKEN_LITERAL.sub("[已隐藏]", command)
+    return command[:116] + ("…" if len(command) > 116 else "")
+
+
+def _command_from_step(step: Mapping[str, object]) -> str | None:
+    """Read only the declared run-command parameter, never tool output or prompts."""
+    if str(step.get("tool_name") or "").lower() not in {"run_command", "runcommand"}:
+        return None
+    info = step.get("tool_info")
+    parameters = info.get("parameters") if isinstance(info, Mapping) else None
+    if not isinstance(parameters, Mapping):
+        return None
+    normalized = {str(key).lower(): value for key, value in parameters.items()}
+    for key in ("command", "cmd", "command_line", "commandline", "shell_command"):
+        value = normalized.get(key)
+        if isinstance(value, str):
+            return _safe_command(value)
+    return None
+
+
 def stream_activity(event: object) -> str | None:
-    """Return a safe, user-visible phase without relaying reasoning or inputs."""
+    """Return a safe execution summary, never hidden reasoning, tool output or inputs."""
     if not isinstance(event, dict):
         return None
     kind = event.get("event")
     if kind == "init":
         return "模型会话已启动"
     if kind == "result":
-        return "正在整理最终结果"
+        result = event.get("result")
+        duration = result.get("duration_seconds") if isinstance(result, Mapping) else None
+        return f"✅ ✍️ 回答生成完毕{_duration_text(duration)}"
     if kind != "step_update" or not isinstance(event.get("step_update"), dict):
         return None
     step = event["step_update"]
@@ -269,8 +312,15 @@ def stream_activity(event: object) -> str | None:
             return "正在调用工具"
         if "agent" in step_type or "response" in step_type:
             return "正在分析并生成回复"
-    if state == "DONE" and ("tool" in step_type or "command" in step_type):
-        return "工具步骤已完成，继续处理"
+    if state == "DONE":
+        duration = _duration_text(step.get("duration_seconds"))
+        if "tool" in step_type or "command" in step_type:
+            command = _command_from_step(step)
+            if command:
+                return f"✅ 💻 执行命令 「{command}」{duration}"
+            return f"✅ 🛠️ 工具步骤完成{duration}"
+        if "agent" in step_type or "response" in step_type:
+            return f"✅ 🧠 规划步骤完成{duration}"
     return None
 
 

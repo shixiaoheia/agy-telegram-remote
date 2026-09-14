@@ -278,6 +278,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.assert_download_limit, 10 * 1024 * 1024)
         self.assertFalse((self.settings.workspace / ".agy-telegram-inputs").joinpath(
             self.store.load(12345)["job_id"]).exists())
+        self.assertIn("已收到：图片", self.api.messages[0][1])
+        self.assertIn("本次任务会读取它", self.api.messages[0][1])
 
     async def test_code_document_is_available_to_task(self):
         document = {"file_id": "code_file_1", "file_size": 4, "file_name": "main.py"}
@@ -646,8 +648,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(job.cancel.is_set())
 
     async def test_status_card_shows_safe_activity_and_finishes_in_place(self):
-        job = Job(12345, 12345, status_message_id=1, activity="正在调用工具：list_dir")
+        job = Job(12345, 12345, status_message_id=1, activity="正在调用工具：list_dir",
+                  execution_steps=["✅ 🧠 规划步骤完成（耗时 0.2 秒）"])
         self.assertIn("正在调用工具：list_dir", self.bridge._progress_text(job))
+        self.assertIn("执行过程", self.bridge._progress_text(job))
+        self.assertIn("规划步骤完成", self.bridge._progress_text(job))
         await self.bridge._finish_progress(job, "success")
         self.assertIn("任务完成", self.api.messages[-1][1])
         self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
