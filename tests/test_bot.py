@@ -725,7 +725,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1,500", msg)
         self.assertIn("250", msg)
 
-    async def test_describe_includes_card_dividers_and_token_metrics(self):
+    async def test_describe_uses_clean_sections_and_token_metrics(self):
         record = {
             "job_id": "job999",
             "outcome": "success",
@@ -738,8 +738,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             "num_turns": 2,
         }
         card = describe(record)
-        self.assertIn("━━━━━━━━━━━━━━━━━━━━", card)
+        self.assertNotIn("━━━━━━━━━━━━━━━━━━━━", card)
         self.assertIn("✅ 任务完成", card)
+        self.assertIn("💬 回复", card)
+        self.assertIn("📊 运行统计", card)
         self.assertIn("Task finished successfully.", card)
         self.assertIn("⏱️ 3.5s", card)
         self.assertIn("12,000", card)

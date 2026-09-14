@@ -399,14 +399,11 @@ def describe(record: dict) -> str:
     duration_tag = f"｜⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
 
     parts = [f"{title}{model_tag}{duration_tag}"]
-    parts.append("━━━━━━━━━━━━━━━━━━━━")
 
     if record.get("text"):
-        parts.append(clean_model_reply(str(record["text"])))
-        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append("💬 回复\n" + clean_model_reply(str(record["text"])))
     elif record.get("detail"):
-        parts.append(str(record["detail"]))
-        parts.append("━━━━━━━━━━━━━━━━━━━━")
+        parts.append("ℹ️ 说明\n" + str(record["detail"]))
 
     stats = []
     if isinstance(duration, (int, float)) and duration > 0:
@@ -430,7 +427,7 @@ def describe(record: dict) -> str:
         stats.append(f"• 🧠 会话轮次：第 {num_turns} 轮")
 
     if stats:
-        parts.append("📊 运行统计：\n" + "\n".join(stats))
+        parts.append("📊 运行统计\n" + "\n".join(stats))
 
     help_text = CATEGORY_HELP.get(record.get("category"))
     outcome_help = OUTCOME_HELP.get(outcome)
