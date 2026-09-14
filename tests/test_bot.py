@@ -474,8 +474,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.get_model(12345))
 
     async def test_model_refresh_filters_shortcuts_and_blocks_known_unavailable_model(self):
-        await self.handle(update("/model refresh"))
-        await self.bridge.model_check_task
+        await self.bridge.handle(update("/model refresh"))
+        check_task = self.bridge.model_check_task
+        self.assertIsNotNone(check_task)
+        await check_task
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
         health = self.store.get_model_health()["models"]
