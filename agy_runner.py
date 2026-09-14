@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import signal
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -172,6 +173,10 @@ def parse_stream_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
                 candidate = envelope.get("result")
                 if isinstance(candidate, dict):
                     terminal = candidate
+            elif isinstance(envelope, dict) and isinstance(envelope.get("status"), str):
+                # Some older agy wrappers return the final JSON envelope even
+                # when stream-json was requested; keep that safe compatibility.
+                terminal = envelope
     except (ValueError, UnicodeError, RecursionError):
         terminal = None
     if terminal is None:
