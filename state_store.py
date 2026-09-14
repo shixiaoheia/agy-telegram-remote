@@ -144,6 +144,48 @@ class Store:
             raise ValueError("Invalid model name")
         atomic_json(path, {"user_id": user, "model": model, "updated_at": time.time()})
 
+    def _model_health_path(self) -> Path:
+        return self.directory / "model-health.json"
+
+    def get_model_health(self) -> dict:
+        """Return the bounded, account-wide result of explicit model probes."""
+        try:
+            value = read_json(self._model_health_path(), 32768)
+        except FileNotFoundError:
+            return {"checked_at": 0.0, "models": {}}
+        if not isinstance(value, dict) or not isinstance(value.get("models"), dict):
+            return {"checked_at": 0.0, "models": {}}
+        checked_at = value.get("checked_at")
+        if not isinstance(checked_at, (int, float)) or checked_at < 0:
+            return {"checked_at": 0.0, "models": {}}
+        models: dict[str, dict] = {}
+        for model, result in value["models"].items():
+            if (isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model)
+                    and isinstance(result, dict)
+                    and result.get("outcome") in {"success", "error", "timed_out", "invalid"}):
+                category = result.get("category", "unknown")
+                models[model] = {
+                    "outcome": result["outcome"],
+                    "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
+                }
+        return {"checked_at": float(checked_at), "models": models}
+
+    def set_model_health(self, models: dict[str, dict]) -> None:
+        clean: dict[str, dict] = {}
+        for model, result in models.items():
+            if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
+                raise ValueError("Invalid model health key")
+            if not isinstance(result, dict) or result.get("outcome") not in {
+                "success", "error", "timed_out", "invalid"
+            }:
+                raise ValueError("Invalid model health result")
+            category = result.get("category", "unknown")
+            clean[model] = {
+                "outcome": result["outcome"],
+                "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
+            }
+        atomic_json(self._model_health_path(), {"checked_at": time.time(), "models": clean})
+
     def _effort_path(self, user: int) -> Path:
         if type(user) is not int or user not in self.allowed:
             raise ValueError("User is not allowed")

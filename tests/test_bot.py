@@ -437,7 +437,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gemini-3.8-flash-high", msg)
         self.assertIn("claude-opus-4-6-thinking", msg)
         self.assertIn("gpt-oss-120b-medium", msg)
-        self.assertIn("官方支持的模型全列表", msg)
+        self.assertIn("官方模型可用性", msg)
 
     async def test_model_command_switch_and_reset(self):
         await self.handle(update("/model claude-sonnet-4-6"))
@@ -472,6 +472,32 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(update("/model bad;char"))
         self.assertIn("模型名称格式不正确", self.api.messages[-1][1])
         self.assertIsNone(self.store.get_model(12345))
+
+    async def test_model_refresh_filters_shortcuts_and_blocks_known_unavailable_model(self):
+        await self.handle(update("/model refresh"))
+        await self.bridge.model_check_task
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
+        health = self.store.get_model_health()["models"]
+        self.assertEqual(len(health), 14)
+        self.assertTrue(all(item["outcome"] == "success" for item in health.values()))
+        await self.handle(update("/model"))
+        buttons = [button["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
+        self.assertIn("model:gemini-3.8-flash-high", buttons)
+
+        self.store.set_model_health({"claude-sonnet-4-6": {"outcome": "error", "category": "model"}})
+        await self.handle(update("/model claude-sonnet-4-6"))
+        self.assertIn("当前检测为不可用", self.api.messages[-1][1])
+        self.assertIsNone(self.store.get_model(12345))
+
+    async def test_failure_diagnostics_give_specific_next_step(self):
+        model_error = describe({"outcome": "error", "category": "model", "detail": "failed"})
+        self.assertIn("模型不可用或参数不兼容", model_error)
+        self.assertIn("/model refresh", model_error)
+        auth_error = describe({"outcome": "error", "category": "auth", "detail": "failed"})
+        self.assertIn("agy auth login", auth_error)
+        timeout_error = describe({"outcome": "timed_out", "detail": "timeout"})
+        self.assertIn("任务超时", timeout_error)
 
     async def test_job_uses_selected_model(self):
         await self.handle(update("/model gemini-3.1-pro-high"))
@@ -593,6 +619,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"[第 {total}/{total} 页]", self.api.messages[-1][1])
 
     async def test_model_command_sends_inline_keyboard(self):
+        self.store.set_model_health({
+            "gemini-3.8-flash-high": {"outcome": "success", "category": ""},
+            "claude-sonnet-4-6": {"outcome": "success", "category": ""},
+        })
         await self.handle(update("/model"))
         self.assertIsNotNone(self.api.messages[-1][2])
         keyboard = self.api.messages[-1][2]

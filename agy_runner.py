@@ -47,6 +47,9 @@ class Result:
 def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
+    if any(s in low for s in ("invalid model", "model not found", "model unavailable",
+                              "unsupported model", "unknown model", "model is not available")):
+        return "model"
     if any(s in low for s in ("authentication required", "not authenticated",
                              "login required", "unauthenticated", "unauthorized",
                              "invalid_grant", "token expired", "no credentials",

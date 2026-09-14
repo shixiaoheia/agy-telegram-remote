@@ -127,6 +127,19 @@ class StoreTests(unittest.TestCase):
         reduced.maintain()
         self.assertFalse(path.exists())
 
+    def test_model_health_is_account_wide_and_validated(self):
+        self.assertEqual(self.store.get_model_health()["models"], {})
+        self.store.set_model_health({
+            "gemini-3.8-flash-high": {"outcome": "success", "category": ""},
+            "claude-sonnet-4-6": {"outcome": "error", "category": "model"},
+        })
+        health = self.store.get_model_health()
+        self.assertEqual(health["models"]["gemini-3.8-flash-high"]["outcome"], "success")
+        self.assertEqual(health["models"]["claude-sonnet-4-6"]["category"], "model")
+        self.assertEqual((self.directory / "model-health.json").stat().st_mode & 0o777, 0o600)
+        with self.assertRaises(ValueError):
+            self.store.set_model_health({"bad;model": {"outcome": "success"}})
+
     def test_dynamic_whitelist_management(self):
         self.assertEqual(self.store.get_extra_whitelist(), [])
         self.assertFalse(self.store.add_whitelist(12345))

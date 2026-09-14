@@ -63,6 +63,7 @@ class ParserTests(unittest.TestCase):
     def test_diagnostic_categories(self):
         self.assertEqual(classify("authentication required"), "auth")
         self.assertEqual(classify("quota exhausted"), "quota")
+        self.assertEqual(classify("invalid model selection"), "model")
         self.assertEqual(classify("DNS resolution failed"), "network")
         self.assertEqual(classify("unrelated error"), "unknown")
 

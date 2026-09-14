@@ -36,11 +36,20 @@ LABELS = {
     "running": "⏳ 任务执行中",
 }
 CATEGORY_HELP = {
-    "auth": "诊断信息疑似要求登录，请在服务器重新授权。",
-    "quota": "诊断信息疑似涉及配额或限流，请检查账户额度。",
-    "permission": "请检查 AGY_SKIP_PERMISSIONS 或 agy 的权限规则。",
-    "network": "诊断信息疑似网络问题，请检查服务器连接。",
+    "auth": "需要重新授权：请在服务器运行 agy auth login，完成 Google 登录后再试。",
+    "quota": "账号额度或限流：请稍后再试，或检查当前 Google 账号额度。",
+    "model": "模型不可用或参数不兼容：发送 /model refresh 重新检测可用模型。",
+    "permission": "权限被拒绝：请检查 AGY_SKIP_PERMISSIONS 与 agy 的权限规则。",
+    "network": "服务器网络异常：请检查 DNS、代理和到 Google 的连接。",
+    "process": "agy 无法启动：请检查服务器上的 agy 安装与运行权限。",
 }
+OUTCOME_HELP = {
+    "timed_out": "任务超时：任务可能仍留下部分修改，请先检查工作目录再决定是否重试。",
+    "output_limit": "输出超过上限：请缩小任务范围，或查看工作目录中的实际变更。",
+    "invalid": "结果格式异常：任务可能已部分执行，请核对工作目录和 /last 记录。",
+    "no_text": "未收到最终文字回复：请先核对工作目录和 /last 记录。",
+}
+MODEL_PROBE_PROMPT = "Reply with exactly: AGY_MODEL_CHECK_OK. Do not use tools, read files, modify files, or make network requests."
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
@@ -339,6 +348,19 @@ def effort_label(effort: str | None, model: str) -> str:
     return {"low": "极速", "medium": "均衡", "high": "深度"}.get(chosen or "", "默认")
 
 
+def model_health_text(result: dict | None) -> str:
+    if not result:
+        return "⚪ 未检测"
+    if result.get("outcome") == "success":
+        return "✅ 已验证可用"
+    category = str(result.get("category") or "unknown")
+    labels = {
+        "auth": "需要授权", "quota": "额度或限流", "model": "模型不可用",
+        "network": "网络异常", "process": "agy 无法启动",
+    }
+    return f"❌ {labels.get(category, '调用失败')}"
+
+
 def describe(record: dict) -> str:
     outcome = str(record.get("outcome", "error"))
     title = LABELS.get(outcome, "结果需核对")
@@ -382,8 +404,11 @@ def describe(record: dict) -> str:
         parts.append("📊 运行统计：\n" + "\n".join(stats))
 
     help_text = CATEGORY_HELP.get(record.get("category"))
+    outcome_help = OUTCOME_HELP.get(outcome)
     if help_text:
         parts.append(f"💡 建议：{help_text}")
+    elif outcome_help:
+        parts.append(f"💡 建议：{outcome_help}")
 
     if outcome not in {"success", "not_started", "running"}:
         parts.append("ℹ️ 没有自动重跑任务。请先核对工作目录；/last 只取回记录，不重新执行。")
@@ -558,6 +583,53 @@ class Bridge:
         self.replies: asyncio.Queue[tuple] = asyncio.Queue(maxsize=32)
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
+        self.model_check_task: asyncio.Task | None = None
+
+    def _model_health(self) -> dict:
+        try:
+            return self.store.get_model_health()
+        except (OSError, ValueError):
+            return {"checked_at": 0.0, "models": {}}
+
+    def _model_is_known_unavailable(self, model: str) -> bool:
+        result = self._model_health().get("models", {}).get(model)
+        return isinstance(result, dict) and result.get("outcome") != "success"
+
+    async def _refresh_model_health(self, chat_id: int) -> None:
+        results: dict[str, dict] = {}
+        try:
+            for _, model, _ in OFFICIAL_MODELS:
+                try:
+                    result = await asyncio.wait_for(
+                        self.runner.run(MODEL_PROBE_PROMPT, asyncio.Event(), model=model), timeout=45,
+                    )
+                    results[model] = {"outcome": result.outcome if result.outcome in {
+                        "success", "error", "timed_out", "invalid"
+                    } else "error", "category": result.category or "unknown"}
+                except asyncio.TimeoutError:
+                    results[model] = {"outcome": "timed_out", "category": "network"}
+            self.store.set_model_health(results)
+            available = sum(item["outcome"] == "success" for item in results.values())
+            self.queue_reply(
+                chat_id,
+                f"✅ 模型可用性检测完成：{available}/{len(OFFICIAL_MODELS)} 个模型已验证可用。\n"
+                "发送 /model 查看可用模型；失败原因已在列表中标注。",
+            )
+        except Exception as error:
+            LOG.warning("model_health_check_failed type=%s", type(error).__name__)
+            self.queue_reply(chat_id, "⚠️ 模型可用性检测未完成；请确认当前没有运行中的任务后重试。")
+        finally:
+            self.model_check_task = None
+
+    def _start_model_health_refresh(self, chat_id: int) -> None:
+        if self.slot is not None:
+            self.queue_reply(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。")
+            return
+        if self.model_check_task and not self.model_check_task.done():
+            self.queue_reply(chat_id, "⏳ 模型可用性检测正在进行，请稍候。")
+            return
+        self.queue_reply(chat_id, "🔎 正在逐个验证官方模型（不使用工具、不读写工作目录），请稍候…")
+        self.model_check_task = asyncio.create_task(self._refresh_model_health(chat_id))
 
     def _is_allowed(self, user: int) -> bool:
         return user in self.settings.allowed or user in self.store.allowed
@@ -910,6 +982,12 @@ class Bridge:
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text="⚠️ 模型名称格式错误", show_alert=True)
                 return
+            if self._model_is_known_unavailable(resolved):
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(
+                        cq_id, text="该模型当前检测为不可用，请先刷新检测", show_alert=True,
+                    )
+                return
             self.store.set_model(user, resolved)
             if not has_effort_picker(resolved):
                 self.store.set_effort(user, None)
@@ -931,6 +1009,12 @@ class Bridge:
             if target in {"low", "medium", "high"}:
                 variant = variant_model_for_effort(model, target)
                 if variant is not None:
+                    if self._model_is_known_unavailable(variant):
+                        if cq_id and hasattr(self.api, "answer_callback_query"):
+                            await self.api.answer_callback_query(
+                                cq_id, text="该思考档位当前检测为不可用", show_alert=True,
+                            )
+                        return
                     self.store.set_model(user, variant)
                     self.store.set_effort(user, None)
                     collapsed = f"✅ 已切换至：{variant}｜思考强度：{effort_label(None, variant)}"
@@ -1159,50 +1243,59 @@ class Bridge:
         if command == "/model":
             parts = text.split(maxsplit=1)
             target = parts[1].strip() if len(parts) > 1 else ""
+            if target.lower() in {"refresh", "check", "probe"}:
+                self._start_model_health_refresh(chat_id)
+                return
             if not target or target.lower() in {"show", "current", "status", "list", "help"}:
                 current_raw = self.store.get_model(user) or self.settings.model or ""
                 current_display = current_raw or "默认（由 agy 决定）"
+                health = self._model_health()
+                health_models = health.get("models", {})
                 lines = [
                     f"🧠 AI 模型管理 ｜ 当前生效模型：{current_display}",
                     "━━━━━━━━━━━━━━━━━━━━",
                     "• 切换指令：/model <模型名或别名>",
                     "• 恢复默认：/model default",
+                    "• 重新检测：/model refresh（逐个真实调用，不读写工作目录）",
                     "━━━━━━━━━━━━━━━━━━━━",
-                    "【官方支持的模型全列表（共 14 种）】",
+                    "【官方模型可用性（共 14 种）】",
                 ]
                 current_family = None
                 for family, mid, desc in OFFICIAL_MODELS:
                     if family != current_family:
                         lines.append(f"\n📂 【{family}】")
                         current_family = family
+                    state = model_health_text(health_models.get(mid))
                     if current_raw == mid:
-                        lines.append(f"👉 [当前使用] {mid} ({desc})")
+                        lines.append(f"👉 [当前使用] {mid} ({desc})｜{state}")
                     else:
-                        lines.append(f"• {mid} ({desc})")
+                        lines.append(f"• {mid} ({desc})｜{state}")
                 lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-                lines.append("⚡ 快捷别名：3.8, 3.7, 3.6, pro, sonnet, opus, 120b 等")
-                lines.append("💡 也支持直接输入任何未来或自定义的有效模型名称。")
-                lines.append("\n👇 点击下方按钮可直接一键切换模型：")
-                keyboard = {
-                    "inline_keyboard": [
-                        [
-                            {"text": f"{'🔘' if current_raw == 'gemini-3.8-flash-high' else '⚪'} ✨ 3.8 Flash (推荐)", "callback_data": "model:gemini-3.8-flash-high"},
-                            {"text": f"{'🔘' if current_raw == 'gemini-3.7-flash-high' else '⚪'} ⚡ 3.7 Flash", "callback_data": "model:gemini-3.7-flash-high"},
-                        ],
-                        [
-                            {"text": f"{'🔘' if current_raw == 'gemini-3.1-pro-high' else '⚪'} 🧠 3.1 Pro (旗舰)", "callback_data": "model:gemini-3.1-pro-high"},
-                            {"text": f"{'🔘' if current_raw == 'gemini-3.6-flash-high' else '⚪'} 💡 3.6 Flash", "callback_data": "model:gemini-3.6-flash-high"},
-                        ],
-                        [
-                            {"text": f"{'🔘' if current_raw == 'claude-sonnet-4-6' else '⚪'} 🚀 Claude Sonnet", "callback_data": "model:claude-sonnet-4-6"},
-                            {"text": f"{'🔘' if current_raw == 'claude-opus-4-6-thinking' else '⚪'} 🏆 Claude Opus", "callback_data": "model:claude-opus-4-6-thinking"},
-                        ],
-                        [
-                            {"text": f"{'🔘' if current_raw == 'gpt-oss-120b-medium' else '⚪'} 🌐 GPT-OSS 120B", "callback_data": "model:gpt-oss-120b-medium"},
-                            {"text": f"{'🔘' if not current_raw else '⚪'} 🔄 恢复系统默认", "callback_data": "model:default"},
-                        ],
-                    ]
-                }
+                choices = (
+                    ("✨ 3.8 Flash", ("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low")),
+                    ("⚡ 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
+                    ("🧠 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
+                    ("💡 3.6 Flash", ("gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low")),
+                    ("🚀 Claude Sonnet", ("claude-sonnet-4-6",)),
+                    ("🏆 Claude Opus", ("claude-opus-4-6-thinking",)),
+                    ("🌐 GPT-OSS 120B", ("gpt-oss-120b-medium",)),
+                )
+                buttons = []
+                for label, candidates in choices:
+                    model = next((item for item in candidates if health_models.get(item, {}).get("outcome") == "success"), None)
+                    if model:
+                        buttons.append({
+                            "text": f"{'🔘' if current_raw == model else '⚪'} {label}",
+                            "callback_data": f"model:{model}",
+                        })
+                if buttons:
+                    lines.append("👇 下方仅显示已验证可用的模型：")
+                    keyboard = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [[
+                        {"text": "🔄 恢复系统默认", "callback_data": "model:default"}
+                    ]]}
+                else:
+                    lines.append("💡 尚未完成可用性检测；发送 /model refresh 后才会显示快捷模型按钮。")
+                    keyboard = {"inline_keyboard": [[{"text": "🔄 恢复系统默认", "callback_data": "model:default"}]]}
                 self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
                 return
             if target.lower() in {"default", "reset", "auto", "clear"}:
@@ -1214,6 +1307,14 @@ class Bridge:
                 self.queue_reply(
                     chat_id,
                     "⚠️ 模型名称格式不正确。仅支持 2..64 个字母、数字、点、下划线与连字符。",
+                )
+                return
+            if self._model_is_known_unavailable(resolved):
+                state = self._model_health().get("models", {}).get(resolved)
+                self.queue_reply(
+                    chat_id,
+                    f"⚠️ {resolved} 当前检测为不可用（{model_health_text(state)}）。\n"
+                    "发送 /model refresh 重新检测，或从 /model 的可用按钮中选择。",
                 )
                 return
             self.store.set_model(user, resolved)
@@ -1433,6 +1534,9 @@ class Bridge:
             return
         if self.runner.blocked:
             self.queue_reply(chat_id, "⚠️ 新任务已暂停，请检查服务器并重启服务。")
+            return
+        if self.model_check_task and not self.model_check_task.done():
+            self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
             return
         if self.slot is not None:
             self.queue_reply(chat_id, "⚠️ 工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
