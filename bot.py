@@ -1304,9 +1304,8 @@ class Bridge:
                 lines = [
                     f"🧠 AI 模型管理 ｜ 当前生效模型：{current_display}",
                     "━━━━━━━━━━━━━━━━━━━━",
-                    "• 切换指令：/model <模型名或别名>",
-                    "• 恢复默认：/model default",
-                    "• 重新检测：/model refresh（逐个真实调用，不读写工作目录）",
+                    "• 点击下方模型，再选择思考强度。",
+                    "• 也可发送 /model refresh 重新检测模型可用性。",
                     "━━━━━━━━━━━━━━━━━━━━",
                     "【官方模型可用性（共 14 种）】",
                 ]
@@ -1332,20 +1331,16 @@ class Bridge:
                 )
                 buttons = []
                 for label, candidates in choices:
-                    model = next((item for item in candidates if health_models.get(item, {}).get("outcome") == "success"), None)
-                    if model:
-                        buttons.append({
-                            "text": f"{'🔘' if current_raw == model else '⚪'} {label}",
-                            "callback_data": f"model:{model}",
-                        })
-                if buttons:
-                    lines.append("👇 下方仅显示已验证可用的模型：")
-                    keyboard = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [[
-                        {"text": "🔄 恢复系统默认", "callback_data": "model:default"}
-                    ]]}
-                else:
-                    lines.append("💡 尚未完成可用性检测；发送 /model refresh 后才会显示快捷模型按钮。")
-                    keyboard = {"inline_keyboard": [[{"text": "🔄 恢复系统默认", "callback_data": "model:default"}]]}
+                    model = candidates[0]
+                    selected = current_raw in candidates
+                    buttons.append({
+                        "text": f"{'🔘' if selected else '⚪'} {label}",
+                        "callback_data": f"model:{model}",
+                    })
+                lines.append("👇 请选择模型：")
+                keyboard = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [[
+                    {"text": "🔄 恢复系统默认", "callback_data": "model:default"}
+                ]]}
                 self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
                 return
             if target.lower() in {"default", "reset", "auto", "clear"}:

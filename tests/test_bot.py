@@ -636,6 +636,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("model:claude-sonnet-4-6", buttons)
         self.assertIn("model:default", buttons)
 
+    async def test_model_command_shows_picker_before_health_check(self):
+        await self.handle(update("/model"))
+        keyboard = self.api.messages[-1][2]
+        buttons = [btn["callback_data"] for row in keyboard["inline_keyboard"] for btn in row]
+        self.assertIn("model:gemini-3.8-flash-high", buttons)
+        self.assertIn("model:gemini-3.7-flash-high", buttons)
+        self.assertIn("model:claude-opus-4-6-thinking", buttons)
+
     async def test_task_acceptance_has_cancel_button_and_hides_internal_id(self):
         self.runner.hold = True
         await self.handle(update("long running task"))
