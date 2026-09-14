@@ -29,6 +29,32 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--uninstall", result.stderr)
 
+    def test_purge_removes_all_project_components_but_not_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            code = r'''
+source "$1"
+BASE="$2"
+APP="$BASE/app"; RELEASES="$BASE/releases"; CONFIG_DIR="$BASE/config"; CONFIG="$CONFIG_DIR/config.env"
+STATE_BASE="$BASE/state"; BACKUPS="$BASE/backups"; UNIT="$BASE/service"; RUNTIME_DIR="$BASE/runtime"
+APP_HOME="$BASE/home"; INPUT_DIR="$APP_HOME/.agy-telegram-inputs"; AGY_MANAGED_MARKER="$CONFIG_DIR/managed-agy-path"
+DEPLOY_LOCK_FILE="$BASE/deploy.lock"; SERVICE=test-service; PURGE=1
+mkdir -p "$RELEASES/current" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR" "$APP_HOME/.local/bin" "$APP_HOME/.gemini/antigravity-cli"
+ln -s "$RELEASES/current" "$APP"
+touch "$CONFIG" "$STATE_BASE/state" "$BACKUPS/backup" "$RUNTIME_DIR/ready.json" "$INPUT_DIR/file" "$DEPLOY_LOCK_FILE"
+touch "$APP_HOME/.local/bin/agy" "$APP_HOME/.gemini/antigravity-cli/token" "$APP_HOME/workspace-file"
+echo "$APP_HOME/.local/bin/agy" > "$AGY_MANAGED_MARKER"
+systemctl() { [[ "$1" == is-active ]] && return 3; return 0; }
+{ echo UNINSTALL; echo PURGE; } | uninstall
+for path in "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$UNIT" "$RUNTIME_DIR" "$INPUT_DIR" "$DEPLOY_LOCK_FILE" "$APP_HOME/.local/bin/agy" "$APP_HOME/.gemini/antigravity-cli"; do
+  [[ ! -e "$path" && ! -L "$path" ]] || exit 9
+done
+[[ -f "$APP_HOME/workspace-file" ]]
+'''
+            result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(base)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_bash_syntax(self):
         subprocess.run(["bash", "-n", str(ROOT / "install.sh")], check=True)
 

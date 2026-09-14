@@ -15,6 +15,9 @@ BACKUPS=/var/backups/agy-telegram-remote
 UNIT=/etc/systemd/system/agy-telegram-remote.service
 SERVICE='agy-telegram-remote'
 REPO=https://github.com/shixiaoheia/agy-telegram-remote.git
+RUNTIME_DIR=/run/agy-telegram-remote
+INPUT_DIR="$APP_HOME/.agy-telegram-inputs"
+AGY_MANAGED_MARKER=$CONFIG_DIR/managed-agy-path
 DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/agy-telegram-remote-deploy.lock}"
 
 REF=main
@@ -50,7 +53,7 @@ usage() {
   bash install.sh --reauth                 重新进入 Google 账号授权流程
   bash install.sh --ref COMMIT_OR_BRANCH   安装/升级指定不可变 Git 提交 SHA 或分支（推荐生产使用 Commit SHA）
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
-  bash install.sh --uninstall --purge      彻底清理（需输入 PURGE 二次确认，清除部署与配置）
+  bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 PURGE 二次确认）
   bash install.sh --help                   显示此帮助说明
 EOF
 }
@@ -63,7 +66,7 @@ choose_operation() {
   echo '============================================='
   echo '  1) 安装'
   echo '  2) 更新'
-  echo '  3) 彻底卸载（清除部署与配置）'
+  echo '  3) 彻底卸载（清除本项目全部组件）'
   echo '  0) 退出'
   echo
   while true; do
@@ -216,7 +219,7 @@ on_exit() {
 }
 
 uninstall() {
-  local answer
+  local answer agy_answer managed_agy=''
   echo '此操作移除 systemd 服务，默认保留程序、配置、工作目录及 Google 登录。'
   read -r -p '确认请输入 UNINSTALL： ' answer || exit 0
   [[ "$answer" == UNINSTALL ]] || exit 0
@@ -231,15 +234,37 @@ uninstall() {
     echo '服务已移除，所有程序和数据保留。'
     return
   fi
-  echo "彻底清理将删除：$APP、$RELEASES、$CONFIG_DIR、$STATE_BASE、$BACKUPS"
-  echo "注意：为保护系统安全，/root 个人目录与工作空间将完整保留。"
+  if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
+    IFS= read -r managed_agy < "$AGY_MANAGED_MARKER" || true
+    [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
+  fi
+  if [[ -z "$managed_agy" && -x "$APP_HOME/.local/bin/agy" ]]; then
+    echo '检测到旧版使用的标准 agy 与 Google 登录资料。它们也可能被你单独使用。'
+    read -r -p '如也要永久删除它们，请输入 ERASE_AGY；直接回车则保留： ' agy_answer || exit 0
+    [[ "$agy_answer" != ERASE_AGY ]] || managed_agy="$APP_HOME/.local/bin/agy"
+  fi
+  echo '彻底清理将删除本项目的服务、程序、配置、任务记录、备份、运行文件和 Bot 临时附件。'
+  if [[ -n "$managed_agy" ]]; then
+    echo '同时删除：本安装器安装的 agy 与对应 Google 登录资料。'
+  else
+    echo '提示：将保留独立安装的 agy 与登录资料。'
+  fi
+  echo '不会删除你的 /root 工作目录或其中的项目文件。'
   read -r -p '确认永久删除上述数据请输入 PURGE： ' answer || exit 0
   [[ "$answer" == PURGE ]] || exit 0
-  for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS"; do
+  for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"; do
     [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
   done
-  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS"
-  echo '彻底清理完成；保留了 /root 工作区与 Google 登录凭据，未删除 BotFather 中的 Telegram Bot。'
+  [[ ! -L "$DEPLOY_LOCK_FILE" ]] || fail "拒绝清理符号链接：$DEPLOY_LOCK_FILE"
+  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"
+  rm -f -- "$DEPLOY_LOCK_FILE"
+  if [[ -n "$managed_agy" ]]; then
+    [[ ! -L "$managed_agy" ]] || fail "拒绝清理符号链接：$managed_agy"
+    rm -f -- "$managed_agy"
+    rm -rf -- "$APP_HOME/.gemini/antigravity-cli"
+  fi
+  systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  echo '彻底清理完成：本项目组件已删除。不会删除 BotFather 中创建的 Telegram Bot。'
 }
 
 main() {
@@ -519,6 +544,10 @@ _ONBOARDING_EOF
   done
   [[ "$ready" == 1 ]] || fail '服务没有通过应用级就绪检查；请查看 journalctl 日志。'
   COMMITTED=1
+  if [[ "$installed_now" == 1 ]]; then
+    printf '%s\n' "$agy" > "$AGY_MANAGED_MARKER"
+    chown root:root "$AGY_MANAGED_MARKER"; chmod 0600 "$AGY_MANAGED_MARKER"
+  fi
   echo '============================================='
   echo ' 🎉 安装成功！后台守护服务已启动就绪'
   echo '============================================='
