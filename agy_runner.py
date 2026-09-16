@@ -48,6 +48,10 @@ class Result:
 def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
+    if "read-only file system" in low or re.search(r"\berofs\b", low):
+        return "filesystem_readonly"
+    if any(s in low for s in ("permission denied", "operation not permitted", "eacces")):
+        return "filesystem_permission"
     if "no capacity available" in low:
         return "capacity"
     if any(s in low for s in ("invalid model", "model not found", "model unavailable",
@@ -135,11 +139,14 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
         response.encode("utf-8")
     except UnicodeEncodeError:
         return Result("invalid", detail="agy 返回了无效的 Unicode 文本。", exit_code=exit_code)
-    if "soft-denied" in diagnostics.lower():
+    if "soft-denied" in diagnostics.lower() or category in {
+        "permission", "filesystem_readonly", "filesystem_permission"
+    }:
         return Result(
             "permission", text=response.strip(),
-            detail="检测到工具权限拒绝；请核对任务实际完成情况。",
-            category="permission", agy_status=status, exit_code=exit_code,
+            detail="检测到权限或文件系统限制；请核对任务实际完成情况。",
+            category=category if category.startswith("filesystem_") else "permission",
+            agy_status=status, exit_code=exit_code,
             conversation_id=conversation_id, num_turns=num_turns,
             input_tokens=input_tokens, output_tokens=output_tokens,
             thinking_tokens=thinking_tokens, total_tokens=total_tokens,

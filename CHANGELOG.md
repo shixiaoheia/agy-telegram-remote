@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased — Agent 写入权限诊断与按目录授权
+
+- 区分只读文件系统、操作系统权限不足和工具审批拒绝；不把带权限失败诊断的 SUCCESS 当作正常完成。
+- 新增安装器 `--write-paths` 与 `AGY_WRITE_PATHS`，仅显式配置后开放已有应用目录，支持替换、清空和升级保留；保持默认服务加固。
+- `/status` 显示自动审批、执行模式和额外可写目录配置；纠正“默认模式必然自动编辑”和“root 必然能修改所有系统文件”的说明。
+- 补充配置保留、路径注入/符号链接拒绝、服务生成和错误回传测试。真实 Google/Telegram 和目标服务器写入需单独验收。
+
 ## Unreleased — audit fix for OAuth diagnostics, CI test environment, callback queries, primary owner ID, and root security
 
 - **OAuth 授权包装器诊断增强与进程生命周期加固（OAuth Wrapper Diagnostics & Process Lifecycle）**（`manage.py`、`tests/test_installer.py`）：
