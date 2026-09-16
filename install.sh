@@ -22,6 +22,8 @@ DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/run/lock/agy-telegram-remote-deploy.lock}
 
 REF=main
 ENABLE_AUTO=0
+WRITE_PATHS=
+WRITE_PATHS_SET=0
 REAUTH=0
 MODE=menu
 PURGE=0
@@ -50,6 +52,8 @@ usage() {
   bash install.sh --install               👑 极简 Root 模式安装/更新（直接以 root 运行）
   bash install.sh --root                  👑 极简 Root 模式安装/更新（快捷别名）
   bash install.sh --enable-auto-approve    更新时明确启用自动审批（跳过权限确认弹窗）
+  bash install.sh --write-paths /etc/nginx,/opt/my-app  明确开放指定已有目录的写入权限
+  bash install.sh --write-paths ''         清空额外可写目录（普通更新保留原设置）
   bash install.sh --reauth                 重新进入 Google 账号授权流程
   bash install.sh --ref COMMIT_OR_BRANCH   安装/升级指定不可变 Git 提交 SHA 或分支（推荐生产使用 Commit SHA）
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
@@ -275,6 +279,11 @@ main() {
       --help|-h) usage; return ;;
       --install|--root) MODE=install; direct_install=1 ;;
       --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
+      --write-paths)
+        (( $# >= 2 )) || fail '--write-paths 缺少值。'
+        WRITE_PATHS="$2"; WRITE_PATHS_SET=1; shift
+        direct_install=1
+        ;;
       --reauth) REAUTH=1; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
       --purge) PURGE=1 ;;
@@ -376,6 +385,7 @@ main() {
     prepare+=(--old "$APP/.env")
   fi
   [[ "$ENABLE_AUTO" == 0 ]] || prepare+=(--enable-auto)
+  [[ "$WRITE_PATHS_SET" == 0 ]] || prepare+=(--write-paths "$WRITE_PATHS")
   # This helper and its imports came from a new root-owned checkout, NOT an old venv.
   /usr/bin/python3 -E -s -B "$STAGE/manage.py" "${prepare[@]}"
 

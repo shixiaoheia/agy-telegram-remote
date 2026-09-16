@@ -569,6 +569,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         timeout_error = describe({"outcome": "timed_out", "detail": "timeout"})
         self.assertIn("任务超时", timeout_error)
 
+    async def test_filesystem_diagnostics_do_not_recommend_reauth(self):
+        for category, hint in (("filesystem_readonly", "--write-paths"),
+                               ("filesystem_permission", "CapabilityBoundingSet")):
+            for render in (describe, describe_html):
+                message = render({"outcome": "error", "category": category, "detail": "failed"})
+                self.assertIn(hint, message)
+                self.assertNotIn("agy auth login", message)
+
+    async def test_status_explains_execution_permissions(self):
+        await self.handle(update("/status"))
+        message = self.api.messages[-1][1]
+        self.assertIn("工具自动审批", message)
+        self.assertIn("额外可写目录", message)
+        self.assertIn("不保证自动编辑", message)
+        self.assertEqual(self.runner.calls, 0)
+
     async def test_job_uses_selected_model(self):
         await self.handle(update("/model gemini-3.1-pro-high"))
         await self.handle(update("write a script"))

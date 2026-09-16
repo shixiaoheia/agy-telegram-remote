@@ -20,11 +20,13 @@ from state_store import read_json
 from telegram_api import TelegramAPI, TelegramError
 
 
-def service_unit(home: Path, workspace: Path, state: Path, user: str | None = None) -> str:
+def service_unit(home: Path, workspace: Path, state: Path, user: str | None = None,
+                 write_paths: tuple[Path, ...] = ()) -> str:
     # Paths have already passed Settings validation (no whitespace/%/newlines).
     run_user = "root"
     run_group = "root"
     protect_home = "no"
+    writable = " ".join(str(path) for path in dict.fromkeys((home, workspace, state, *write_paths)))
     return f"""[Unit]
 Description=Antigravity Telegram Remote
 Wants=network-online.target
@@ -50,7 +52,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome={protect_home}
-ReadWritePaths={home} {workspace} {state}
+ReadWritePaths={writable}
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictSUIDSGID=yes
@@ -79,7 +81,10 @@ def prepare_config(args: argparse.Namespace) -> int:
     ids = input("> ").strip()
     home = getattr(args, "home", "/root") or "/root"
     values = merged_config(old, token, ids, home, args.enable_auto)
+    if getattr(args, "write_paths", None) is not None:
+        values["AGY_WRITE_PATHS"] = args.write_paths
     settings = Settings.from_mapping(values)
+    check_write_paths(settings)
     for path in (settings.workspace, settings.home, settings.state_dir):
         check_no_symlink(path)
     # Destination is a root-created, group-readable candidate file.
@@ -93,6 +98,13 @@ def prepare_config(args: argparse.Namespace) -> int:
         os.close(fd)
     print("\n已采用自动审批。" if settings.skip_permissions else "\n已保留原安装的非自动审批设置。")
     return 0
+
+
+def check_write_paths(settings: Settings) -> None:
+    for path in settings.write_paths:
+        check_no_symlink(path)
+        if not path.is_dir():
+            raise ConfigError("AGY_WRITE_PATHS 中的目录必须预先存在，不能是文件或符号链接。")
 
 
 async def smoke(settings: Settings, allow_root: bool = True) -> int:
@@ -431,6 +443,7 @@ def main() -> int:
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--home", default="/root", nargs="?")
     prepare.add_argument("--enable-auto", action="store_true")
+    prepare.add_argument("--write-paths", default=None)
     for command in ("fields", "smoke", "check-token", "unit", "check-local"):
         child = sub.add_parser(command)
         child.add_argument("--config", type=Path, required=True)
@@ -485,8 +498,11 @@ def main() -> int:
         elif args.command == "check-token":
             return asyncio.run(check_token(settings))
         elif args.command == "unit":
-            print(service_unit(settings.home, settings.workspace, settings.state_dir, user=getattr(args, "user", None)), end="")
+            check_write_paths(settings)
+            print(service_unit(settings.home, settings.workspace, settings.state_dir,
+                               user=getattr(args, "user", None), write_paths=settings.write_paths), end="")
         elif args.command == "check-local":
+            check_write_paths(settings)
             for path in (settings.home, settings.workspace, settings.state_dir):
                 check_no_symlink(path)
                 if not path.is_dir() or not os.access(path, os.R_OK | os.W_OK | os.X_OK):

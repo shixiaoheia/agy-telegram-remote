@@ -71,6 +71,7 @@ DEFAULTS = {
     "MAX_OUTPUT_BYTES": "1048576",
     "MAX_REPLY_CHARS": "30000",
     "AGY_SKIP_PERMISSIONS": "true",
+    "AGY_WRITE_PATHS": "",
     "STATE_DIR": "/var/lib/agy-telegram-remote",
     "RESULT_RETENTION_DAYS": "7",
     "AGY_MODEL": "",
@@ -151,6 +152,20 @@ def absolute_path(value: str, key: str) -> Path:
     return path
 
 
+def write_paths(value: str) -> tuple[Path, ...]:
+    """Explicit directory grants, never a blanket writable root or unit syntax."""
+    if not value:
+        return ()
+    parts = value.split(",")
+    if len(parts) > 16 or any(not part for part in parts):
+        raise ConfigError("AGY_WRITE_PATHS 必须为最多 16 个逗号分隔的绝对目录，或留空。")
+    paths = tuple(dict.fromkeys(absolute_path(part, "AGY_WRITE_PATHS") for part in parts))
+    # Require specific application directories rather than whole system trees.
+    if any(len(path.parts) < 3 for path in paths):
+        raise ConfigError("AGY_WRITE_PATHS 必须指定具体应用目录，不能开放整个顶层系统目录。")
+    return paths
+
+
 @dataclass(frozen=True)
 class Settings:
     token: str
@@ -167,6 +182,7 @@ class Settings:
     retention_days: int = 7
     model: str = ""
     owner_id: int = 0
+    write_paths: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         if self.owner_id == 0 and self.allowed:
@@ -217,6 +233,7 @@ class Settings:
             retention_days=integer(values, "RESULT_RETENTION_DAYS", 1, 30),
             model=model,
             owner_id=owner_id,
+            write_paths=write_paths(values["AGY_WRITE_PATHS"]),
         )
 
     @classmethod

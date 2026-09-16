@@ -152,6 +152,38 @@ bash install.sh --root
 
 ## 常见问题
 
+### 能查看服务器，但 Agent 修改文件失败
+
+查看成功不代表有写入权限。`/sys` 直接读取系统信息，不经过 Agent；安装自检也只验证固定文字回复，不验证文件修改。
+
+先发送 `/status` 查看执行模式、工具自动审批和额外可写目录。三层限制分别处理：
+
+1. **只给计划、不执行**：发送 `/mode code` 选择落地编辑。`/mode default` 跟随服务器上的 agy 设置，不保证自动编辑。
+2. **`soft-denied` / 工具审批拒绝**：旧安装可能保留 `AGY_SKIP_PERMISSIONS=false`。无交互运行无法弹出审批窗口；可以配置 agy 的精确 `permissions.allow` 规则，或在完全信任的个人服务器上明确使用安装器 `--enable-auto-approve`。
+3. **`Read-only file system` / `EROFS`**：服务默认启用 `ProtectSystem=strict`，仅允许 home、工作目录、状态目录及私有临时目录写入。即使 root、落地编辑和工具自动审批均已开启，`/etc`、`/opt` 等应用目录仍可能只读。
+
+需要修改工作区外的应用文件时，先备份目标应用配置，再用 `--write-paths` 明确开放**具体且已存在的目录**。例如只管理 Nginx 配置（实际目录不同请替换）：
+
+```bash
+cd /root
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh
+bash install.sh --root --write-paths /etc/nginx
+```
+
+多个目录以逗号分隔，例如 `--write-paths /etc/nginx,/opt/my-app`。此参数替换完整的额外目录列表；不传时保留旧列表，传 `--write-paths ''` 清空列表。不接受根目录、整个顶层目录、符号链接或不存在的目录，不会自动创建、改属主或放宽文件权限。升级仍保留原 Token、白名单和自动审批选择；只有确实需要开启所有工具审批时，才额外加 `--enable-auto-approve`。
+
+这些目录对所有已授权白名单用户生效。`--write-paths` 只解除指定目录的 systemd 只读挂载限制，**不授予完整服务器管理权限**；文件权限、ACL、只读磁盘和 `CapabilityBoundingSet` 仍可能阻止操作。`Operation not permitted` 不应通过反复重新 Google 授权来解决。
+
+更新后可在 SSH 中查看实际生效的服务限制（`/status` 展示的是配置值，额外 systemd drop-in 可能改变实际行为）：
+
+```bash
+systemctl show agy-telegram-remote -p ProtectSystem -p ReadWritePaths -p NoNewPrivileges -p CapabilityBoundingSet
+```
+
+再在 Telegram 用 `/mode code`，明确让 Agent 在已授权的测试目录创建一个无关紧要的测试文件，读回并核对内容。核实后自行删除测试文件；不要直接用生产配置测试。已有任务不会自动重跑，已经写入的内容不会自动恢复。
+
+参考：[agy 无交互权限](https://antigravity.google/docs/cli/headless/#permissions-in-headless-mode)、[执行模式](https://antigravity.google/docs/cli/modes/)。
+
 ### 机器人不回复
 
 先在服务器执行：

@@ -94,6 +94,66 @@ done
         self.assertIn("Group=root", unit)
         self.assertIn("ProtectHome=no", unit)
 
+    def test_extra_write_paths_keep_service_hardening(self):
+        unit = service_unit(Path("/root"), Path("/root"), Path("/var/lib/agy-telegram-remote"),
+                            write_paths=(Path("/etc/nginx"), Path("/opt/my-app")))
+        self.assertIn("ReadWritePaths=/root /var/lib/agy-telegram-remote /etc/nginx /opt/my-app\n", unit)
+        for directive in ("ProtectSystem=strict", "NoNewPrivileges=yes", "CapabilityBoundingSet=",
+                          "PrivateTmp=yes", "KillMode=control-group"):
+            self.assertIn(directive + "\n", unit)
+
+    def test_write_paths_cli_preserves_replaces_and_clears(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            first, second = base / "first", base / "second"
+            first.mkdir()
+            second.mkdir()
+            old, dest = base / "old", base / "candidate"
+            old.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
+                "AGY_WRITE_PATHS": str(first), "AGY_SKIP_PERMISSIONS": "false",
+            }).items()))
+            dest.touch()
+            for flags, expected in (([], (first,)), (["--write-paths", str(second)], (second,)),
+                                    (["--write-paths", ""], ())):
+                argv = ["manage.py", "prepare-config", "--old", str(old), "--output", str(dest), *flags]
+                with self.subTest(flags=flags), patch("sys.argv", argv), \
+                     patch("builtins.input", return_value=""), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(), 0)
+                settings = Settings.load(dest)
+                self.assertEqual(settings.write_paths, expected)
+                self.assertFalse(settings.skip_permissions)
+                self.assertEqual(settings.token, config_values()["TELEGRAM_BOT_TOKEN"])
+                output = io.StringIO()
+                with patch("sys.argv", ["manage.py", "unit", "--config", str(dest)]), \
+                     contextlib.redirect_stdout(output):
+                    self.assertEqual(main(), 0)
+                writable = next(line for line in output.getvalue().splitlines() if line.startswith("ReadWritePaths="))
+                self.assertEqual(writable, "ReadWritePaths=/root /var/lib/agy-telegram-remote"
+                                 + "".join(f" {path}" for path in expected))
+
+    def test_invalid_write_directory_does_not_overwrite_candidate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            target = base / "target"
+            target.mkdir()
+            link = base / "link"
+            link.symlink_to(target, target_is_directory=True)
+            dest = base / "candidate"
+            for path in (link, base / "missing", dest):
+                dest.write_text("unchanged")
+                argv = ["manage.py", "prepare-config", "--output", str(dest), "--write-paths", str(path)]
+                with self.subTest(path=path), patch("sys.argv", argv), \
+                     patch("builtins.input", side_effect=[config_values()["TELEGRAM_BOT_TOKEN"], "12345"]), \
+                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(main(), 21)
+                self.assertEqual(dest.read_text(), "unchanged")
+
+    def test_write_paths_flag_requires_value(self):
+        result = subprocess.run(["bash", str(ROOT / "install.sh"), "--write-paths"],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--write-paths 缺少值", result.stderr)
+
     def test_no_old_venv_or_dotenv_execution(self):
         script = (ROOT / "install.sh").read_text()
         self.assertNotIn("/venv/bin/python", script)

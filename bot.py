@@ -39,7 +39,9 @@ CATEGORY_HELP = {
     "auth": "需要重新授权：请在服务器运行 agy auth login，完成 Google 登录后再试。",
     "quota": "账号额度或限流：请稍后再试，或检查当前 Google 账号额度。",
     "model": "模型不可用或参数不兼容：发送 /model refresh 重新检测可用模型。",
-    "permission": "权限被拒绝：请检查 AGY_SKIP_PERMISSIONS 与 agy 的权限规则。",
+    "permission": "工具审批被拒绝：请检查 /status 中的自动审批设置与 agy 权限规则；需要编辑时使用 /mode code。",
+    "filesystem_readonly": "文件系统只读：自动审批不能解除 systemd 的目录限制。请通过安装器 --write-paths 显式开放需要修改的应用目录，见 README。",
+    "filesystem_permission": "系统权限不足：请核对目标文件权限、ACL 与服务 CapabilityBoundingSet；开启 agy 自动审批不能补足操作系统权限。",
     "network": "服务器网络异常：请检查 DNS、代理和到 Google 的连接。",
     "process": "agy 无法启动：请检查服务器上的 agy 安装与运行权限。",
 }
@@ -1367,7 +1369,13 @@ class Bridge:
             effort_info = f"\n⚡ 思考强度：{effort.capitalize()}" if effort else ""
             mode = self.store.get_mode(user)
             mode_name = "推演规划 (Plan)" if mode == "plan" else ("落地编辑 (Accept-Edits)" if mode == "accept-edits" else mode)
-            mode_info = f"\n📋 执行模式：{mode_name}" if mode else ""
+            mode_info = f"\n📋 执行模式：{mode_name or '跟随 agy 设置（不保证自动编辑）'}"
+            permission_info = (
+                f"\n🔐 工具自动审批：{'开启' if self.settings.skip_permissions else '关闭（无交互任务可能被拒绝）'}"
+                f"\n📁 工作目录：{self.settings.workspace}"
+                f"\n📝 额外可写目录（配置值）：{', '.join(map(str, self.settings.write_paths)) or '未配置'}"
+                "\n💡 修改系统文件还受 systemd 和文件权限限制。"
+            )
             conv = self.store.get_conversation(user)
             conv_info = ""
             if conv and conv.get("conversation_id"):
@@ -1392,7 +1400,7 @@ class Bridge:
                 text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
                 text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
-            text += conv_info + effort_info + mode_info + disk_info
+            text += conv_info + effort_info + mode_info + disk_info + permission_info
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
@@ -1627,13 +1635,13 @@ class Bridge:
             target = parts[1].strip().lower() if len(parts) > 1 else ""
             if not target or target in {"show", "current", "list", "help"}:
                 curr = self.store.get_mode(user)
-                curr_display = "推演规划模式 (Plan)" if curr == "plan" else ("落地编辑模式 (Accept-Edits)" if curr == "accept-edits" else "默认（标准落地编辑）")
+                curr_display = "推演规划模式 (Plan)" if curr == "plan" else ("落地编辑模式 (Accept-Edits)" if curr == "accept-edits" else "跟随 agy 设置（不保证自动编辑）")
                 lines = [
                     f"📋 执行模式设置 ｜ 当前：{curr_display}",
                     "━━━━━━━━━━━━━━━━━━━━",
-                    "• 🛠️ 落地编辑模式 (accept-edits)：\n  AI 将实际在工作目录中创建、修改和执行代码文件。",
-                    "• 📋 推演规划模式 (plan)：\n  AI 仅进行推演架构方案与执行步骤规划，不修改任何文件。",
-                    "• 🔄 默认模式 (default)：\n  恢复为标准落地模式。",
+                    "• 🛠️ 落地编辑模式 (accept-edits)：\n  自动接受文件编辑；命令执行仍受工具审批和系统权限限制。",
+                    "• 📋 推演规划模式 (plan)：\n  先分析并给出计划；这是规划指令，不是操作系统只读沙箱。",
+                    "• 🔄 默认模式 (default)：\n  跟随服务器上的 agy 设置，不保证自动编辑。",
                     "━━━━━━━━━━━━━━━━━━━━",
                     "💡 你可以点击下方按钮切换，或输入：/mode <plan|code|default>",
                 ]

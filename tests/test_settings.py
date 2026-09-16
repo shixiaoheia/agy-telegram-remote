@@ -11,6 +11,20 @@ from settings import (ConfigError, Settings, check_no_symlink, merged_config,
                       parse_env, read_private_text, serialize_env)
 
 class ConfigurationTests(unittest.TestCase):
+    def test_write_paths_are_explicit_preserved_and_deduplicated(self):
+        self.assertEqual(Settings.from_mapping(config_values()).write_paths, ())
+        old = config_values() | {"AGY_WRITE_PATHS": "/etc/nginx,/opt/my-app,/etc/nginx"}
+        settings = Settings.from_mapping(merged_config(old, "", "", "/root"))
+        self.assertEqual(settings.write_paths, (Path("/etc/nginx"), Path("/opt/my-app")))
+        self.assertEqual(Settings.from_mapping(old | {"AGY_WRITE_PATHS": ""}).write_paths, ())
+
+    def test_write_paths_reject_broad_grants_and_unit_injection(self):
+        for value in ("/", "/etc", "/opt", "/etc/..", "/etc/nginx,", "relative/path",
+                      "/etc/nginx /etc/ssh", "/etc/%h", "/etc/nginx\nUser=other",
+                      "-/etc/nginx", "/etc/nginx;cmd", ",".join(["/etc/nginx"] * 17)):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                Settings.from_mapping(config_values() | {"AGY_WRITE_PATHS": value})
+
     def test_unknown_permission_key_rejected(self):
         with self.assertRaises(ConfigError):
             Settings.from_mapping(config_values() | {"AGY_SKIP_PERMISSION": "false"})

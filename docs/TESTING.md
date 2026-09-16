@@ -107,7 +107,7 @@ Store 的权限检查、降低安装器 umask 或跳过安装自检。
   - `agy_runner` 在任务构建时透传 `--effort <level>`，`test_runner` 断言命令行参数正确装配；
   - `test_bot` 覆盖行内按钮与回调查询（`callback_query`）处理，并向 Telegram 发送 Toast 响应。
 - **执行模式（`/mode`）**：
-  - 支持推演规划 `plan`（只读，严禁写入任何工作区文件）与落地编辑 `accept-edits`（代码生成），支持中文别名（`规划`/`编辑`/`落地`）；
+  - 支持推演规划 `plan`（先分析再给计划，不是操作系统只读隔离）与落地编辑 `accept-edits`（自动接受文件编辑，仍受工具审批和系统权限限制），支持中文别名（`规划`/`编辑`/`落地`）；
   - 偏好独立落盘至 `state/mode-{user}.json`（权限 `0600`）；
   - `agy_runner` 在任务构建时透传 `--mode <mode>` 参数，`test_runner` 断言参数透明拼装。
 

@@ -114,6 +114,35 @@ class ParserTests(unittest.TestCase):
         value = self.parse({"status": "SUCCESS", "response": "I tried"}, b"tool soft-denied")
         self.assertEqual(value.outcome, "permission")
 
+    def test_os_write_errors_are_not_auth_or_success(self):
+        for message, category in (
+            ("Read-only file system: /etc/app/config", "filesystem_readonly"),
+            ("EROFS: write failed", "filesystem_readonly"),
+            ("Permission denied: credentials directory", "filesystem_permission"),
+            ("Operation not permitted", "filesystem_permission"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(classify(message), category)
+                result = self.parse({"status": "SUCCESS", "response": "I tried"}, message.encode())
+                self.assertEqual((result.outcome, result.category), ("permission", category))
+                failed = self.parse({"status": "ERROR", "error": message}, code=1)
+                self.assertEqual((failed.outcome, failed.category), ("error", category))
+
+    def test_soft_denied_remains_visible_with_other_diagnostics(self):
+        result = self.parse({"status": "SUCCESS", "response": "partial"},
+                            b"credentials loaded; tool soft-denied")
+        self.assertEqual((result.outcome, result.category), ("permission", "permission"))
+
+    def test_stream_readonly_diagnostic_uses_same_parser(self):
+        result = parse_stream_result(
+            b'{"event":"result","result":{"status":"SUCCESS","response":"partial"}}',
+            b"Read-only file system", 0)
+        self.assertEqual((result.outcome, result.category), ("permission", "filesystem_readonly"))
+
+    def test_reply_discussing_readonly_is_not_a_diagnostic(self):
+        result = self.parse({"status": "SUCCESS", "response": "Read-only file system means EROFS."})
+        self.assertEqual(result.outcome, "success")
+
     def test_invalid_unicode_response_rejected(self):
         result = parse_result(b'{"status":"SUCCESS","response":"\\ud800"}', b"", 0)
         self.assertEqual(result.outcome, "invalid")
