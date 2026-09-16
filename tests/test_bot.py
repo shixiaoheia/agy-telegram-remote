@@ -93,6 +93,8 @@ class FakeAPI:
             return self.backlog
         if method == "getFile":
             return {"file_path": "documents/fixture.txt", "file_size": 4}
+        if method == "sendChatAction":
+            return True
         raise AssertionError(method)
 
     async def download_file(self, _file_path, destination, maximum):
@@ -267,6 +269,35 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(callback_update(f"history:{first_id}"))
         self.assertIn("first full result", self.api.messages[-1][1])
         self.assertEqual(self.api.answered_callbacks[-1][1], "📖 正在打开任务结果")
+
+    async def test_steer_stops_text_task_then_restarts_with_correction(self):
+        self.runner.hold = True
+        await self.handle(update("检查登录模块"))
+        await self.runner.started.wait()
+        old_job = self.bridge.slot
+        await self.handle(update("/steer 只分析，不要修改文件", update_id=2))
+        self.assertTrue(old_job.cancel.is_set())
+        self.assertTrue(old_job.steered)
+        self.assertIsNotNone(old_job.steer_task)
+        await asyncio.wait_for(old_job.steer_task, 2)
+        new_job = self.bridge.slot
+        self.assertIsNotNone(new_job)
+        self.assertIsNot(new_job, old_job)
+        self.assertIn("检查登录模块", new_job.original_prompt)
+        self.assertIn("只分析，不要修改文件", new_job.original_prompt)
+        self.assertEqual(self.runner.calls, 2)
+        self.runner.finish.set()
+        await self.finish_job()
+        self.assertFalse(any("任务已取消" in message[1] for message in self.api.messages))
+
+    async def test_steer_rejects_attachment_task_without_reusing_file(self):
+        job = Job(12345, 12345, original_prompt="分析附件", has_attachment=True)
+        job.worker = asyncio.create_task(asyncio.sleep(0))
+        self.bridge.slot = job
+        await self.handle(update("/steer 只检查错误", update_id=2))
+        self.assertFalse(job.cancel.is_set())
+        self.assertIn("当前任务含附件", self.api.messages[-1][1])
+        await job.worker
 
     async def test_photo_attachment_is_available_to_task_then_removed(self):
         photo = [{"file_id": "photo_file_1", "file_size": 4, "width": 50, "height": 50}]
@@ -665,10 +696,20 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("任务完成", self.api.messages[-1][1])
         self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
 
+    async def test_running_task_sends_typing_heartbeat(self):
+        self.runner.hold = True
+        await self.handle(update("long running task"))
+        await self.runner.started.wait()
+        await asyncio.sleep(0)
+        self.assertIn(("sendChatAction", {"chat_id": 12345, "action": "typing"}), self.api.calls)
+        self.runner.finish.set()
+        await self.finish_job()
+
     async def test_initialize_registers_telegram_command_menu(self):
         await self.bridge.initialize()
         command_call = next(payload for method, payload in self.api.calls if method == "setMyCommands")
         self.assertIn({"command": "cancel", "description": "取消正在执行的任务"}, command_call["commands"])
+        self.assertIn({"command": "steer", "description": "停止当前任务并按修正重做"}, command_call["commands"])
         self.assertIn({"command": "start", "description": "欢迎页与快速开始"}, command_call["commands"])
         self.assertIn({"command": "history", "description": "查看最近 10 条任务"}, command_call["commands"])
 
@@ -704,6 +745,24 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runner.last_conversation_id, "conv-turn-1")
         conv2 = self.store.get_conversation(12345)
         self.assertEqual(conv2["num_turns"], 2)
+
+    async def test_long_session_token_reminder_only_when_threshold_is_crossed(self):
+        self.runner.result = Result(
+            "success", text="first", conversation_id="conv-long-1", num_turns=1,
+            input_tokens=99_000, output_tokens=500, total_tokens=99_500,
+        )
+        await self.handle(update("first long turn"))
+        await self.finish_job()
+        self.assertNotIn("当前会话累计", self.api.messages[-1][1])
+
+        self.runner.result = Result(
+            "success", text="second", conversation_id="conv-long-1", num_turns=2,
+            input_tokens=600, output_tokens=200, total_tokens=800,
+        )
+        await self.handle(update("second long turn", update_id=2))
+        await self.finish_job()
+        self.assertIn("当前会话累计", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_conversation(12345)["session_tokens"], 100_300)
 
     async def test_reset_command_clears_conversation_memory(self):
         self.store.set_conversation(12345, "conv-existing-123", 3)

@@ -51,6 +51,7 @@ OUTCOME_HELP = {
 }
 MODEL_PROBE_PROMPT = "Reply with exactly: AGY_MODEL_CHECK_OK. Do not use tools, read files, modify files, or make network requests."
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
 SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
@@ -297,6 +298,11 @@ class Job:
     attachment_feedback: str = ""
     execution_steps: list[str] = field(default_factory=list)
     history_title: str = ""
+    original_prompt: str = ""
+    has_attachment: bool = False
+    typing_task: asyncio.Task | None = None
+    steer_task: asyncio.Task | None = None
+    steered: bool = False
 
 
 def attachment_kind(name: str, is_photo: bool) -> str:
@@ -425,6 +431,11 @@ def describe(record: dict) -> str:
     num_turns = record.get("num_turns", 0)
     if num_turns:
         stats.append(f"• 🧠 会话轮次：第 {num_turns} 轮")
+    if record.get("session_token_reminder"):
+        session_tokens = record.get("session_tokens", 0)
+        stats.append(
+            f"• 💡 当前会话累计约 {session_tokens:,} Token；如回复变慢或上下文混乱，可发送 /new 开启新会话。"
+        )
 
     if stats:
         parts.append("📊 运行统计\n" + "\n".join(stats))
@@ -779,6 +790,7 @@ class Bridge:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
             job.progress_task = asyncio.create_task(self._refresh_progress(job))
+            job.typing_task = asyncio.create_task(self._typing_heartbeat(job))
             try:
                 async def progress(activity: str) -> None:
                     if activity.startswith(("✅", "⚠️")):
@@ -806,8 +818,20 @@ class Bridge:
                     except TypeError:
                         result = await self.runner.run(prompt, job.cancel)
 
+            session_tokens = 0
+            session_token_reminder = False
             if result.outcome == "success" and getattr(result, "conversation_id", None):
-                self.store.set_conversation(job.user, result.conversation_id, getattr(result, "num_turns", 1))
+                previous = self.store.get_conversation(job.user)
+                previous_tokens = 0
+                if previous and previous.get("conversation_id") == result.conversation_id:
+                    previous_tokens = max(0, int(previous.get("session_tokens", 0) or 0))
+                session_tokens = previous_tokens + max(0, int(getattr(result, "total_tokens", 0) or 0))
+                session_token_reminder = (
+                    previous_tokens < SESSION_TOKEN_REMINDER_THRESHOLD <= session_tokens
+                )
+                self.store.set_conversation(
+                    job.user, result.conversation_id, getattr(result, "num_turns", 1), session_tokens,
+                )
             if getattr(result, "total_tokens", 0) > 0:
                 self.store.record_usage(
                     job.user,
@@ -822,14 +846,16 @@ class Bridge:
                     "model": job.model or getattr(result, "model", ""),
                     "effort": job.effort or getattr(result, "effort", ""),
                     "mode": job.mode or getattr(result, "mode", ""),
+                    "session_tokens": session_tokens,
+                    "session_token_reminder": session_token_reminder,
                 }
             )
             self.store.save_history(job.user, job.history_title, record)
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
             await self._finish_progress(job, result.outcome)
-            delivered = await self.send_html(job.chat, describe_html(record))
+            delivered = True if job.steered else await self.send_html(job.chat, describe_html(record))
             self.store.save(job.user, record | {
-                "delivery": "sent" if delivered else "failed_or_partial"
+                "delivery": "superseded_by_steer" if job.steered else ("sent" if delivered else "failed_or_partial")
             })
         except asyncio.CancelledError:
             job.cancel.set()
@@ -849,8 +875,20 @@ class Bridge:
             if job.progress_task:
                 job.progress_task.cancel()
                 await asyncio.gather(job.progress_task, return_exceptions=True)
+            if job.typing_task:
+                job.typing_task.cancel()
+                await asyncio.gather(job.typing_task, return_exceptions=True)
             if self.slot is job:
                 self.slot = None
+
+    async def _typing_heartbeat(self, job: Job) -> None:
+        """Keep Telegram's native typing indicator alive while a task is running."""
+        while not self.stop.is_set() and not job.cancel.is_set() and self.slot is job:
+            try:
+                await self.api.call("sendChatAction", chat_id=job.chat, action="typing")
+            except (TelegramError, AttributeError):
+                return
+            await asyncio.sleep(4)
 
     def _progress_text(self, job: Job) -> str:
         elapsed = max(0, int(time.monotonic() - job.started_at))
@@ -880,13 +918,50 @@ class Bridge:
         if job.status_message_id is None:
             return
         try:
-            await self.api.edit(job.chat, job.status_message_id,
-                                f"{LABELS.get(outcome, '任务已结束')}\n"
-                                "━━━━━━━━━━━━━━━━━━━━\n"
-                                "任务状态已结束，结果将在下一条消息展示。",
+            completion = (
+                "⚡ 已停止当前任务，将按你的修正重新开始。"
+                if job.steered else
+                f"{LABELS.get(outcome, '任务已结束')}\n━━━━━━━━━━━━━━━━━━━━\n任务状态已结束，结果将在下一条消息展示。"
+            )
+            await self.api.edit(job.chat, job.status_message_id, completion,
                                 {"inline_keyboard": []})
         except (TelegramError, AttributeError):
             pass
+
+    async def _restart_with_correction(self, job: Job, correction: str) -> None:
+        """Wait for the old process to clean up, then start the corrected text task."""
+        try:
+            if job.worker:
+                await asyncio.gather(job.worker, return_exceptions=True)
+            if self.stop.is_set() or self.runner.blocked:
+                self.queue_reply(job.chat, "⚠️ 原任务已停止，但服务当前不能安全重启修正任务。请检查 /status 后重试。")
+                return
+            prompt = (
+                "这是对刚才已取消任务的修正。请以“最新修正”为准，不要沿用已取消任务的未完成结论。\n\n"
+                f"原任务：\n{job.original_prompt}\n\n最新修正：\n{correction}"
+            )
+            if len(prompt) > self.settings.max_prompt:
+                self.queue_reply(job.chat, "⚠️ 原任务和修正合并后过长；请重新发送一条精简后的完整任务。")
+                return
+            next_job = Job(
+                job.user, job.chat, model=job.model, conversation_id=job.conversation_id,
+                effort=job.effort, mode=job.mode, history_title=task_title(correction, "修正任务"),
+                original_prompt=prompt,
+            )
+            self.slot = next_job
+            self.store.maintain()
+            self.store.save(job.user, {
+                "job_id": next_job.job_id, "outcome": "running", "delivery": "pending",
+                "detail": "正在按用户修正重新执行；服务中断时不会自动重试。",
+                "model": next_job.model, "effort": next_job.effort, "mode": next_job.mode,
+            })
+            next_job.worker = asyncio.create_task(self._accept_and_work(next_job, prompt))
+        except Exception:
+            if self.slot is not None and self.slot is not job:
+                self.slot = None
+            self.runner.blocked = True
+            LOG.error("job_steer_failed id=%s", job.job_id)
+            self.queue_reply(job.chat, "⚠️ 修正任务准备失败，未自动重试。请检查服务器后重新发送完整任务。")
 
     async def _receive_attachment(self, job: Job, attachment: dict, is_photo: bool) -> tuple[Path, str]:
         """Fetch a whitelisted Telegram attachment into this job's private workspace."""
@@ -1188,6 +1263,7 @@ class Bridge:
                 "• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
                 "【🛑 任务控制与基础】\n"
                 "• 🛑 /cancel - 立即取消正在执行的任务\n"
+                "• ⚡ /steer <修正内容> - 停止当前纯文字任务，按原任务加修正重新执行\n"
                 "• 📜 /last - 查看最近一条任务的执行结果\n"
                 "• 📚 /history - 查看最近 10 条任务并点开完整结果\n"
                 "• 📎 可直接发送截图、日志或代码文件（单文件最大 10MB）\n"
@@ -1279,6 +1355,34 @@ class Bridge:
             except (OSError, ValueError):
                 text = "⚠️ 无法读取最近结果，请检查服务器状态。"
             self.queue_reply(chat_id, text)
+            return
+        if command == "/steer":
+            parts = text.split(maxsplit=1)
+            correction = parts[1].strip() if len(parts) > 1 else ""
+            if not correction or "\x00" in correction or len(correction) > self.settings.max_prompt:
+                self.queue_reply(chat_id, "💡 用法：/steer <修正内容>。修正内容不能为空，且不能超过任务长度限制。")
+                return
+            job = self.slot
+            if job is None:
+                self.queue_reply(chat_id, "ℹ️ 当前没有运行中的任务，直接发送完整需求即可。")
+                return
+            if job.user != user:
+                self.queue_reply(chat_id, "⚠️ 当前任务由其他白名单用户发起，不能由你修改。")
+                return
+            if job.has_attachment or job.attachments:
+                self.queue_reply(chat_id, "📎 当前任务含附件。请先发送 /cancel，随后重新发送附件和完整的修正要求，避免误用已清理的临时文件。")
+                return
+            if job.steer_task is not None or job.cancel.is_set():
+                self.queue_reply(chat_id, "⏳ 正在停止并清理当前任务；请等待新的任务卡出现后再继续修正。")
+                return
+            if not job.original_prompt:
+                self.queue_reply(chat_id, "⚠️ 当前任务缺少可安全重用的原始内容。请取消后重新发送完整任务。")
+                return
+            job.steered = True
+            job.cancel.set()
+            job.activity = "正在停止当前任务并应用你的修正"
+            job.steer_task = asyncio.create_task(self._restart_with_correction(job, correction))
+            self.queue_reply(chat_id, "⚡ 已收到修正：正在安全停止当前任务，清理完成后会自动按新要求重新执行。")
             return
         if command == "/history":
             try:
@@ -1595,7 +1699,8 @@ class Bridge:
         mode = self.store.get_mode(user) or ""
         fallback_title = f"分析附件：{attachment.get('file_name', '截图')}" if attachment else "未命名任务"
         job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort,
-                  mode=mode, history_title=task_title(text, fallback_title))
+                  mode=mode, history_title=task_title(text, fallback_title), original_prompt=text,
+                  has_attachment=attachment is not None)
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
@@ -1663,6 +1768,7 @@ class Bridge:
                 {"command": "help", "description": "查看帮助与使用说明"},
                 {"command": "status", "description": "查看当前任务状态"},
                 {"command": "cancel", "description": "取消正在执行的任务"},
+                {"command": "steer", "description": "停止当前任务并按修正重做"},
                 {"command": "model", "description": "选择模型与思考强度"},
                 {"command": "new", "description": "新建对话并清除上下文"},
                 {"command": "usage", "description": "查看 Token 用量"},

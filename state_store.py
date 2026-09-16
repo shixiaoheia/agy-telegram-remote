@@ -291,7 +291,8 @@ class Store:
             return value
         return None
 
-    def set_conversation(self, user: int, conversation_id: str | None, num_turns: int = 1) -> None:
+    def set_conversation(self, user: int, conversation_id: str | None, num_turns: int = 1,
+                         session_tokens: int = 0) -> None:
         path = self._conv_path(user)
         if not conversation_id:
             path.unlink(missing_ok=True)
@@ -302,6 +303,7 @@ class Store:
             "user_id": user,
             "conversation_id": conversation_id,
             "num_turns": num_turns,
+            "session_tokens": max(0, int(session_tokens or 0)),
             "updated_at": time.time(),
         })
 
