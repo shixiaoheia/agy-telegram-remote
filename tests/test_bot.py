@@ -698,12 +698,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_running_task_sends_typing_heartbeat(self):
         self.runner.hold = True
-        await self.handle(update("long running task"))
-        await self.runner.started.wait()
-        await asyncio.sleep(0)
-        self.assertIn(("sendChatAction", {"chat_id": 12345, "action": "typing"}), self.api.calls)
-        self.runner.finish.set()
-        await self.finish_job()
+        with patch("bot.TYPING_HEARTBEAT_SECONDS", 0):
+            await self.handle(update("long running task"))
+            await self.runner.started.wait()
+            await asyncio.sleep(0)
+            self.assertIn(("sendChatAction", {"chat_id": 12345, "action": "typing"}), self.api.calls)
+            self.runner.finish.set()
+            await self.finish_job()
 
     async def test_initialize_registers_telegram_command_menu(self):
         await self.bridge.initialize()

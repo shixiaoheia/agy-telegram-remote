@@ -52,6 +52,7 @@ OUTCOME_HELP = {
 MODEL_PROBE_PROMPT = "Reply with exactly: AGY_MODEL_CHECK_OK. Do not use tools, read files, modify files, or make network requests."
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
+TYPING_HEARTBEAT_SECONDS = 4
 SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
@@ -883,12 +884,16 @@ class Bridge:
 
     async def _typing_heartbeat(self, job: Job) -> None:
         """Keep Telegram's native typing indicator alive while a task is running."""
+        # Do not add an extra Telegram API call for quick tasks.  The accepted
+        # status card already acknowledges those; the native indicator starts
+        # only when work is genuinely taking a while.
+        await asyncio.sleep(TYPING_HEARTBEAT_SECONDS)
         while not self.stop.is_set() and not job.cancel.is_set() and self.slot is job:
             try:
                 await self.api.call("sendChatAction", chat_id=job.chat, action="typing")
             except (TelegramError, AttributeError):
                 return
-            await asyncio.sleep(4)
+            await asyncio.sleep(TYPING_HEARTBEAT_SECONDS)
 
     def _progress_text(self, job: Job) -> str:
         elapsed = max(0, int(time.monotonic() - job.started_at))
