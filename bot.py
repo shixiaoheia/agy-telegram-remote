@@ -53,6 +53,10 @@ MODEL_PROBE_PROMPT = "Reply with exactly: AGY_MODEL_CHECK_OK. Do not use tools, 
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
 TYPING_HEARTBEAT_SECONDS = 4
+CAPACITY_FALLBACKS = {
+    "gemini-3.8-flash-low": "gemini-3.8-flash-high",
+    "gemini-3.8-flash-medium": "gemini-3.8-flash-high",
+}
 SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
@@ -392,7 +396,7 @@ def model_health_text(result: dict | None) -> str:
     category = str(result.get("category") or "unknown")
     labels = {
         "auth": "需要授权", "quota": "额度或限流", "model": "模型不可用",
-        "network": "网络异常", "process": "agy 无法启动",
+        "capacity": "容量暂时不足", "network": "网络异常", "process": "agy 无法启动",
     }
     return f"❌ {labels.get(category, '调用失败')}"
 
@@ -436,6 +440,10 @@ def describe(record: dict) -> str:
         session_tokens = record.get("session_tokens", 0)
         stats.append(
             f"• 💡 当前会话累计约 {session_tokens:,} Token；如回复变慢或上下文混乱，可发送 /new 开启新会话。"
+        )
+    if record.get("model_fallback_from"):
+        stats.append(
+            f"• 🔁 模型自动切换：{record['model_fallback_from']} → {model}（原模型暂时无容量）"
         )
 
     if stats:
@@ -792,32 +800,22 @@ class Bridge:
         try:
             job.progress_task = asyncio.create_task(self._refresh_progress(job))
             job.typing_task = asyncio.create_task(self._typing_heartbeat(job))
-            try:
-                async def progress(activity: str) -> None:
-                    if activity.startswith(("✅", "⚠️")):
-                        if not job.execution_steps or job.execution_steps[-1] != activity:
-                            job.execution_steps.append(activity)
-                            del job.execution_steps[:-6]
-                        job.activity = "正在继续处理任务"
-                    else:
-                        job.activity = activity
-                result = await self.runner.run(
-                    prompt, job.cancel, model=job.model or None,
-                    conversation_id=job.conversation_id or None,
-                    effort=job.effort or None, mode=job.mode or None,
-                    progress=progress,
-                )
-            except TypeError:
-                try:
-                    result = await self.runner.run(
-                        prompt, job.cancel, model=job.model or None,
-                        conversation_id=job.conversation_id or None,
-                    )
-                except TypeError:
-                    try:
-                        result = await self.runner.run(prompt, job.cancel, model=job.model or None)
-                    except TypeError:
-                        result = await self.runner.run(prompt, job.cancel)
+            result = await self._run_task(job, prompt)
+            fallback_from = ""
+            fallback = CAPACITY_FALLBACKS.get(job.model)
+            if (fallback and not job.cancel.is_set() and result.outcome == "error"
+                    and (result.category == "capacity" or "no capacity available" in result.detail.lower())):
+                # A provider capacity rejection is returned before a model can
+                # invoke tools, so retrying this exact request is safe.
+                fallback_from = job.model
+                job.model = fallback
+                job.effort = ""
+                job.activity = f"{fallback_from} 暂无容量，正在自动切换至 {fallback}"
+                job.execution_steps.append(f"⚠️ 原模型暂无容量，已自动切换至 {fallback}")
+                del job.execution_steps[:-6]
+                self.store.set_model(job.user, fallback)
+                self._mark_model_capacity_unavailable(fallback_from)
+                result = await self._run_task(job, prompt)
 
             session_tokens = 0
             session_token_reminder = False
@@ -849,6 +847,7 @@ class Bridge:
                     "mode": job.mode or getattr(result, "mode", ""),
                     "session_tokens": session_tokens,
                     "session_token_reminder": session_token_reminder,
+                    "model_fallback_from": fallback_from,
                 }
             )
             self.store.save_history(job.user, job.history_title, record)
@@ -881,6 +880,39 @@ class Bridge:
                 await asyncio.gather(job.typing_task, return_exceptions=True)
             if self.slot is job:
                 self.slot = None
+
+    async def _run_task(self, job: Job, prompt: str) -> Result:
+        async def progress(activity: str) -> None:
+            if activity.startswith(("✅", "⚠️")):
+                if not job.execution_steps or job.execution_steps[-1] != activity:
+                    job.execution_steps.append(activity)
+                    del job.execution_steps[:-6]
+                job.activity = "正在继续处理任务"
+            else:
+                job.activity = activity
+        try:
+            return await self.runner.run(
+                prompt, job.cancel, model=job.model or None,
+                conversation_id=job.conversation_id or None,
+                effort=job.effort or None, mode=job.mode or None, progress=progress,
+            )
+        except TypeError:
+            try:
+                return await self.runner.run(
+                    prompt, job.cancel, model=job.model or None,
+                    conversation_id=job.conversation_id or None,
+                )
+            except TypeError:
+                try:
+                    return await self.runner.run(prompt, job.cancel, model=job.model or None)
+                except TypeError:
+                    return await self.runner.run(prompt, job.cancel)
+
+    def _mark_model_capacity_unavailable(self, model: str) -> None:
+        health = self._model_health()
+        models = dict(health.get("models", {}))
+        models[model] = {"outcome": "error", "category": "capacity"}
+        self.store.set_model_health(models)
 
     async def _typing_heartbeat(self, job: Job) -> None:
         """Keep Telegram's native typing indicator alive while a task is running."""

@@ -113,7 +113,7 @@ class Store:
             "cleanup_ok", "delivery", "model", "duration_seconds",
             "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",
             "conversation_id", "num_turns",
-            "session_tokens", "session_token_reminder",
+            "session_tokens", "session_token_reminder", "model_fallback_from",
         ) if key in record}
         atomic_json(self._path(user), record)
         return record

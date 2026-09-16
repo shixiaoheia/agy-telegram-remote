@@ -111,6 +111,7 @@ class FakeRunner:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
         self.result = Result("success", text="the result")
+        self.results = []
         self.last_model = None
         self.last_conversation_id = None
         self.last_prompt = None
@@ -131,7 +132,9 @@ class FakeRunner:
             for task in (cancelled, finished):
                 task.cancel()
             await asyncio.gather(cancelled, finished, return_exceptions=True)
-        res = Result("cancelled", model=model or "") if cancel.is_set() else self.result
+        res = Result("cancelled", model=model or "") if cancel.is_set() else (
+            self.results.pop(0) if self.results else self.result
+        )
         if model and not res.model:
             res.model = model
         return res
@@ -311,6 +314,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.store.load(12345)["job_id"]).exists())
         self.assertIn("已收到：图片", self.api.messages[0][1])
         self.assertIn("本次任务会读取它", self.api.messages[0][1])
+
+    async def test_capacity_error_retries_task_once_with_flash_high(self):
+        self.store.set_model(12345, "gemini-3.8-flash-low")
+        self.runner.results = [
+            Result("error", detail="No capacity available for model", category="capacity"),
+            Result("success", text="recovered"),
+        ]
+        await self.handle(update("repair the project"))
+        await self.finish_job()
+        record = self.store.load(12345)
+        self.assertEqual(self.runner.calls, 2)
+        self.assertEqual(self.runner.last_model, "gemini-3.8-flash-high")
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
+        self.assertEqual(record["outcome"], "success")
+        self.assertEqual(record["model_fallback_from"], "gemini-3.8-flash-low")
+        self.assertIn("模型自动切换", self.api.messages[-1][1])
 
     async def test_code_document_is_available_to_task(self):
         document = {"file_id": "code_file_1", "file_size": 4, "file_name": "main.py"}

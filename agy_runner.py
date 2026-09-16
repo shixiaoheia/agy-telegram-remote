@@ -48,6 +48,8 @@ class Result:
 def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
+    if "no capacity available" in low:
+        return "capacity"
     if any(s in low for s in ("invalid model", "model not found", "model unavailable",
                               "unsupported model", "unknown model", "model is not available")):
         return "model"
