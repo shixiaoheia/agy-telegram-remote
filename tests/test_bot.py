@@ -331,6 +331,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["model_fallback_from"], "gemini-3.8-flash-low")
         self.assertIn("模型自动切换", self.api.messages[-1][1])
 
+    async def test_flash_high_capacity_resumes_same_conversation(self):
+        self.store.set_model(12345, "gemini-3.8-flash-high")
+        self.runner.results = [
+            Result("error", detail="No capacity available for model", category="capacity",
+                   conversation_id="interrupted-conversation"),
+            Result("success", text="recovered", conversation_id="interrupted-conversation"),
+        ]
+        await self.handle(update("check the server"))
+        await self.finish_job()
+        record = self.store.load(12345)
+        self.assertEqual(self.runner.calls, 2)
+        self.assertEqual(self.runner.last_model, "gemini-3.8-flash-high")
+        self.assertEqual(self.runner.last_conversation_id, "interrupted-conversation")
+        self.assertEqual(record["outcome"], "success")
+        self.assertIn("Continue the same task", self.runner.last_prompt)
+
     async def test_code_document_is_available_to_task(self):
         document = {"file_id": "code_file_1", "file_size": 4, "file_name": "main.py"}
         await self.handle(attachment_update(document=document, caption="检查这个代码"))

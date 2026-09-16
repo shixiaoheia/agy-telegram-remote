@@ -57,6 +57,12 @@ CAPACITY_FALLBACKS = {
     "gemini-3.8-flash-low": "gemini-3.8-flash-high",
     "gemini-3.8-flash-medium": "gemini-3.8-flash-high",
 }
+CAPACITY_RESUME_PROMPT = (
+    "The immediately preceding task was interrupted by a temporary upstream capacity error. "
+    "Continue the same task from this conversation. Review the completed steps first; do not repeat "
+    "commands, edits, or other actions that have already completed. Perform only work still needed, "
+    "then provide the final answer to the original user request."
+)
 SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
@@ -802,11 +808,26 @@ class Bridge:
             job.typing_task = asyncio.create_task(self._typing_heartbeat(job))
             result = await self._run_task(job, prompt)
             fallback_from = ""
+            is_capacity_error = (
+                result.outcome == "error"
+                and (result.category == "capacity" or "no capacity available" in result.detail.lower())
+            )
+            # Keep 3.8 High selected. agy can resume its returned conversation
+            # so a transient capacity error does not restart the original task.
+            if (job.model == "gemini-3.8-flash-high" and not job.cancel.is_set()
+                    and is_capacity_error and result.conversation_id):
+                job.conversation_id = result.conversation_id
+                job.activity = "3.8 High 暂时无容量，正在恢复同一任务"
+                job.execution_steps.append("⚠️ 3.8 High 暂时无容量，正在恢复同一任务")
+                del job.execution_steps[:-6]
+                result = await self._run_task(job, CAPACITY_RESUME_PROMPT)
             fallback = CAPACITY_FALLBACKS.get(job.model)
+            tool_has_run = any("💻" in step or "🛠️" in step for step in job.execution_steps)
             if (fallback and not job.cancel.is_set() and result.outcome == "error"
+                    and not tool_has_run
                     and (result.category == "capacity" or "no capacity available" in result.detail.lower())):
-                # A provider capacity rejection is returned before a model can
-                # invoke tools, so retrying this exact request is safe.
+                # Only a pre-tool capacity rejection may be retried safely.
+                # A completed tool step may have modified user state already.
                 fallback_from = job.model
                 job.model = fallback
                 job.effort = ""
