@@ -1835,10 +1835,17 @@ class Bridge:
                     self.store.maintain()
                     self._last_maintenance = time.monotonic()
                 try:
-                    updates = await self.api.call(
-                        "getUpdates", offset=self.offset, limit=25, timeout=10,
-                        allowed_updates=["message", "callback_query"],
-                    )
+                    if hasattr(self.api, "get_updates"):
+                        updates = await self.api.get_updates(
+                            offset=self.offset, limit=25, timeout=10,
+                            allowed_updates=["message", "callback_query"],
+                        )
+                    else:
+                        # Small test doubles intentionally expose only call().
+                        updates = await self.api.call(
+                            "getUpdates", offset=self.offset, limit=25, timeout=10,
+                            allowed_updates=["message", "callback_query"],
+                        )
                     if not isinstance(updates, list):
                         raise TelegramError()
                     if not self.polling_ready:

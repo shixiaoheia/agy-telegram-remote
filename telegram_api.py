@@ -28,7 +28,7 @@ class TelegramAPI:
         self._file_endpoint = f"{root}/file/bot{token}/"
         self.request_timeout = request_timeout
 
-    def _request(self, method: str, payload: dict) -> object:
+    def _request(self, method: str, payload: dict, request_timeout: float | None = None) -> object:
         request = Request(
             self._endpoint + method,
             data=json.dumps(payload).encode("utf-8"),
@@ -37,7 +37,7 @@ class TelegramAPI:
         http_code = 0
         try:
             try:
-                response = urlopen(request, timeout=self.request_timeout)
+                response = urlopen(request, timeout=request_timeout or self.request_timeout)
             except HTTPError as error:
                 http_code = error.code
                 response = error
@@ -67,6 +67,21 @@ class TelegramAPI:
 
     async def call(self, method: str, **payload) -> object:
         return await asyncio.to_thread(self._request, method, payload)
+
+    async def get_updates(self, *, offset: int, limit: int, timeout: int,
+                          allowed_updates: list[str]) -> object:
+        """Long-poll with a bounded transport timeout.
+
+        A healthy long poll returns as soon as an update arrives. A damaged TCP
+        connection must not consume the generic 25-second API timeout and hold
+        the next Telegram command hostage.
+        """
+        payload = {
+            "offset": offset, "limit": limit, "timeout": timeout,
+            "allowed_updates": allowed_updates,
+        }
+        request_timeout = max(12.0, float(timeout) + 3.0)
+        return await asyncio.to_thread(self._request, "getUpdates", payload, request_timeout)
 
     def _download_file(self, file_path: str, destination: Path, maximum: int) -> int:
         """Download a Telegram file into a new private regular file, bounded in bytes."""

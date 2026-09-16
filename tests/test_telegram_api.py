@@ -176,6 +176,15 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, [])
         self.assertEqual(self.requests[0][1]["offset"], 100)
 
+    async def test_long_poll_transport_timeout_is_bounded(self):
+        with patch.object(self.api, "_request", return_value=[]) as request:
+            await self.api.get_updates(
+                offset=100, limit=25, timeout=10,
+                allowed_updates=["message", "callback_query"],
+            )
+        self.assertEqual(request.call_args.args[0], "getUpdates")
+        self.assertEqual(request.call_args.args[2], 13.0)
+
     async def test_download_file_is_bounded_and_private(self):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "input.txt"
