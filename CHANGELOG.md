@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — 可选完整主机权限
+
+- 新增 `--full-host-access` / `AGY_HOST_ACCESS=full`，明确启用完整 root 主机权限和工具自动审批，支持更新保留及切回受限模式。
+- `/status` 显示权限模式；保留 Telegram 身份校验与结果、进程管理。
+- 回归覆盖完整权限服务生成、配置保留、恢复受限模式和非法配置拒绝。
+
 ## Unreleased — Agent 写入权限诊断与按目录授权
 
 - 区分只读文件系统、操作系统权限不足和工具审批拒绝；不把带权限失败诊断的 SUCCESS 当作正常完成。

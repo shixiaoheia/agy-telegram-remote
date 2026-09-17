@@ -1374,7 +1374,8 @@ class Bridge:
                 f"\n🔐 工具自动审批：{'开启' if self.settings.skip_permissions else '关闭（无交互任务可能被拒绝）'}"
                 f"\n📁 工作目录：{self.settings.workspace}"
                 f"\n📝 额外可写目录（配置值）：{', '.join(map(str, self.settings.write_paths)) or '未配置'}"
-                "\n💡 修改系统文件还受 systemd 和文件权限限制。"
+                f"\n🖥️ 主机权限（配置值）：{'完整 Root 权限' if self.settings.host_access == 'full' else '受限目录模式'}"
+                "\n💡 实际权限以主机与 systemd 当前设置为准。"
             )
             conv = self.store.get_conversation(user)
             conv_info = ""

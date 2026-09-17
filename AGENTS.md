@@ -15,6 +15,8 @@ Never request, print, commit, or fabricate real Bot Tokens or Google credentials
 - Save results before sending. `/last` is retrieval only.
 - Do not weaken whitelist, private-chat checks, output limits, process cleanup,
   symlink checks, or the documented security boundaries to make a test pass.
+- Explicit administrator opt-in through AGY_HOST_ACCESS=full disables systemd
+  host restrictions as documented in SECURITY.md; preserve this choice on upgrades.
 - Keep unrelated repository content, attribution, community and promotion links.
 - Do not claim a live Google/Telegram/systemd deployment was tested when it was not.
 - Do not force-push or bypass branch protection. Report branch/PR/merge states accurately.
