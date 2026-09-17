@@ -21,12 +21,19 @@ from telegram_api import TelegramAPI, TelegramError
 
 
 def service_unit(home: Path, workspace: Path, state: Path, user: str | None = None,
-                 write_paths: tuple[Path, ...] = ()) -> str:
+                 write_paths: tuple[Path, ...] = (), host_access: str = "restricted") -> str:
     # Paths have already passed Settings validation (no whitespace/%/newlines).
     run_user = "root"
     run_group = "root"
     protect_home = "no"
     writable = " ".join(str(path) for path in dict.fromkeys((home, workspace, state, *write_paths)))
+    if host_access not in {"restricted", "full"}:
+        raise ConfigError("未知主机权限模式。")
+    isolation = ("NoNewPrivileges=no\nPrivateTmp=no\nProtectSystem=no\n"
+                 "ProtectHome=no\nRestrictSUIDSGID=no\n" if host_access == "full" else
+                 f"NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\n"
+                 f"ProtectHome={protect_home}\nReadWritePaths={writable}\n"
+                 "CapabilityBoundingSet=\nAmbientCapabilities=\nRestrictSUIDSGID=yes\n")
     return f"""[Unit]
 Description=Antigravity Telegram Remote
 Wants=network-online.target
@@ -48,14 +55,7 @@ RestartPreventExitStatus=78
 RuntimeDirectory=agy-telegram-remote
 RuntimeDirectoryMode=0700
 UMask=0077
-NoNewPrivileges=yes
-PrivateTmp=yes
-ProtectSystem=strict
-ProtectHome={protect_home}
-ReadWritePaths={writable}
-CapabilityBoundingSet=
-AmbientCapabilities=
-RestrictSUIDSGID=yes
+{isolation.rstrip()}
 KillMode=control-group
 TimeoutStopSec=45
 
@@ -81,6 +81,8 @@ def prepare_config(args: argparse.Namespace) -> int:
     ids = input("> ").strip()
     home = getattr(args, "home", "/root") or "/root"
     values = merged_config(old, token, ids, home, args.enable_auto)
+    if getattr(args, "host_access", None) is not None:
+        values["AGY_HOST_ACCESS"] = args.host_access
     if getattr(args, "write_paths", None) is not None:
         values["AGY_WRITE_PATHS"] = args.write_paths
     settings = Settings.from_mapping(values)
@@ -101,6 +103,8 @@ def prepare_config(args: argparse.Namespace) -> int:
 
 
 def check_write_paths(settings: Settings) -> None:
+    if settings.host_access == "full":
+        return
     for path in settings.write_paths:
         check_no_symlink(path)
         if not path.is_dir():
@@ -444,6 +448,7 @@ def main() -> int:
     prepare.add_argument("--home", default="/root", nargs="?")
     prepare.add_argument("--enable-auto", action="store_true")
     prepare.add_argument("--write-paths", default=None)
+    prepare.add_argument("--host-access", choices=("restricted", "full"), default=None)
     for command in ("fields", "smoke", "check-token", "unit", "check-local"):
         child = sub.add_parser(command)
         child.add_argument("--config", type=Path, required=True)
@@ -500,7 +505,8 @@ def main() -> int:
         elif args.command == "unit":
             check_write_paths(settings)
             print(service_unit(settings.home, settings.workspace, settings.state_dir,
-                               user=getattr(args, "user", None), write_paths=settings.write_paths), end="")
+                               user=getattr(args, "user", None), write_paths=settings.write_paths,
+                               host_access=settings.host_access), end="")
         elif args.command == "check-local":
             check_write_paths(settings)
             for path in (settings.home, settings.workspace, settings.state_dir):

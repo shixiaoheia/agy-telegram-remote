@@ -6,6 +6,10 @@
 
 ## 本版本实施的措施
 
+### 权限模式
+
+下文 systemd 加固措施仅适用于默认的 `AGY_HOST_ACCESS=restricted`。管理员可明确使用安装器 `--full-host-access` 切换到 `full` 并开启自动审批。完整权限模式关闭 `ProtectSystem`、`PrivateTmp`、`NoNewPrivileges`、`RestrictSUIDSGID`，不设置 `ReadWritePaths` 或清空 capabilities；Agent 获得宿主机允许的 root 权限，能够修改系统文件、服务和凭据。所有白名单账户与模型任务均共享此权限，不具备主机隔离保证。私聊、白名单、配置校验、结果保存和取消清理仍然保留。普通升级保留模式，`--restricted-host-access` 恢复默认加固。自定义 drop-in 或宿主机限制仍可能生效。
+
 程序发布目录为 root 所有，Bot 使用系统 Python，禁用用户 Python site 与 Python 环境覆盖；专为个人独立 VPS 设计，以 root 身份原生运行于 `/root` 主目录，并通过 systemd `ProtectSystem=strict`、`0600` 私有文件权限与私有临时目录进行安全隔离。旧版用户可写虚拟环境不会被特权更新器执行。
 
 配置不被 shell source/eval。目录、链接、配置类型、白名单和限额被检查。服务采用 `NoNewPrivileges`、只读系统目录、受限可写路径及私有临时目录。私聊和数字 ID 是任务入口检查条件。

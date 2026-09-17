@@ -72,6 +72,7 @@ DEFAULTS = {
     "MAX_REPLY_CHARS": "30000",
     "AGY_SKIP_PERMISSIONS": "true",
     "AGY_WRITE_PATHS": "",
+    "AGY_HOST_ACCESS": "restricted",
     "STATE_DIR": "/var/lib/agy-telegram-remote",
     "RESULT_RETENTION_DAYS": "7",
     "AGY_MODEL": "",
@@ -183,6 +184,7 @@ class Settings:
     model: str = ""
     owner_id: int = 0
     write_paths: tuple[Path, ...] = ()
+    host_access: str = "restricted"
 
     def __post_init__(self) -> None:
         if self.owner_id == 0 and self.allowed:
@@ -205,6 +207,9 @@ class Settings:
         if any(not 0 < uid < 2**53 for uid in allowed):
             raise ConfigError("Telegram 数字 ID 超出范围。")
         permission = values["AGY_SKIP_PERMISSIONS"].strip().lower()
+        host_access = values["AGY_HOST_ACCESS"].strip().lower()
+        if host_access not in {"restricted", "full"}:
+            raise ConfigError("AGY_HOST_ACCESS 必须是 restricted 或 full。")
         if permission not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
             raise ConfigError("AGY_SKIP_PERMISSIONS 必须是 true 或 false。")
         work = absolute_path(values["AGY_WORKSPACE"], "AGY_WORKSPACE")
@@ -234,6 +239,7 @@ class Settings:
             model=model,
             owner_id=owner_id,
             write_paths=write_paths(values["AGY_WRITE_PATHS"]),
+            host_access=host_access,
         )
 
     @classmethod

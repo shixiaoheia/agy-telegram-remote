@@ -152,6 +152,20 @@ bash install.sh --root
 
 ## 常见问题
 
+### 让 Telegram Agent 直接管理整个主机（完整 Root 权限）
+
+管理员明确选择后，可用以下安装参数解除本项目的 systemd 文件系统、提权与能力限制：
+
+```bash
+bash install.sh --root --full-host-access --ref <完整提交SHA>
+```
+
+该选项保存 `AGY_HOST_ACCESS=full` 并开启工具自动审批，服务以 root 运行，关闭 `ProtectSystem`、`PrivateTmp`、`NoNewPrivileges`、`RestrictSUIDSGID`，不再设置受限的 `ReadWritePaths` 或清空能力集。Agent 可直接修改 `/usr/local/x-ui`、`/etc/x-ui` 等主机目录和管理系统服务，无需逐目录授权。
+
+所有白名单用户都会获得主机 root 操作能力，包括删除文件和停服。Telegram 私聊与白名单身份验证仍然保留。主机/容器自身权限、只读磁盘、模型容量、网络和软件错误仍可能阻止任务；此选项不保证所有任务成功。
+
+新安装默认为 `restricted`；普通升级保留已选模式。使用 `--restricted-host-access` 可恢复受限模式（保留原额外目录列表和自动审批设置）。`/status` 展示配置值，实际权限以 `systemctl show` 与任务内实测为准。已有自定义 systemd drop-in 不会被安装器擅自删除，可能继续施加限制。
+
 ### 能查看服务器，但 Agent 修改文件失败
 
 查看成功不代表有写入权限。`/sys` 直接读取系统信息，不经过 Agent；安装自检也只验证固定文字回复，不验证文件修改。
