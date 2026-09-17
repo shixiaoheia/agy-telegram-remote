@@ -17,11 +17,54 @@ from manage import (auth_login, classify_auth_error, main, oauth_environment,
 from settings import ConfigError, Settings, parse_env
 
 class InstallerTests(unittest.TestCase):
+    def test_full_host_access_unit_and_config_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old, dest = Path(temp) / "old", Path(temp) / "candidate"
+            old.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
+                "AGY_SKIP_PERMISSIONS": "false",
+            }).items()))
+            dest.touch()
+            for flags, full in ((["--host-access", "full", "--enable-auto"], True),
+                                ([], True), (["--host-access", "restricted"], False)):
+                with patch("sys.argv", ["manage.py", "prepare-config", "--old", str(old),
+                                        "--output", str(dest), *flags]), \
+                     patch("builtins.input", return_value=""), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(), 0)
+                settings = Settings.load(dest)
+                self.assertEqual(settings.host_access, "full" if full else "restricted")
+                self.assertTrue(settings.skip_permissions)
+                self.assertEqual(settings.token, config_values()["TELEGRAM_BOT_TOKEN"])
+                output = io.StringIO()
+                with patch("sys.argv", ["manage.py", "unit", "--config", str(dest)]), \
+                     contextlib.redirect_stdout(output):
+                    self.assertEqual(main(), 0)
+                unit = output.getvalue()
+                if full:
+                    for directive in ("NoNewPrivileges=no", "PrivateTmp=no", "ProtectSystem=no",
+                                      "ProtectHome=no", "RestrictSUIDSGID=no", "User=root"):
+                        self.assertIn(directive + "\n", unit)
+                    for directive in ("CapabilityBoundingSet=", "AmbientCapabilities=", "ReadWritePaths="):
+                        self.assertNotIn(directive, unit)
+                else:
+                    self.assertIn("ProtectSystem=strict\n", unit)
+                    self.assertIn("CapabilityBoundingSet=\n", unit)
+                old.write_text(dest.read_text())
+
+    def test_host_access_validation_and_default(self):
+        self.assertEqual(Settings.from_mapping(config_values()).host_access, "restricted")
+        with self.assertRaises(ConfigError):
+            Settings.from_mapping(config_values() | {"AGY_HOST_ACCESS": "fulll"})
+        with self.assertRaises(ConfigError):
+            service_unit(Path("/root"), Path("/root"), Path("/var/lib/agy-telegram-remote"),
+                         host_access="invalid")
+
     def test_help_does_not_install(self):
         result = subprocess.run(["bash", str(ROOT / "install.sh"), "--help"],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0)
         self.assertIn("--uninstall", result.stdout)
+        self.assertIn("--full-host-access", result.stdout)
+        self.assertIn("--restricted-host-access", result.stdout)
 
     def test_purge_requires_explicit_uninstall(self):
         result = subprocess.run(["bash", str(ROOT / "install.sh"), "--purge"],
