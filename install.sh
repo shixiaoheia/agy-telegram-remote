@@ -26,6 +26,8 @@ HOST_ACCESS=
 WRITE_PATHS=
 WRITE_PATHS_SET=0
 REAUTH=0
+RECONFIGURE=0
+SHOW_MENU=0
 MODE=menu
 PURGE=0
 TRANSACTION=0
@@ -49,7 +51,9 @@ usage() {
  Antigravity Telegram Remote 安装与管理脚本
 =============================================
 用法：
-  bash install.sh                         显示管理菜单（安装、更新、彻底卸载、退出）
+  bash install.sh                         已安装时自动更新；首次运行显示安装菜单
+  bash install.sh --menu                  显示管理菜单（安装、更新、彻底卸载、退出）
+  bash install.sh --reconfigure           安装/更新并重新询问 Token 与白名单
   bash install.sh --install               👑 极简 Root 模式安装/更新（直接以 root 运行）
   bash install.sh --root                  👑 极简 Root 模式安装/更新（快捷别名）
   bash install.sh --enable-auto-approve    更新时明确启用自动审批（跳过权限确认弹窗）
@@ -280,6 +284,8 @@ main() {
   while (( $# )); do
     case "$1" in
       --help|-h) usage; return ;;
+      --menu) SHOW_MENU=1 ;;
+      --reconfigure) RECONFIGURE=1; direct_install=1 ;;
       --install|--root) MODE=install; direct_install=1 ;;
       --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
       --full-host-access) HOST_ACCESS=full; ENABLE_AUTO=1; direct_install=1 ;;
@@ -302,14 +308,19 @@ main() {
     esac
     shift
   done
-  # Existing explicit install flags remain shortcuts; bare invocation shows the menu.
+  # Explicit modes win; bare invocation upgrades an existing installation.
   if [[ "$MODE" == menu && "$direct_install" == 1 ]]; then
     MODE=install
   fi
   [[ "$MODE" == uninstall || "$PURGE" == 0 ]] || fail '--purge 必须与 --uninstall 一起使用。'
   [[ -t 0 && -t 1 ]] || fail '请在可交互 SSH 终端运行，不要把脚本通过管道传给 bash。'
   if [[ "$MODE" == menu ]]; then
-    choose_operation
+    if [[ "$SHOW_MENU" == 0 ]] && [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
+      MODE=install
+      echo '检测到已有安装，将自动更新并保留现有配置。'
+    else
+      choose_operation
+    fi
   fi
   [[ "$MODE" != exit ]] || return 0
   if [[ "$EUID" -ne 0 ]]; then
@@ -389,6 +400,7 @@ main() {
   elif [[ -f "$APP/.env" ]]; then
     prepare+=(--old "$APP/.env")
   fi
+  [[ "$RECONFIGURE" == 0 ]] || prepare+=(--reconfigure)
   [[ "$ENABLE_AUTO" == 0 ]] || prepare+=(--enable-auto)
   [[ -z "$HOST_ACCESS" ]] || prepare+=(--host-access "$HOST_ACCESS")
   [[ "$WRITE_PATHS_SET" == 0 ]] || prepare+=(--write-paths "$WRITE_PATHS")

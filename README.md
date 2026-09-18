@@ -116,12 +116,12 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 ```bash
 cd /root
 curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh
-bash install.sh --root
+bash install.sh
 ```
 
-更新时直接按回车即可保留原来的 Bot Token 和白名单。脚本会先检查新版本，再替换服务；未完成任务不会自动重跑。
+已有安装时直接运行 `bash install.sh` 会自动更新，不再显示管理菜单或询问已保存的 Bot Token、白名单。原模型、权限和路径设置保持不变；仅缺少必要配置或 Google 授权失效时需要交互。需要改 Token 或白名单时使用 `bash install.sh --reconfigure`。脚本会先检查新版本，再替换服务；未完成任务不会自动重跑。
 
-也可以运行 `bash install.sh` 打开菜单：
+也可以运行 `bash install.sh --menu` 打开菜单：
 
 ```text
 1) 安装

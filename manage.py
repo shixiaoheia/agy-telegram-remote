@@ -71,14 +71,24 @@ def prepare_config(args: argparse.Namespace) -> int:
         unknown = set(old) - KEYS
         if unknown:
             raise ConfigError("旧配置包含不支持的项目，请先备份并人工核对：" + ", ".join(sorted(unknown)))
-    print("\n步骤 1/3：请输入 Telegram Bot Token（更新时直接回车保留原 Token）：")
-    if old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN"):
-        print("（已有 Token，直接回车保留。粘贴新 Token 后按回车可更新。）")
-    token = input("> ").strip()
-    print("\n步骤 2/3：请输入 Telegram 数字 ID（多个 ID 用逗号分隔）：")
-    if old.get("ALLOWED_USER_IDS"):
-        print("直接回车保留已有白名单。")
-    ids = input("> ").strip()
+    reconfigure = getattr(args, "reconfigure", False)
+    token = ids = ""
+    print("\n步骤 1/3：Telegram Bot Token")
+    if reconfigure or not (old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN")):
+        print("请输入 Telegram Bot Token：")
+        if old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN"):
+            print("（已有 Token，直接回车保留。）")
+        token = input("> ").strip()
+    else:
+        print("自动保留已有 Telegram Bot Token。")
+    print("\n步骤 2/3：Telegram 数字 ID")
+    if reconfigure or not old.get("ALLOWED_USER_IDS"):
+        print("请输入 Telegram 数字 ID（多个 ID 用逗号分隔）：")
+        if old.get("ALLOWED_USER_IDS"):
+            print("直接回车保留已有白名单。")
+        ids = input("> ").strip()
+    else:
+        print("自动保留已有白名单。")
     home = getattr(args, "home", "/root") or "/root"
     values = merged_config(old, token, ids, home, args.enable_auto)
     if getattr(args, "host_access", None) is not None:
@@ -446,6 +456,7 @@ def main() -> int:
     prepare.add_argument("--old", type=Path)
     prepare.add_argument("--output", type=Path, required=True)
     prepare.add_argument("--home", default="/root", nargs="?")
+    prepare.add_argument("--reconfigure", action="store_true")
     prepare.add_argument("--enable-auto", action="store_true")
     prepare.add_argument("--write-paths", default=None)
     prepare.add_argument("--host-access", choices=("restricted", "full"), default=None)
