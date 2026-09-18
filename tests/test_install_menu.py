@@ -82,16 +82,23 @@ class InstallMenuTests(unittest.TestCase):
         self.assertIn("--install", r.stdout)
         self.assertNotIn("[0/1/2/3]", r.stdout)
 
-    def run_main_until_privilege_boundary(self, args=(), text=""):
+    def run_main_until_privilege_boundary(self, args=(), text="", existing=False, legacy=False):
         # Stop at the privilege/deploy boundary, before any real system operation.
         with tempfile.TemporaryDirectory() as temp:
             sudo = Path(temp) / "sudo"
             sudo.write_text('#!/bin/bash\nprintf "FAKE_SUDO"\nprintf " <%s>" "$@"\n'
                             'printf "\\n"\nexit 88\n')
             sudo.chmod(0o755)
+            if existing:
+                (Path(temp) / "config.env").touch()
+            if legacy:
+                (Path(temp) / "app").mkdir()
+                (Path(temp) / "app/.env").touch()
             wrapper = r'''
 source "$1"
 export PATH="$2:$PATH"
+CONFIG="$2/config.env"
+APP="$2/app"
 shift 2
 acquire_deploy_lock() {
   printf 'BOUNDARY mode=%s purge=%s auto=%s reauth=%s ref=%s\n' "$MODE" "$PURGE" "$ENABLE_AUTO" "$REAUTH" "$REF"
@@ -164,6 +171,27 @@ main "$@"
         self.assert_mode_at_boundary(rc, output, "uninstall")
         self.assertIn("purge=1" if os.geteuid() == 0 else "<--purge>", output)
         self.assertEqual(output.count("[0/1/2/3]"), 1)
+
+    def test_existing_install_updates_without_menu_input(self):
+        rc, output = self.run_main_until_privilege_boundary(existing=True)
+        self.assert_mode_at_boundary(rc, output, "install")
+        self.assertNotIn("[0/1/2/3]", output)
+
+    def test_legacy_install_updates_without_menu_input(self):
+        rc, output = self.run_main_until_privilege_boundary(legacy=True)
+        self.assert_mode_at_boundary(rc, output, "install")
+        self.assertNotIn("[0/1/2/3]", output)
+
+    def test_explicit_menu_still_allows_exit_on_existing_install(self):
+        rc, output = self.run_main_until_privilege_boundary(("--menu",), text="0\n", existing=True)
+        self.assertEqual(rc, 0, output)
+        self.assertNotIn("BOUNDARY", output)
+        self.assertNotIn("FAKE_SUDO", output)
+
+    def test_reconfigure_skips_menu(self):
+        rc, output = self.run_main_until_privilege_boundary(("--reconfigure",))
+        self.assert_mode_at_boundary(rc, output, "install")
+        self.assertNotIn("[0/1/2/3]", output)
 
     def test_main_explicit_install_skips_menu(self):
         rc, output = self.run_main_until_privilege_boundary(("--install",))

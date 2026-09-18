@@ -243,12 +243,43 @@ done
             argv = ["manage.py", "prepare-config", "--old", str(old),
                     "--output", str(dest), "--home", str(base)]
             with patch("sys.argv", argv), \
-                 patch("builtins.input", return_value=""), contextlib.redirect_stdout(io.StringIO()):
+                 patch("builtins.input", side_effect=AssertionError("upgrade must not prompt")), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
             value = Settings.load(dest)
             self.assertFalse(value.skip_permissions)
             self.assertEqual(value.timeout, 321)
             self.assertEqual(value.workspace, work_dir)
+
+    def test_reconfigure_explicitly_prompts_and_changes_only_requested_values(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old, dest = Path(temp) / "old", Path(temp) / "candidate"
+            old.write_text("\n".join(f"{k}={v}" for k, v in (config_values() | {
+                "AGY_HOST_ACCESS": "full", "AGY_SKIP_PERMISSIONS": "false",
+            }).items()))
+            dest.touch()
+            argv = ["manage.py", "prepare-config", "--old", str(old),
+                    "--output", str(dest), "--reconfigure"]
+            with patch("sys.argv", argv), patch("builtins.input", side_effect=["", "67890"]) as prompt, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+            self.assertEqual(prompt.call_count, 2)
+            value = Settings.load(dest)
+            self.assertEqual(value.allowed, frozenset({67890}))
+            self.assertEqual(value.token, config_values()["TELEGRAM_BOT_TOKEN"])
+            self.assertEqual(value.host_access, "full")
+            self.assertFalse(value.skip_permissions)
+
+    def test_update_prompts_only_for_missing_ids(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old, dest = Path(temp) / "old", Path(temp) / "candidate"
+            old.write_text("\n".join(f"{k}={v}" for k, v in config_values().items() if k != "ALLOWED_USER_IDS"))
+            dest.touch()
+            argv = ["manage.py", "prepare-config", "--old", str(old), "--output", str(dest)]
+            with patch("sys.argv", argv), patch("builtins.input", return_value="12345") as prompt, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+            self.assertEqual(prompt.call_count, 1)
+            self.assertEqual(Settings.load(dest).token, config_values()["TELEGRAM_BOT_TOKEN"])
 
     def test_rollback_restores_files_in_temporary_directory(self):
         with tempfile.TemporaryDirectory() as temp:
