@@ -860,6 +860,60 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第 2 轮", card)
 
 
+    async def test_model_navigation_does_not_change_settings(self):
+        self.store.set_model(12345, "gemini-3.8-flash-high")
+        await self.handle(callback_update("model:gemini-3.1-pro-high"))
+        buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+        self.assertEqual([b for b in buttons if b.startswith("choose:")],
+                         ["choose:gemini-3.1-pro-low", "choose:gemini-3.1-pro-high"])
+        await self.handle(callback_update("selector:models"))
+        await self.handle(callback_update("selector:close"))
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+        self.assertEqual(self.api.sent_count, 0)
+
+    async def test_variant_button_from_old_card_selects_its_own_model(self):
+        self.store.set_model(12345, "gemini-3.7-flash-high")
+        await self.handle(callback_update("choose:gemini-3.8-flash-low"))
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-low")
+
+    async def test_unavailable_high_does_not_hide_available_low(self):
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model_health({"gemini-3.1-pro-high": {"outcome": "error", "category": "model"}})
+        await self.handle(callback_update("model:gemini-3.1-pro-high"))
+        self.assertIn("选择思考强度", self.api.messages[-1][1])
+        await self.handle(callback_update("choose:gemini-3.1-pro-high"))
+        self.assertTrue(self.api.answered_callbacks[-1][2])
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        await self.handle(callback_update("choose:gemini-3.1-pro-low"))
+        self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-low")
+
+    async def test_selector_edit_failure_sends_usable_replacement(self):
+        with patch.object(self.api, "edit", side_effect=TelegramError()):
+            await self.handle(callback_update("model:gemini-3.8-flash-high"))
+        self.assertEqual(self.api.sent_count, 1)
+        self.assertIsNotNone(self.api.messages[-1][2])
+        self.assertIsNone(self.store.get_model(12345))
+
+    async def test_model_callbacks_reject_unauthorized_and_nonprivate_context(self):
+        for event in (callback_update("choose:gemini-3.8-flash-high", user=98765),
+                      callback_update("choose:gemini-3.8-flash-high", chat_id=67890)):
+            await self.handle(event)
+        event = callback_update("choose:gemini-3.8-flash-high")
+        event["callback_query"]["message"]["chat"]["type"] = "group"
+        await self.handle(event)
+        self.assertIsNone(self.store.get_model(12345))
+        self.assertEqual(len(self.api.messages), 0)
+        self.assertTrue(all(answer[2] for answer in self.api.answered_callbacks))
+
+    async def test_mode_callback_edits_card_without_new_message(self):
+        await self.handle(callback_update("mode:plan"))
+        self.assertEqual(self.store.get_mode(12345), "plan")
+        self.assertEqual(self.api.sent_count, 0)
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+        self.assertNotIn("`", self.api.messages[-1][1])
+
+
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1028,59 +1082,6 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("系统运行状态", text)
         self.assertIn("CPU 负载", text)
         self.assertIn("Python 版本", text)
-
-    async def test_model_navigation_does_not_change_settings(self):
-        self.store.set_model(12345, "gemini-3.8-flash-high")
-        await self.handle(callback_update("model:gemini-3.1-pro-high"))
-        buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
-        self.assertEqual([b for b in buttons if b.startswith("choose:")],
-                         ["choose:gemini-3.1-pro-low", "choose:gemini-3.1-pro-high"])
-        await self.handle(callback_update("selector:models"))
-        await self.handle(callback_update("selector:close"))
-        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
-        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
-        self.assertEqual(self.api.sent_count, 0)
-
-    async def test_variant_button_from_old_card_selects_its_own_model(self):
-        self.store.set_model(12345, "gemini-3.7-flash-high")
-        await self.handle(callback_update("choose:gemini-3.8-flash-low"))
-        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-low")
-
-    async def test_unavailable_high_does_not_hide_available_low(self):
-        self.store.set_model(12345, "claude-sonnet-4-6")
-        self.store.set_model_health({"gemini-3.1-pro-high": {"outcome": "error", "category": "model"}})
-        await self.handle(callback_update("model:gemini-3.1-pro-high"))
-        self.assertIn("选择思考强度", self.api.messages[-1][1])
-        await self.handle(callback_update("choose:gemini-3.1-pro-high"))
-        self.assertTrue(self.api.answered_callbacks[-1][2])
-        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
-        await self.handle(callback_update("choose:gemini-3.1-pro-low"))
-        self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-low")
-
-    async def test_selector_edit_failure_sends_usable_replacement(self):
-        with patch.object(self.api, "edit", side_effect=TelegramError()):
-            await self.handle(callback_update("model:gemini-3.8-flash-high"))
-        self.assertEqual(self.api.sent_count, 1)
-        self.assertIsNotNone(self.api.messages[-1][2])
-        self.assertIsNone(self.store.get_model(12345))
-
-    async def test_model_callbacks_reject_unauthorized_and_nonprivate_context(self):
-        for event in (callback_update("choose:gemini-3.8-flash-high", user=98765),
-                      callback_update("choose:gemini-3.8-flash-high", chat_id=67890)):
-            await self.handle(event)
-        event = callback_update("choose:gemini-3.8-flash-high")
-        event["callback_query"]["message"]["chat"]["type"] = "group"
-        await self.handle(event)
-        self.assertIsNone(self.store.get_model(12345))
-        self.assertEqual(len(self.api.messages), 0)
-        self.assertTrue(all(answer[2] for answer in self.api.answered_callbacks))
-
-    async def test_mode_callback_edits_card_without_new_message(self):
-        await self.handle(callback_update("mode:plan"))
-        self.assertEqual(self.store.get_mode(12345), "plan")
-        self.assertEqual(self.api.sent_count, 0)
-        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
-        self.assertNotIn("`", self.api.messages[-1][1])
 
     async def test_model_flow_shows_effort_picker_and_callback(self):
         await self.bridge.handle(update("/model"))

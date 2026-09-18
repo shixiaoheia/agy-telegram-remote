@@ -1218,6 +1218,11 @@ class Bridge:
             current = self.store.get_model(user) or self.settings.model or ""
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="已恢复默认" if reset else "模型已切换")
+            if not reset and supports_effort(resolved):
+                picker, keyboard = self._effort_picker(user, resolved)
+                if not await self._collapse_selector(chat_id, message, picker, keyboard):
+                    self.queue_reply(chat_id, picker, reply_markup=keyboard)
+                return
             text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
             keyboard = {"inline_keyboard": [[
                 {"text": "更换模型", "callback_data": "selector:models"},
