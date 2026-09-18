@@ -777,7 +777,9 @@ class Bridge:
                 "text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"
             }]]}
             try:
+                accept_started = time.monotonic()
                 sent = await self.api.send(job.chat, accept_msg, reply_markup=cancel_markup)
+                LOG.info("telegram_task_accepted send_seconds=%.2f", time.monotonic() - accept_started)
                 job.status_message_id = sent.get("message_id") if isinstance(sent, dict) else None
                 accepted = True
             except TelegramError:
@@ -1077,27 +1079,53 @@ class Bridge:
             except OSError:
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
-    def _effort_picker(self, user: int, model_label: str) -> tuple[str, dict]:
-        current_model = self.store.get_model(user) or self.settings.model or ""
-        curr = selected_variant_effort(current_model) or self.store.get_effort(user)
-        lines = [
-            f"🎯 已选择模型：{model_label}",
-            "━━━━━━━━━━━━━━━━━━━━",
-            "下一步：请选择该模型的思考强度。",
-            "• ⚡ 极速：适合简单问答与快速修改",
-            "• ⚖️ 均衡：速度与推理深度兼顾",
-            "• 🧠 深度：适合复杂分析与大型重构",
+    MODEL_CHOICES = (
+        ("Gemini 3.8 Flash", ("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low")),
+        ("Gemini 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
+        ("Gemini 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
+        ("Gemini 3.6 Flash", ("gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low")),
+        ("Claude Sonnet 4.6", ("claude-sonnet-4-6",)),
+        ("Claude Opus 4.6", ("claude-opus-4-6-thinking",)),
+        ("GPT-OSS 120B", ("gpt-oss-120b-medium",)),
+    )
+
+    def _model_label(self, model: str) -> str:
+        for label, variants in self.MODEL_CHOICES:
+            if model in variants:
+                effort = selected_variant_effort(model)
+                return f"{label} · {effort_label(effort, model)}" if effort else label
+        return model or "默认（由 agy 决定）"
+
+    def _model_picker(self, user: int) -> tuple[str, dict]:
+        current = self.store.get_model(user) or self.settings.model or ""
+        buttons = [
+            {"text": ("✓ " if current in variants else "") + label,
+             "callback_data": f"model:{variants[0]}"}
+            for label, variants in self.MODEL_CHOICES
         ]
-        keyboard = {"inline_keyboard": [
-            [
-                {"text": f"{'🔘' if curr == 'low' else '⚪'} ⚡ 极速", "callback_data": "effort:low"},
-                {"text": f"{'🔘' if curr == 'medium' else '⚪'} ⚖️ 均衡", "callback_data": "effort:medium"},
-            ],
-            [
-                {"text": f"{'🔘' if curr == 'high' else '⚪'} 🧠 深度", "callback_data": "effort:high"},
-            ],
-        ]}
-        return "\n".join(lines), keyboard
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([{"text": "恢复默认", "callback_data": "model:default"},
+                     {"text": "关闭", "callback_data": "selector:close"}])
+        return f"选择模型\n当前：{self._model_label(current)}", {"inline_keyboard": rows}
+
+    def _effort_picker(self, user: int, model_label: str, *, model: str | None = None) -> tuple[str, dict]:
+        current = self.store.get_model(user) or self.settings.model or ""
+        model = current if model is None else model
+        curr = selected_variant_effort(current) or self.store.get_effort(user)
+        buttons = []
+        for effort in ("low", "medium", "high"):
+            variant = variant_model_for_effort(model, effort)
+            if selected_variant_effort(model) and variant is None:
+                continue
+            selected = current == variant if variant else curr == effort and current == model
+            buttons.append({"text": ("✓ " if selected else "") + effort_label(effort, ""),
+                            "callback_data": f"choose:{variant}" if variant else f"effort:{effort}"})
+        keyboard = {"inline_keyboard": [buttons, [
+            {"text": "返回模型", "callback_data": "selector:models"},
+            {"text": "关闭", "callback_data": "selector:close"},
+        ]]}
+        label = next((label for label, variants in self.MODEL_CHOICES if model in variants), model_label)
+        return f"{label}\n选择思考强度后生效", keyboard
 
     def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
         text, keyboard = self._effort_picker(user, model_label)
@@ -1124,7 +1152,8 @@ class Bridge:
         chat_id = chat.get("id") or user
         data = str(cq.get("data") or "")
 
-        if type(user) is not int or not self._is_allowed(user) or sender.get("is_bot") is True:
+        if (type(user) is not int or not self._is_allowed(user) or sender.get("is_bot") is True
+                or chat.get("type") != "private" or type(chat_id) is not int or chat_id != user):
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="⚠️ 无操作权限", show_alert=True)
             return
@@ -1149,40 +1178,58 @@ class Bridge:
                 self.queue_reply(chat_id, describe_html(record), html_mode=True)
             return
 
-        if data.startswith("model:"):
-            target = data[6:].strip()
-            if target.lower() in {"default", "reset", "auto", "clear"}:
-                self.store.set_model(user, None)
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    await self.api.answer_callback_query(cq_id, text="🔄 已恢复为默认模型")
-                picker, keyboard = self._effort_picker(user, "默认（由 agy 决定）")
-                if not await self._collapse_selector(chat_id, message, picker, keyboard):
-                    self._show_effort_picker(chat_id, user, "默认（由 agy 决定）")
-                return
+        if data in {"selector:models", "selector:close"}:
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id)
+            if data == "selector:models":
+                text, keyboard = self._model_picker(user)
+            else:
+                current = self.store.get_model(user) or self.settings.model or ""
+                text, keyboard = f"已关闭选择\n当前：{self._model_label(current)}", {"inline_keyboard": []}
+            if not await self._collapse_selector(chat_id, message, text, keyboard):
+                self.queue_reply(chat_id, text, reply_markup=keyboard)
+            return
+
+        if data.startswith(("model:", "choose:")):
+            choosing = data.startswith("choose:")
+            target = data.split(":", 1)[1].strip()
+            reset = target.lower() in {"default", "reset", "auto", "clear"} and not choosing
             resolved = resolve_model(target)
-            if not MODEL_RE.fullmatch(resolved):
+            if not reset and (not MODEL_RE.fullmatch(resolved) or
+                              (choosing and resolved not in OFFICIAL_MODEL_IDS)):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
-                    await self.api.answer_callback_query(cq_id, text="⚠️ 模型名称格式错误", show_alert=True)
+                    await self.api.answer_callback_query(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
                 return
-            if self._model_is_known_unavailable(resolved):
+            # Family navigation does not persist a choice or depend on the high tier's health.
+            if not reset and not choosing and selected_variant_effort(resolved):
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id)
+                picker, keyboard = self._effort_picker(user, resolved, model=resolved)
+                if not await self._collapse_selector(chat_id, message, picker, keyboard):
+                    self.queue_reply(chat_id, picker, reply_markup=keyboard)
+                return
+            if not reset and self._model_is_known_unavailable(resolved):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(
-                        cq_id, text="该模型当前检测为不可用，请先刷新检测", show_alert=True,
-                    )
+                        cq_id, text="该选项上次检测不可用，可用 /model refresh 重新检测", show_alert=True)
                 return
-            self.store.set_model(user, resolved)
-            if not has_effort_picker(resolved):
-                self.store.set_effort(user, None)
+            self.store.set_model(user, None if reset else resolved)
+            self.store.set_effort(user, None)
+            current = self.store.get_model(user) or self.settings.model or ""
             if cq_id and hasattr(self.api, "answer_callback_query"):
-                await self.api.answer_callback_query(cq_id, text=f"🎯 已切换至 {resolved}")
-            if not has_effort_picker(resolved):
-                collapsed = f"✅ 已切换至：{resolved}｜思考强度：模型内置"
-                if not await self._collapse_selector(chat_id, message, collapsed):
-                    self.queue_reply(chat_id, collapsed)
+                await self.api.answer_callback_query(cq_id, text="已恢复默认" if reset else "模型已切换")
+            if not reset and supports_effort(resolved):
+                picker, keyboard = self._effort_picker(user, resolved)
+                if not await self._collapse_selector(chat_id, message, picker, keyboard):
+                    self.queue_reply(chat_id, picker, reply_markup=keyboard)
                 return
-            picker, keyboard = self._effort_picker(user, resolved)
-            if not await self._collapse_selector(chat_id, message, picker, keyboard):
-                self._show_effort_picker(chat_id, user, resolved)
+            text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
+            keyboard = {"inline_keyboard": [[
+                {"text": "更换模型", "callback_data": "selector:models"},
+                {"text": "关闭", "callback_data": "selector:close"},
+            ]]}
+            if not await self._collapse_selector(chat_id, message, text, keyboard):
+                self.queue_reply(chat_id, text, reply_markup=keyboard)
             return
 
         if data.startswith("effort:"):
@@ -1240,14 +1287,17 @@ class Bridge:
                 self.store.set_mode(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text="🔄 已恢复默认执行模式")
-                self.queue_reply(chat_id, "🔄 已恢复为默认执行模式。")
+                if not await self._collapse_selector(chat_id, message, "已恢复默认执行模式\n后续任务跟随 agy 设置"):
+                    self.queue_reply(chat_id, "已恢复默认执行模式\n后续任务跟随 agy 设置")
                 return
             if target in {"plan", "accept-edits"}:
                 self.store.set_mode(user, target)
                 name = "推演规划模式 (Plan)" if target == "plan" else "落地编辑模式 (Accept-Edits)"
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text=f"🎯 已切换为: {name}")
-                self.queue_reply(chat_id, f"🎯 已切换模式为：`{name}`\n🚀 后续任务将使用此模式。")
+                text = f"已切换模式：{name}\n后续任务生效"
+                if not await self._collapse_selector(chat_id, message, text):
+                    self.queue_reply(chat_id, text)
                 return
 
     async def handle(self, update: dict) -> None:
@@ -1465,54 +1515,12 @@ class Bridge:
                 self._start_model_health_refresh(chat_id)
                 return
             if not target or target.lower() in {"show", "current", "status", "list", "help"}:
-                current_raw = self.store.get_model(user) or self.settings.model or ""
-                current_display = current_raw or "默认（由 agy 决定）"
-                health = self._model_health()
-                health_models = health.get("models", {})
-                lines = [
-                    f"🧠 AI 模型管理 ｜ 当前生效模型：{current_display}",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "• 点击下方模型，再选择思考强度。",
-                    "• 也可发送 /model refresh 重新检测模型可用性。",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "【官方模型可用性（共 14 种）】",
-                ]
-                current_family = None
-                for family, mid, desc in OFFICIAL_MODELS:
-                    if family != current_family:
-                        lines.append(f"\n📂 【{family}】")
-                        current_family = family
-                    state = model_health_text(health_models.get(mid))
-                    if current_raw == mid:
-                        lines.append(f"👉 [当前使用] {mid} ({desc})｜{state}")
-                    else:
-                        lines.append(f"• {mid} ({desc})｜{state}")
-                lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-                choices = (
-                    ("✨ 3.8 Flash", ("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low")),
-                    ("⚡ 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
-                    ("🧠 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
-                    ("💡 3.6 Flash", ("gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low")),
-                    ("🚀 Claude Sonnet", ("claude-sonnet-4-6",)),
-                    ("🏆 Claude Opus", ("claude-opus-4-6-thinking",)),
-                    ("🌐 GPT-OSS 120B", ("gpt-oss-120b-medium",)),
-                )
-                buttons = []
-                for label, candidates in choices:
-                    model = candidates[0]
-                    selected = current_raw in candidates
-                    buttons.append({
-                        "text": f"{'🔘' if selected else '⚪'} {label}",
-                        "callback_data": f"model:{model}",
-                    })
-                lines.append("👇 请选择模型：")
-                keyboard = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [[
-                    {"text": "🔄 恢复系统默认", "callback_data": "model:default"}
-                ]]}
-                self.queue_reply(chat_id, "\n".join(lines), reply_markup=keyboard)
+                picker, keyboard = self._model_picker(user)
+                self.queue_reply(chat_id, picker, reply_markup=keyboard)
                 return
             if target.lower() in {"default", "reset", "auto", "clear"}:
                 self.store.set_model(user, None)
+                self.store.set_effort(user, None)
                 self.queue_reply(chat_id, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model <模型名或别名>")
                 return
             resolved = resolve_model(target)
@@ -1638,22 +1646,18 @@ class Bridge:
                 curr = self.store.get_mode(user)
                 curr_display = "推演规划模式 (Plan)" if curr == "plan" else ("落地编辑模式 (Accept-Edits)" if curr == "accept-edits" else "跟随 agy 设置（不保证自动编辑）")
                 lines = [
-                    f"📋 执行模式设置 ｜ 当前：{curr_display}",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "• 🛠️ 落地编辑模式 (accept-edits)：\n  自动接受文件编辑；命令执行仍受工具审批和系统权限限制。",
-                    "• 📋 推演规划模式 (plan)：\n  先分析并给出计划；这是规划指令，不是操作系统只读沙箱。",
-                    "• 🔄 默认模式 (default)：\n  跟随服务器上的 agy 设置，不保证自动编辑。",
-                    "━━━━━━━━━━━━━━━━━━━━",
-                    "💡 你可以点击下方按钮切换，或输入：/mode <plan|code|default>",
+                    f"执行模式\n当前：{curr_display}",
+                    "编辑：自动接受文件编辑，命令仍受工具审批与系统权限限制。",
+                    "规划：先给出方案，不是系统只读隔离。",
                 ]
                 keyboard = {
                     "inline_keyboard": [
                         [
-                            {"text": f"{'🔘' if curr == 'accept-edits' else '⚪'} 🛠️ 落地编辑", "callback_data": "mode:accept-edits"},
-                            {"text": f"{'🔘' if curr == 'plan' else '⚪'} 📋 推演规划", "callback_data": "mode:plan"},
+                            {"text": f"{'✓ ' if curr == 'accept-edits' else ''}编辑", "callback_data": "mode:accept-edits"},
+                            {"text": f"{'✓ ' if curr == 'plan' else ''}规划", "callback_data": "mode:plan"},
                         ],
                         [
-                            {"text": f"{'🔘' if not curr else '⚪'} 🔄 恢复默认模式", "callback_data": "mode:default"},
+                            {"text": f"{'✓ ' if not curr else ''}跟随默认", "callback_data": "mode:default"},
                         ],
                     ]
                 }
@@ -1666,7 +1670,7 @@ class Bridge:
                 return
             if target in {"plan", "planning", "规划"}:
                 self.store.set_mode(user, "plan")
-                self.queue_reply(chat_id, "📋 已切换为【推演规划模式 (plan)】！\n💡 在此模式下，AI 将仅推演方案与计划，不会实际修改任何文件。")
+                self.queue_reply(chat_id, "📋 已切换为【推演规划模式 (plan)】！\n💡 先分析并给出计划；这是规划指令，不是操作系统只读沙箱。")
                 return
             if target in {"code", "edit", "edits", "accept-edits", "落地", "编辑"}:
                 self.store.set_mode(user, "accept-edits")
@@ -1823,6 +1827,10 @@ class Bridge:
             # A crash here can drop this update; this is not exactly-once delivery.
             self.store.save_offset(uid + 1)
             self.offset = uid + 1
+            message = update.get("message")
+            stamp = message.get("date") if isinstance(message, dict) else None
+            if type(stamp) is int:
+                LOG.info("telegram_update_received age_seconds=%.2f", max(0.0, time.time() - stamp))
             await self.handle(update)
 
     async def initialize(self) -> None:
@@ -1899,13 +1907,13 @@ class Bridge:
                 try:
                     if hasattr(self.api, "get_updates"):
                         updates = await self.api.get_updates(
-                            offset=self.offset, limit=25, timeout=10,
+                            offset=self.offset, limit=25, timeout=3,
                             allowed_updates=["message", "callback_query"],
                         )
                     else:
                         # Small test doubles intentionally expose only call().
                         updates = await self.api.call(
-                            "getUpdates", offset=self.offset, limit=25, timeout=10,
+                            "getUpdates", offset=self.offset, limit=25, timeout=3,
                             allowed_updates=["message", "callback_query"],
                         )
                     if not isinstance(updates, list):

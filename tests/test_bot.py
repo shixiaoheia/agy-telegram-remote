@@ -501,11 +501,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_command_show_current_and_examples(self):
         await self.handle(update("/model"))
         msg = self.api.messages[-1][1]
-        self.assertIn("当前生效模型：默认（由 agy 决定）", msg)
-        self.assertIn("gemini-3.8-flash-high", msg)
-        self.assertIn("claude-opus-4-6-thinking", msg)
-        self.assertIn("gpt-oss-120b-medium", msg)
-        self.assertIn("官方模型可用性", msg)
+        self.assertEqual(msg, "选择模型\n当前：默认（由 agy 决定）")
+        self.assertNotIn("gemini-", msg)
+        self.assertEqual(self.runner.calls, 0)
 
     async def test_model_command_switch_and_reset(self):
         await self.handle(update("/model claude-sonnet-4-6"))
@@ -516,7 +514,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
         # Check /model reflects the new choice
         await self.handle(update("/model"))
-        self.assertIn("当前生效模型：claude-sonnet-4-6", self.api.messages[-1][1])
+        self.assertIn("当前：Claude Sonnet 4.6", self.api.messages[-1][1])
 
         # Reset model
         await self.handle(update("/model default"))
@@ -525,7 +523,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_command_alias_resolution(self):
         await self.handle(update("/model 3.8"))
-        self.assertIn("已选择模型：gemini-3.8-flash-high", self.api.messages[-1][1])
+        self.assertIn("Gemini 3.8 Flash", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
 
         await self.handle(update("/model opus"))
@@ -533,7 +531,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
 
         await self.handle(update("/model pro"))
-        self.assertIn("已选择模型：gemini-3.1-pro-high", self.api.messages[-1][1])
+        self.assertIn("Gemini 3.1 Pro", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-high")
 
     async def test_model_command_invalid_rejected(self):
@@ -679,8 +677,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_model(12345, "claude-sonnet-4-6")
         await self.handle(update("/model"))
         msg = self.api.messages[-1][1]
-        self.assertIn("👉 [当前使用] claude-sonnet-4-6", msg)
-        self.assertIn("• gemini-3.8-flash-high", msg)
+        self.assertIn("当前：Claude Sonnet 4.6", msg)
+        labels = [button["text"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
+        self.assertEqual([label for label in labels if label.startswith("✓")], ["✓ Claude Sonnet 4.6"])
 
     async def test_start_shows_new_user_welcome(self):
         await self.handle(update("/start"))
@@ -770,17 +769,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
         self.assertEqual(len(self.api.answered_callbacks), 1)
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_opus")
-        self.assertIn("claude-opus-4-6-thinking", self.api.answered_callbacks[0][1])
-        self.assertIn("已切换至：claude-opus-4-6-thinking｜思考强度：模型内置", self.api.messages[-1][1])
-        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+        self.assertEqual("模型已切换", self.api.answered_callbacks[0][1])
+        self.assertIn("当前：Claude Opus 4.6", self.api.messages[-1][1])
+        self.assertEqual(self.api.sent_count, 0)
 
     async def test_callback_query_resets_model_default(self):
         self.store.set_model(12345, "claude-sonnet-4-6")
         await self.handle(callback_update("model:default", cq_id="cq_def"))
         self.assertIsNone(self.store.get_model(12345))
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_def")
-        self.assertIn("已选择模型：默认", self.api.messages[-1][1])
-        self.assertIn("请选择该模型的思考强度", self.api.messages[-1][1])
+        self.assertIn("已恢复默认", self.api.messages[-1][1])
+        self.assertIsNone(self.store.get_effort(12345))
 
     async def test_conversation_memory_is_persisted_and_passed(self):
         self.runner.result = Result("success", text="Turn 1 ok", conversation_id="conv-turn-1", num_turns=1)
@@ -859,6 +858,60 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("450", card)
         self.assertIn("12,450", card)
         self.assertIn("第 2 轮", card)
+
+
+    async def test_model_navigation_does_not_change_settings(self):
+        self.store.set_model(12345, "gemini-3.8-flash-high")
+        await self.handle(callback_update("model:gemini-3.1-pro-high"))
+        buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+        self.assertEqual([b for b in buttons if b.startswith("choose:")],
+                         ["choose:gemini-3.1-pro-low", "choose:gemini-3.1-pro-high"])
+        await self.handle(callback_update("selector:models"))
+        await self.handle(callback_update("selector:close"))
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+        self.assertEqual(self.api.sent_count, 0)
+
+    async def test_variant_button_from_old_card_selects_its_own_model(self):
+        self.store.set_model(12345, "gemini-3.7-flash-high")
+        await self.handle(callback_update("choose:gemini-3.8-flash-low"))
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-low")
+
+    async def test_unavailable_high_does_not_hide_available_low(self):
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model_health({"gemini-3.1-pro-high": {"outcome": "error", "category": "model"}})
+        await self.handle(callback_update("model:gemini-3.1-pro-high"))
+        self.assertIn("选择思考强度", self.api.messages[-1][1])
+        await self.handle(callback_update("choose:gemini-3.1-pro-high"))
+        self.assertTrue(self.api.answered_callbacks[-1][2])
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        await self.handle(callback_update("choose:gemini-3.1-pro-low"))
+        self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-low")
+
+    async def test_selector_edit_failure_sends_usable_replacement(self):
+        with patch.object(self.api, "edit", side_effect=TelegramError()):
+            await self.handle(callback_update("model:gemini-3.8-flash-high"))
+        self.assertEqual(self.api.sent_count, 1)
+        self.assertIsNotNone(self.api.messages[-1][2])
+        self.assertIsNone(self.store.get_model(12345))
+
+    async def test_model_callbacks_reject_unauthorized_and_nonprivate_context(self):
+        for event in (callback_update("choose:gemini-3.8-flash-high", user=98765),
+                      callback_update("choose:gemini-3.8-flash-high", chat_id=67890)):
+            await self.handle(event)
+        event = callback_update("choose:gemini-3.8-flash-high")
+        event["callback_query"]["message"]["chat"]["type"] = "group"
+        await self.handle(event)
+        self.assertIsNone(self.store.get_model(12345))
+        self.assertEqual(len(self.api.messages), 0)
+        self.assertTrue(all(answer[2] for answer in self.api.answered_callbacks))
+
+    async def test_mode_callback_edits_card_without_new_message(self):
+        await self.handle(callback_update("mode:plan"))
+        self.assertEqual(self.store.get_mode(12345), "plan")
+        self.assertEqual(self.api.sent_count, 0)
+        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+        self.assertNotIn("`", self.api.messages[-1][1])
 
 
 class ReadinessTests(unittest.IsolatedAsyncioTestCase):
@@ -1038,15 +1091,15 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
 
         await self.bridge.handle(callback_update("model:gemini-3.8-flash-high", user=12345))
         await self.bridge.reply_worker
-        self.assertIn("下一步：请选择该模型的思考强度", self.api.messages[-1][1])
+        self.assertIn("选择思考强度后生效", self.api.messages[-1][1])
         self.assertIn("inline_keyboard", self.api.messages[-1][2])
 
-        await self.bridge.handle(callback_update("effort:low", user=12345))
+        await self.bridge.handle(callback_update("choose:gemini-3.8-flash-low", user=12345))
         await self.bridge.reply_worker
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-low")
         self.assertIsNone(self.store.get_effort(12345))
-        self.assertIn("已切换至：gemini-3.8-flash-low｜思考强度：极速", self.api.messages[-1][1])
-        self.assertEqual(self.api.messages[-1][2], {"inline_keyboard": []})
+        self.assertIn("当前：Gemini 3.8 Flash · 极速", self.api.messages[-1][1])
+        self.assertEqual(self.api.sent_count, 1)
 
     async def test_gemini_reasoning_buttons_switch_catalog_variant_without_cli_effort(self):
         self.store.set_model(12345, "gemini-3.7-flash-high")
@@ -1061,13 +1114,13 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(update("/model gemini-3.8-flash-high"))
         await self.bridge.reply_worker
         buttons = [button["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
-        self.assertEqual(buttons, ["effort:low", "effort:medium", "effort:high"])
+        self.assertEqual(buttons, ["choose:gemini-3.8-flash-low", "choose:gemini-3.8-flash-medium", "choose:gemini-3.8-flash-high", "selector:models", "selector:close"])
 
     async def test_mode_command_and_callback(self):
         # 1. View mode menu
         await self.bridge.handle(update("/mode"))
         await self.bridge.reply_worker
-        self.assertIn("执行模式设置", self.api.messages[-1][1])
+        self.assertIn("执行模式", self.api.messages[-1][1])
         self.assertIsNotNone(self.api.messages[-1][2])
 
         # 2. Change mode via command

@@ -51,6 +51,13 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
+    async def test_short_poll_transport_timeout_is_bounded(self):
+        with patch.object(self.api, "_request", return_value=[]) as request:
+            await self.api.get_updates(offset=100, limit=25, timeout=3,
+                                       allowed_updates=["message", "callback_query"])
+        self.assertEqual(request.call_args.args[2], 6.0)
+        self.assertEqual(request.call_args.args[1]["timeout"], 3)
+
     async def test_real_http_send_payload(self):
         self.responses.append((200, {"ok": True, "result": {"message_id": 1}}))
         await self.api.send(12345, "hello")
