@@ -34,7 +34,7 @@ Store 的权限检查、降低安装器 umask 或跳过安装自检。
 | `test_settings.py` | 默认值（`/root` 工作区与 home）、旧配置保留、显式自动审批、无 shell 展开、危险路径/链接/FIFO/大小限制、可选默认模型配置、快捷别名解析与格式校验 |
 | `test_runner.py` | 严格 JSON、空回复、错误状态、Unicode、输出上限、真实 Linux 进程组、取消/超时/派生进程、--model 命令行参数构建与透传、Token 用量解析、--conversation 会话参数构建与透传、--effort 思考深度与 --mode 执行模式构建与透传 |
 | `test_store.py` | 私有权限、限长、过期、用户路由、凭据替换、崩溃记录、更新水位和实例锁、用户模型偏好落盘/重置/维护清理、连续会话 ID 维护与重置、用户累计 Token 用量统计与维护清理、用户 effort/mode 偏好落盘与维护清理、动态白名单落盘与合并 |
-| `test_bot.py` | 白名单、群聊拦截、工作目录互斥、准备/运行取消、投递失败、`/last`、重复更新、初次轮询就绪判定、退出撤销就绪标志、`update_id` 防重放、`/model` 全量官方 14 种模型查询、别名解析与切换、执行耗时显示、当前模型高亮、工作空间磁盘汇报与长消息分页指示、Telegram Inline Keyboard 行内按钮下发、callback_query 回调处理与 Toast 提示、连续会话上下文记忆与自动透传、`/new` 与 `/reset` 重置会话、`/usage` 会话与累计 Token 报表、Antigravity 优雅卡片式排版与分割线渲染、`/sys` 实时系统与进程监控、`/effort` 与 `/mode` 交互与透传、`/whitelist` 动态增删管理、`/ls` 文件浏览与防穿越、`/restart` 权限与空闲槽位重载 |
+| `test_bot.py` | 白名单、群聊拦截、工作目录互斥、准备/运行取消、投递失败、`/last`、重复更新、初次轮询就绪判定、退出撤销就绪标志、`update_id` 防重放、`/model` 简洁按钮菜单、返回/关闭不改设置、具体档位绑定模型、Pro 档位过滤、原卡片确认与编辑失败回退、别名解析与切换、执行耗时显示、当前模型高亮、工作空间磁盘汇报与长消息分页指示、Telegram Inline Keyboard 行内按钮下发、callback_query 回调处理与 Toast 提示、连续会话上下文记忆与自动透传、`/new` 与 `/reset` 重置会话、`/usage` 会话与累计 Token 报表、Antigravity 优雅卡片式排版与分割线渲染、`/sys` 实时系统与进程监控、`/effort` 与 `/mode` 交互与透传、`/whitelist` 动态增删管理、`/ls` 文件浏览与防穿越、`/restart` 权限与空闲槽位重载 |
 | `test_telegram_api.py` | 本地真实 HTTP 请求、429、网络/协议错误、UTF-16 分段、完整离线回传链路、reply_markup 行内键盘序列化透传、answerCallbackQuery 响应 |
 | `test_installer.py` | Bash 语法、OS 版本门槛、Root 模式 service unit 生成、残余进程安全检测（阻断旧 bot 进程而不影响系统 root 进程）、两个配置输入、配置保留、临时目录内的真实回退函数、自检分类、部署排他互斥锁、测试脚本误用与隔离防护、Root 模式 smoke 测试放行 |
 | `test_install_menu.py` | 菜单选项（安装/卸载/退出）、EOF与错误输入重试、--install与命令行快捷方式跳过菜单、三步向导顺序性（第一步等待/取消不进入第二步） |

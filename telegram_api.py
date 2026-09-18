@@ -80,7 +80,7 @@ class TelegramAPI:
             "offset": offset, "limit": limit, "timeout": timeout,
             "allowed_updates": allowed_updates,
         }
-        request_timeout = max(12.0, float(timeout) + 3.0)
+        request_timeout = max(6.0, float(timeout) + 3.0)
         return await asyncio.to_thread(self._request, "getUpdates", payload, request_timeout)
 
     def _download_file(self, file_path: str, destination: Path, maximum: int) -> int:
