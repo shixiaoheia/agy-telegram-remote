@@ -37,7 +37,7 @@
 登录服务器后，复制整段命令执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --root
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
 ```
 
 脚本会依次询问：
@@ -46,7 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 2. 允许使用机器人的 Telegram 数字 ID；
 3. Google `agy` 授权（仅首次或授权失效时需要）。
 
-看到“安装成功”后，打开机器人私聊，发送 `/start`，再发送 `/model` 选一个模型就可以开始了。
+首次安装出现菜单时，选择 `1` 继续安装。看到“安装成功”后，打开机器人私聊，发送 `/start`，再发送 `/model` 选一个模型就可以开始了。
 
 ## 日常使用
 
@@ -114,9 +114,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 在服务器运行：
 
 ```bash
-cd /root
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh
-bash install.sh
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
 ```
 
 已有安装时直接运行 `bash install.sh` 会自动更新，不再显示管理菜单或询问已保存的 Bot Token、白名单。原模型、权限和路径设置保持不变；仅缺少必要配置或 Google 授权失效时需要交互。需要改 Token 或白名单时使用 `bash install.sh --reconfigure`。脚本会先检查新版本，再替换服务；未完成任务不会自动重跑。
@@ -153,7 +151,7 @@ bash install.sh
 管理员明确选择后，可用以下安装参数解除本项目的 systemd 文件系统、提权与能力限制：
 
 ```bash
-bash install.sh --root --full-host-access --ref <完整提交SHA>
+bash install.sh --full-host-access --ref <完整提交SHA>
 ```
 
 该选项保存 `AGY_HOST_ACCESS=full` 并开启工具自动审批，服务以 root 运行，关闭 `ProtectSystem`、`PrivateTmp`、`NoNewPrivileges`、`RestrictSUIDSGID`，不再设置受限的 `ReadWritePaths` 或清空能力集。Agent 可直接修改 `/usr/local/x-ui`、`/etc/x-ui` 等主机目录和管理系统服务，无需逐目录授权。
@@ -175,9 +173,7 @@ bash install.sh --root --full-host-access --ref <完整提交SHA>
 需要修改工作区外的应用文件时，先备份目标应用配置，再用 `--write-paths` 明确开放**具体且已存在的目录**。例如只管理 Nginx 配置（实际目录不同请替换）：
 
 ```bash
-cd /root
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh
-bash install.sh --root --write-paths /etc/nginx
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh --write-paths /etc/nginx
 ```
 
 多个目录以逗号分隔，例如 `--write-paths /etc/nginx,/opt/my-app`。此参数替换完整的额外目录列表；不传时保留旧列表，传 `--write-paths ''` 清空列表。不接受根目录、整个顶层目录、符号链接或不存在的目录，不会自动创建、改属主或放宽文件权限。升级仍保留原 Token、白名单和自动审批选择；只有确实需要开启所有工具审批时，才额外加 `--enable-auto-approve`。
@@ -203,10 +199,10 @@ systemctl status agy-telegram-remote --no-pager
 journalctl -u agy-telegram-remote -n 80 --no-pager
 ```
 
-如果服务不是 `active`，先再次运行更新命令。若日志提示授权失效，运行：
+如果服务不是 `active`，先再次运行更新命令。若日志提示授权失效，在保存了 `install.sh` 的目录运行：
 
 ```bash
-cd /root && bash install.sh --root --reauth
+bash install.sh --reauth
 ```
 
 ### 模型无法使用
