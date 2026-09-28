@@ -25,7 +25,8 @@ def update(text, user=12345, chat_type="private", update_id=1):
         },
     }
 
-def attachment_update(*, photo=None, document=None, caption="", user=12345, update_id=1):
+def attachment_update(*, photo=None, document=None, caption="", user=12345, update_id=1,
+                      media_group_id=None):
     message = {
         "chat": {"type": "private", "id": user},
         "from": {"id": user, "is_bot": False},
@@ -36,6 +37,8 @@ def attachment_update(*, photo=None, document=None, caption="", user=12345, upda
         message["document"] = document
     if caption:
         message["caption"] = caption
+    if media_group_id is not None:
+        message["media_group_id"] = media_group_id
     return {"update_id": update_id, "message": message}
 
 def callback_update(data: str, user: int = 12345, cq_id: str = "cq123", chat_id: int = 12345,
@@ -314,6 +317,48 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.store.load(12345)["job_id"]).exists())
         self.assertIn("已收到：图片", self.api.messages[0][1])
         self.assertIn("本次任务会读取它", self.api.messages[0][1])
+
+    async def test_album_runs_once_with_all_photos_and_cleans_them(self):
+        first = [{"file_id": "photo_file_1", "file_size": 4}]
+        second = [{"file_id": "photo_file_2", "file_size": 4}]
+        with patch("bot.ALBUM_SETTLE_SECONDS", 0.01):
+            await self.handle(attachment_update(photo=first, caption="比较两张截图",
+                                                media_group_id="album-1"))
+            await self.handle(attachment_update(photo=second, update_id=2,
+                                                media_group_id="album-1"))
+            album_task = self.bridge.album_task
+            await album_task
+        await self.finish_job()
+        self.assertEqual(self.runner.calls, 1)
+        self.assertIn("screenshot.jpg", self.runner.last_prompt)
+        self.assertIn("screenshot-2.jpg", self.runner.last_prompt)
+        self.assertIn("比较两张截图", self.runner.last_prompt)
+        self.assertIn("screenshot-2.jpg", self.api.messages[0][1])
+        self.assertFalse((self.settings.workspace / ".agy-telegram-inputs" /
+                          self.store.load(12345)["job_id"]).exists())
+
+    async def test_album_can_be_cancelled_before_execution(self):
+        photo = [{"file_id": "photo_file_1", "file_size": 4}]
+        await self.handle(attachment_update(photo=photo, media_group_id="album-3"))
+        album_task = self.bridge.album_task
+        await self.handle(update("/cancel", update_id=2))
+        await asyncio.gather(album_task, return_exceptions=True)
+        self.assertEqual(self.runner.calls, 0)
+        self.assertIsNone(self.bridge.pending_album)
+        self.assertIn("已取消接收", self.api.messages[-1][1])
+
+    async def test_album_failure_does_not_run_partial_task(self):
+        first = [{"file_id": "photo_file_1", "file_size": 4}]
+        unsafe = {"file_id": "secret_file", "file_size": 4, "file_name": ".env"}
+        with patch("bot.ALBUM_SETTLE_SECONDS", 0.01):
+            await self.handle(attachment_update(photo=first, media_group_id="album-2"))
+            await self.handle(attachment_update(document=unsafe, update_id=2,
+                                                media_group_id="album-2"))
+            album_task = self.bridge.album_task
+            await album_task
+        self.assertEqual(self.runner.calls, 0)
+        self.assertIsNone(self.bridge.slot)
+        self.assertEqual(list((self.settings.workspace / ".agy-telegram-inputs").rglob("*")), [])
 
     async def test_capacity_error_retries_task_once_with_flash_high(self):
         self.store.set_model(12345, "gemini-3.8-flash-low")
@@ -820,6 +865,22 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(update("/new"))
         self.assertIsNone(self.store.get_conversation(12345))
         self.assertIn("记忆已重置", self.api.messages[-1][1])
+
+    async def test_reset_during_task_stays_reset_after_result(self):
+        self.store.set_conversation(12345, "conv-existing-123", 3)
+        self.runner.hold = True
+        self.runner.result = Result("success", text="done", conversation_id="conv-next-123")
+        await self.handle(update("检查项目"))
+        await self.runner.started.wait()
+        await self.handle(update("/new", update_id=2))
+        self.assertIn("当前任务结束后", self.api.messages[-1][1])
+        self.assertIsNotNone(self.store.get_conversation(12345))
+        self.runner.finish.set()
+        await self.finish_job()
+        self.assertIsNone(self.store.get_conversation(12345))
+        await self.handle(update("新任务", update_id=3))
+        await self.finish_job()
+        self.assertIsNone(self.runner.last_conversation_id)
 
     async def test_usage_command_and_token_accumulation(self):
         self.runner.result = Result("success", text="done", input_tokens=1500, output_tokens=250, total_tokens=1750)
