@@ -53,6 +53,9 @@ OUTCOME_HELP = {
 }
 MODEL_PROBE_PROMPT = "Reply with exactly: AGY_MODEL_CHECK_OK. Do not use tools, read files, modify files, or make network requests."
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_ALBUM_FILES = 10
+MAX_ALBUM_BYTES = 30 * 1024 * 1024
+ALBUM_SETTLE_SECONDS = 1.5
 SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
 TYPING_HEARTBEAT_SECONDS = 4
 CAPACITY_FALLBACKS = {
@@ -316,6 +319,7 @@ class Job:
     typing_task: asyncio.Task | None = None
     steer_task: asyncio.Task | None = None
     steered: bool = False
+    reset_after: bool = False
 
 
 def attachment_kind(name: str, is_photo: bool) -> str:
@@ -638,6 +642,8 @@ class Bridge:
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
         self.model_check_task: asyncio.Task | None = None
+        self.pending_album: dict | None = None
+        self.album_task: asyncio.Task | None = None
 
     def _model_health(self) -> dict:
         try:
@@ -802,6 +808,12 @@ class Bridge:
             self.queue_reply(job.chat, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。")
         finally:
             self._cleanup_attachments(job)
+            if job.reset_after:
+                try:
+                    self.store.reset_conversation(job.user)
+                except (OSError, ValueError):
+                    self.runner.blocked = True
+                    self.queue_reply(job.chat, "⚠️ 新对话未能建立，请检查服务器状态。")
             if self.slot is job:
                 self.slot = None
 
@@ -1008,7 +1020,7 @@ class Bridge:
             next_job = Job(
                 job.user, job.chat, model=job.model, conversation_id=job.conversation_id,
                 effort=job.effort, mode=job.mode, history_title=task_title(correction, "修正任务"),
-                original_prompt=prompt,
+                original_prompt=prompt, reset_after=job.reset_after,
             )
             self.slot = next_job
             self.store.maintain()
@@ -1043,8 +1055,14 @@ class Bridge:
             raise ValueError("unsafe attachment directory")
         base.mkdir(mode=0o700, exist_ok=True)
         directory = base / job.job_id
-        directory.mkdir(mode=0o700)
+        if job.attachment_dir is None:
+            directory.mkdir(mode=0o700)
+            job.attachment_dir = directory
         destination = directory / name
+        number = len(job.attachments) + 1
+        while destination.exists():
+            destination = directory / f"{Path(name).stem}-{number}{suffix}"
+            number += 1
         try:
             info = await self.api.call("getFile", file_id=file_id)
             if not isinstance(info, dict) or not isinstance(info.get("file_path"), str):
@@ -1057,15 +1075,13 @@ class Bridge:
                 raise ValueError("invalid downloaded file")
         except (TelegramError, OSError, ValueError, AttributeError):
             destination.unlink(missing_ok=True)
-            directory.rmdir()
             raise ValueError("attachment download failed") from None
-        job.attachment_dir = directory
         job.attachments.append(destination)
         job.attachment_feedback = (
             f"📎 已收到：{attachment_kind(name, is_photo)}「{name}」，"
             f"{attachment_size(downloaded)}。本次任务会读取它。"
         )
-        return destination, name
+        return destination, destination.name
 
     def _cleanup_attachments(self, job: Job) -> None:
         for item in job.attachments:
@@ -1300,7 +1316,42 @@ class Bridge:
                     self.queue_reply(chat_id, text)
                 return
 
-    async def handle(self, update: dict) -> None:
+    async def _flush_album(self) -> None:
+        try:
+            await asyncio.sleep(ALBUM_SETTLE_SECONDS)
+            album = self.pending_album
+            if album is None or self.stop.is_set():
+                return
+            self.pending_album = None
+            first = dict(album["update"])
+            message = dict(first["message"])
+            message["caption"] = "\n".join(album["captions"])
+            first["message"] = message
+            await self.handle(first, album_items=album["items"])
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if self.album_task is asyncio.current_task():
+                self.album_task = None
+
+    def _buffer_album(self, update: dict, user: int, group_id: str,
+                      attachment: dict, is_photo: bool, caption: str) -> None:
+        album = self.pending_album
+        if album is not None and (album["user"], album["group_id"]) != (user, group_id):
+            self.queue_reply(user, "⏳ 正在接收上一组附件，请稍后再发送新任务。")
+            return
+        if album is None:
+            album = {"user": user, "group_id": group_id, "update": update,
+                     "items": [], "captions": []}
+            self.pending_album = album
+        album["items"].append((attachment, is_photo))
+        if caption.strip():
+            album["captions"].append(caption.strip())
+        if self.album_task is not None:
+            self.album_task.cancel()
+        self.album_task = asyncio.create_task(self._flush_album())
+
+    async def handle(self, update: dict, *, album_items: list[tuple[dict, bool]] | None = None) -> None:
         if self.stop.is_set():
             return
         callback_query = update.get("callback_query")
@@ -1340,6 +1391,18 @@ class Bridge:
             return
         if not self._is_allowed(user) or sender.get("is_bot") is True:
             return
+        group_id = message.get("media_group_id")
+        if (album_items is None and isinstance(group_id, str) and group_id
+                and (has_photo or has_document) and self.slot is None):
+            item = (max((entry for entry in photo_list if isinstance(entry, dict)),
+                        key=lambda entry: entry.get("file_size", 0)
+                        if type(entry.get("file_size")) is int else 0, default=None)
+                    if has_photo else document)
+            if not isinstance(item, dict):
+                self.queue_reply(chat_id, "⚠️ 无法识别这组附件，请重新发送。")
+                return
+            self._buffer_album(update, user, group_id, item, has_photo, text)
+            return
         if command == "/start":
             self.queue_reply(
                 chat_id,
@@ -1349,7 +1412,7 @@ class Bridge:
                 "1. 发送 /model，选择模型与思考强度\n"
                 "2. 直接发送任务，例如“检查当前项目的错误并修复”\n"
                 "3. 运行中可点“取消任务”，或发送 /status 查看状态\n\n"
-                "📎 也可直接发送截图、日志或代码文件（单文件最大 10MB）。\n"
+                "📎 可发送一组截图或文件（单个最大 10MB，整组最多 10 个、30MB）。\n"
                 "🔒 仅白名单私聊可使用；任务会在你的服务器工作区运行。\n"
                 "💡 发送 /help 查看全部指令，发送 /new 开启全新对话。",
             )
@@ -1376,18 +1439,22 @@ class Bridge:
                 "• ⚡ /steer <修正内容> - 停止当前纯文字任务，按原任务加修正重新执行\n"
                 "• 📜 /last - 查看最近一条任务的执行结果\n"
                 "• 📚 /history - 查看最近 10 条任务并点开完整结果\n"
-                "• 📎 可直接发送截图、日志或代码文件（单文件最大 10MB）\n"
+                "• 📎 可发送一组截图、日志或代码文件（单个最大 10MB，整组最多 10 个、30MB）\n"
                 "• 🆔 /id - 查看你的 Telegram 数字 ID\n"
                 "• ❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
                 "✨ 零依赖纯 Python 构建 ｜ 原生支持多轮上下文对话记忆！",
             )
             return
         if command in {"/new", "/reset"}:
-            self.store.reset_conversation(user)
-            self.queue_reply(
-                chat_id,
-                "🧠 对话记忆已重置！\n━━━━━━━━━━━━━━━━━━━━\n已清空当前上下文，下一条消息将开启全新对话。",
-            )
+            if self.slot is not None and self.slot.user == user:
+                self.slot.reset_after = True
+                self.queue_reply(chat_id, "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。")
+            else:
+                self.store.reset_conversation(user)
+                self.queue_reply(
+                    chat_id,
+                    "🧠 对话记忆已重置！\n━━━━━━━━━━━━━━━━━━━━\n已清空当前上下文，下一条消息将开启全新对话。",
+                )
             return
         if command == "/usage":
             usage = self.store.get_usage(user)
@@ -1459,6 +1526,11 @@ class Bridge:
             if job is not None and job.user == user:
                 job.cancel.set()
                 self.queue_reply(chat_id, "🛑 已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
+            elif self.pending_album is not None and self.pending_album["user"] == user:
+                self.pending_album = None
+                if self.album_task is not None:
+                    self.album_task.cancel()
+                self.queue_reply(chat_id, "🛑 已取消接收这组附件，没有启动任务。")
             else:
                 self.queue_reply(chat_id, "ℹ️ 你当前没有可取消的任务。")
             return
@@ -1746,6 +1818,13 @@ class Bridge:
             is_photo = True
         elif has_document:
             attachment = document
+
+        items = album_items if album_items is not None else ([(attachment, is_photo)] if attachment else [])
+        if (len(items) > MAX_ALBUM_FILES or
+                sum(item.get("file_size", 0) if type(item.get("file_size")) is int else 0
+                    for item, _ in items) > MAX_ALBUM_BYTES):
+            self.queue_reply(chat_id, "⚠️ 一次最多发送 10 个附件，总大小不超过 30 MB。请分批发送。")
+            return
         if len(text) > self.settings.max_prompt or "\x00" in text:
             self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
             return
@@ -1755,7 +1834,7 @@ class Bridge:
         if self.model_check_task and not self.model_check_task.done():
             self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
             return
-        if self.slot is not None:
+        if self.slot is not None or self.pending_album is not None:
             self.queue_reply(chat_id, "⚠️ 工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
             return
 
@@ -1768,30 +1847,38 @@ class Bridge:
             effort = ""
             self.store.set_effort(user, None)
         mode = self.store.get_mode(user) or ""
-        fallback_title = f"分析附件：{attachment.get('file_name', '截图')}" if attachment else "未命名任务"
+        fallback_title = f"分析附件：{items[0][0].get('file_name', '截图')}" if items else "未命名任务"
         job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort,
                   mode=mode, history_title=task_title(text, fallback_title), original_prompt=text,
-                  has_attachment=attachment is not None)
+                  has_attachment=bool(items))
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
             prompt = text
-            if attachment is not None:
+            if items:
                 try:
-                    path, display_name = await self._receive_attachment(job, attachment, is_photo)
-                except ValueError:
+                    received = []
+                    total_bytes = 0
+                    for item, photo in items:
+                        path, display_name = await self._receive_attachment(job, item, photo)
+                        received.append((path, display_name))
+                        total_bytes += path.stat().st_size
+                        if total_bytes > MAX_ALBUM_BYTES:
+                            raise ValueError("album too large")
+                except (ValueError, OSError):
                     self._cleanup_attachments(job)
                     self.slot = None
                     self.queue_reply(
                         chat_id,
-                        "⚠️ 附件未接收：仅支持截图或常见的文本、日志、代码文件，单文件最大 10MB。"
+                        "⚠️ 附件未接收：仅支持截图或常见的文本、日志、代码文件，单文件最大 10MB；本组没有启动任务。"
                     )
                     return
                 instruction = text or "请读取并分析该附件，说明发现的问题和建议。"
-                prompt = (
-                    f"用户上传了附件“{display_name}”，已保存到工作目录的此路径：{path}。"
-                    f"请先读取该文件，再完成用户要求：{instruction}"
-                )
+                paths = "\n".join(f"- {name}: {path}" for path, name in received)
+                prompt = f"用户上传了 {len(received)} 个附件，路径如下：\n{paths}\n请先读取这些文件，再完成用户要求：{instruction}"
+                if len(received) > 1:
+                    names = "、".join(name for _, name in received)
+                    job.attachment_feedback = f"📎 已收到 {len(received)} 个附件：{names}。本次任务会读取它们。"
             if len(prompt) > self.settings.max_prompt or "\x00" in prompt:
                 self._cleanup_attachments(job)
                 self.slot = None
@@ -1943,6 +2030,10 @@ class Bridge:
                     backoff = min(30.0, backoff * 2)
         finally:
             self.stop.set()
+            self.pending_album = None
+            if self.album_task is not None:
+                self.album_task.cancel()
+                await asyncio.gather(self.album_task, return_exceptions=True)
             if self.ready_file is not None:
                 self.ready_file.unlink(missing_ok=True)
             job = self.slot

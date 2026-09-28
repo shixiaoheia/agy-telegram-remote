@@ -19,7 +19,7 @@
 - 选择模型和思考强度：发送 `/model` 后直接点击按钮。
 - 任务运行时看到安全的执行摘要，每 5 秒更新一次，也可以点击“取消任务”。
 - 任务较长时，Telegram 会持续显示“正在输入”；需要临时改方向可用 `/steer` 纠正。
-- 发图片、日志或代码文件给机器人分析，单个文件最大 10 MB。
+- 发图片、日志或代码文件给机器人分析，单个文件最大 10 MB；同一组最多 10 个附件、合计 30 MB。
 - 使用 `/history` 查看最近 10 条任务，并点开完整结果。
 
 ## 安装前准备
@@ -75,6 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 ### 图片与文件
 
 可以直接发送：截图、`.log` 日志、`.txt`、`.md`、`.json`、`.py`、`.js`、`.sh` 等常见文本和代码文件。
+在 Telegram 中选中多张截图或多个文件作为同一组发送，机器人会收齐后用一次任务分析。每个附件最大 10 MB，一组最多 10 个、合计 30 MB。接收期间可发送 `/cancel` 放弃整组。
 
 机器人会先确认，例如：
 
@@ -83,6 +84,8 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 ```
 
 附件只会保存在当前任务的私有临时目录，任务结束后自动删除。
+
+任务运行中发送 `/new` 或 `/reset` 时，会在当前任务结束后清空对话记忆；下一条消息才会开启全新对话。
 
 ## Telegram 指令
 
