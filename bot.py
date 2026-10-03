@@ -36,6 +36,7 @@ LABELS = {
     "running": "⏳ 任务执行中",
 }
 CATEGORY_HELP = {
+    "location": "Google 拒绝当前地区的 API 调用：请检查服务器出口和 Google 账号所属地区是否受支持；刷新模型或重新授权不能保证解决地区限制。",
     "auth": "需要重新授权：请在服务器运行 agy auth login，完成 Google 登录后再试。",
     "quota": "账号额度或限流：请稍后再试，或检查当前 Google 账号额度。",
     "model": "模型不可用或参数不兼容：发送 /model refresh 重新检测可用模型。",
@@ -408,6 +409,7 @@ def model_health_text(result: dict | None) -> str:
     category = str(result.get("category") or "unknown")
     labels = {
         "auth": "需要授权", "quota": "额度或限流", "model": "模型不可用",
+        "location": "地区不受支持",
         "capacity": "容量暂时不足", "network": "网络异常", "process": "agy 无法启动",
     }
     return f"❌ {labels.get(category, '调用失败')}"
@@ -1100,8 +1102,8 @@ class Bridge:
         ("Gemini 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
         ("Gemini 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
         ("Gemini 3.6 Flash", ("gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low")),
-        ("Claude Sonnet 5.5", ("claude-sonnet-5-5",)),
-        ("Claude Opus 5.5", ("claude-opus-5-5-thinking",)),
+        ("Claude Sonnet 4.6", ("claude-sonnet-4-6",)),
+        ("Claude Opus 4.6", ("claude-opus-4-6-thinking",)),
         ("GPT-OSS 120B", ("gpt-oss-120b-medium",)),
     )
 

@@ -110,9 +110,9 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 选择 Gemini 系列后，再点击思考强度才会切换：Flash 提供极速、均衡、深度，Pro 提供极速和深度。点击“返回模型”或“关闭”不会更改当前设置。Claude 与 GPT-OSS 使用内置思考配置，点击后直接生效。
 
-Claude 菜单已更新为 Sonnet 5.5 与 Opus 5.5（Thinking），不再展示 4.6；`/model sonnet` 与 `/model opus` 选择新版。旧 Claude 4.6 模型名称、`AGY_MODEL` 配置及已保存的用户偏好会按对应系列解析到 5.5，升级无需重新选择。Gemini 与 GPT-OSS 选项保留。
+Claude 菜单使用 agy 1.2.16 实际识别的 Sonnet 4.6 与 Opus 4.6（Thinking）；`/model sonnet` 与 `/model opus` 选择对应模型。此前错误发布的 5.5 模型标识、按钮及已保存偏好会按对应系列恢复到 4.6，菜单和结果均显示实际调用名称。原有 4.6 配置、权限和历史记录保留。上游网页出现新模型不代表当前 CLI 和账号已可调用，应以服务器 `agy models` 为准。
 
-新版 Claude 需要 Google AI Ultra 或符合条件的非试用 Google AI Pro 账号；以服务器 `agy models` 的实际列表为准。账号暂未提供新版时，调用会报模型不可用，可在 `/model` 手动选择已提供的 Gemini；不会自动改用其他模型。参见 [官方模型与账号支持列表](https://antigravity.google/docs/models/)。
+若收到 `User location is not supported for the API use`，表示 Google 拒绝了当前地区的调用，需检查服务器出口及 Google 账号所属地区；修改模型名称、刷新模型或重新授权不能保证解决。参见 [官方地区支持说明](https://antigravity.google/docs/faq/)。程序会提示地区限制，不自动重跑原任务。
 
 切换结果在原卡片确认，只影响后续任务；正在运行的任务不受影响。`/mode` 同样在原消息内确认，减少刷屏。仍可使用 `/model <模型名或别名>` 快捷切换，或用 `/model refresh` 主动检查可用性，打开菜单不会触发检测。
 

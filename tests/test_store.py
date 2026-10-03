@@ -87,7 +87,7 @@ class StoreTests(unittest.TestCase):
         self.store.set_model(12345, None)
         self.assertIsNone(self.store.get_model(12345))
         self.assertFalse(path.exists())
-        self.store.set_model(12345, "claude-sonnet-5-5")
+        self.store.set_model(12345, "claude-sonnet-4-6")
         self.assertTrue(path.exists())
         reduced = Store(self.directory, frozenset({67890}), 1000, 7)
         reduced.maintain()
@@ -110,9 +110,9 @@ class StoreTests(unittest.TestCase):
         reduced.maintain()
         self.assertFalse(path.exists())
 
-    def test_legacy_claude_preferences_resolve_without_rewriting_private_files(self):
-        for old, new in (("claude-sonnet-4-6", "claude-sonnet-5-5"),
-                         ("claude-opus-4-6-thinking", "claude-opus-5-5-thinking")):
+    def test_invalid_release_preferences_recover_without_rewriting_private_files(self):
+        for old, new in (("claude-sonnet-5-5", "claude-sonnet-4-6"),
+                         ("claude-opus-5-5-thinking", "claude-opus-4-6-thinking")):
             with self.subTest(model=old):
                 path = self.directory / "model-12345.json"
                 atomic_json(path, {"user_id": 12345, "model": old, "updated_at": 123})
@@ -144,11 +144,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.get_model_health()["models"], {})
         self.store.set_model_health({
             "gemini-3.8-flash-high": {"outcome": "success", "category": ""},
-            "claude-sonnet-5-5": {"outcome": "error", "category": "model"},
+            "claude-sonnet-4-6": {"outcome": "error", "category": "model"},
         })
         health = self.store.get_model_health()
         self.assertEqual(health["models"]["gemini-3.8-flash-high"]["outcome"], "success")
-        self.assertEqual(health["models"]["claude-sonnet-5-5"]["category"], "model")
+        self.assertEqual(health["models"]["claude-sonnet-4-6"]["category"], "model")
         self.assertEqual((self.directory / "model-health.json").stat().st_mode & 0o777, 0o600)
         with self.assertRaises(ValueError):
             self.store.set_model_health({"bad;model": {"outcome": "success"}})

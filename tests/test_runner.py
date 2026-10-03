@@ -68,6 +68,13 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(classify("DNS resolution failed"), "network")
         self.assertEqual(classify("unrelated error"), "unknown")
 
+    def test_location_error_is_distinct_from_auth_and_model_errors(self):
+        message = "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
+        result = self.parse({"status": "ERROR", "error": message}, code=1)
+        self.assertEqual((result.outcome, result.category), ("error", "location"))
+        self.assertIn(message, result.detail)
+        self.assertEqual(classify("FAILED_PRECONDITION (code 400): unrelated error"), "unknown")
+
     def test_stream_result_uses_only_terminal_event(self):
         raw = b'\n'.join((
             b'{"event":"init","init":{"model":"test"}}',
@@ -244,10 +251,10 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
     def test_build_command_model_option(self):
         cmd_default = build_command(self.settings, "prompt")
         self.assertNotIn("--model", cmd_default)
-        cmd_model = build_command(self.settings, "prompt", model="claude-sonnet-5-5")
+        cmd_model = build_command(self.settings, "prompt", model="claude-sonnet-4-6")
         self.assertIn("--model", cmd_model)
         idx = cmd_model.index("--model")
-        self.assertEqual(cmd_model[idx + 1], "claude-sonnet-5-5")
+        self.assertEqual(cmd_model[idx + 1], "claude-sonnet-4-6")
 
     def test_build_command_effort_and_mode_options(self):
         cmd = build_command(self.settings, "prompt", effort="high", mode="plan")
