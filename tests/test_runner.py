@@ -244,10 +244,10 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
     def test_build_command_model_option(self):
         cmd_default = build_command(self.settings, "prompt")
         self.assertNotIn("--model", cmd_default)
-        cmd_model = build_command(self.settings, "prompt", model="claude-sonnet-4-6")
+        cmd_model = build_command(self.settings, "prompt", model="claude-sonnet-5-5")
         self.assertIn("--model", cmd_model)
         idx = cmd_model.index("--model")
-        self.assertEqual(cmd_model[idx + 1], "claude-sonnet-4-6")
+        self.assertEqual(cmd_model[idx + 1], "claude-sonnet-5-5")
 
     def test_build_command_effort_and_mode_options(self):
         cmd = build_command(self.settings, "prompt", effort="high", mode="plan")

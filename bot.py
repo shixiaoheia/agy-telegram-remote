@@ -1100,8 +1100,8 @@ class Bridge:
         ("Gemini 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
         ("Gemini 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
         ("Gemini 3.6 Flash", ("gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low")),
-        ("Claude Sonnet 4.6", ("claude-sonnet-4-6",)),
-        ("Claude Opus 4.6", ("claude-opus-4-6-thinking",)),
+        ("Claude Sonnet 5.5", ("claude-sonnet-5-5",)),
+        ("Claude Opus 5.5", ("claude-opus-5-5-thinking",)),
         ("GPT-OSS 120B", ("gpt-oss-120b-medium",)),
     )
 
