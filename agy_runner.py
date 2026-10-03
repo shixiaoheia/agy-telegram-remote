@@ -52,6 +52,8 @@ def classify(message: str) -> str:
         return "filesystem_readonly"
     if any(s in low for s in ("permission denied", "operation not permitted", "eacces")):
         return "filesystem_permission"
+    if "user location is not supported" in low:
+        return "location"
     if "no capacity available" in low:
         return "capacity"
     if any(s in low for s in ("invalid model", "model not found", "model unavailable",
