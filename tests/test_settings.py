@@ -45,12 +45,23 @@ class ConfigurationTests(unittest.TestCase):
         s2 = Settings.from_mapping(config_values() | {"AGY_MODEL": "3.8"})
         self.assertEqual(s2.model, "gemini-3.8-flash-high")
         s3 = Settings.from_mapping(config_values() | {"AGY_MODEL": "opus"})
-        self.assertEqual(s3.model, "claude-opus-4-6-thinking")
+        self.assertEqual(s3.model, "claude-opus-5-5-thinking")
         with self.assertRaises(ConfigError):
             Settings.from_mapping(config_values() | {"AGY_MODEL": "bad;injection"})
 
     def test_defaults_auto_approve(self):
         self.assertTrue(Settings.from_mapping(config_values()).skip_permissions)
+
+    def test_legacy_claude_config_resolves_to_new_model_without_changing_permissions(self):
+        for old, new in (("claude-sonnet-4-6", "claude-sonnet-5-5"),
+                         ("claude-opus-4-6-thinking", "claude-opus-5-5-thinking")):
+            with self.subTest(model=old):
+                values = config_values() | {"AGY_MODEL": old, "AGY_SKIP_PERMISSIONS": "false"}
+                upgraded = merged_config(values, "", "", "/root")
+                loaded = Settings.from_mapping(parse_env(serialize_env(upgraded)))
+                self.assertEqual(loaded.model, new)
+                self.assertFalse(loaded.skip_permissions)
+                self.assertEqual(upgraded["AGY_MODEL"], old)
 
     def test_upgrade_preserves_safe_default_when_key_missing(self):
         values = merged_config(config_values(), "", "", "/root")

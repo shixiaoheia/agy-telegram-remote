@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-03
+
+- 将官方模型目录、Telegram `/model` 菜单及 Sonnet/Opus 快捷名称中的 Claude 4.6 替换为 Claude 5.5（Thinking）。
+- 旧 Claude 模型名、默认配置及保存的用户偏好按原系列解析到新版，保留原状态文件与历史结果。
+- 保留 Gemini 和 GPT-OSS 选项，说明新版 Claude 的账号要求与 `agy models` 可用性核对方式。
+
 ## 自动更新流程
 
 - 已有安装运行 `bash install.sh` 直接更新，自动沿用已保存的 Token、白名单和其他设置。

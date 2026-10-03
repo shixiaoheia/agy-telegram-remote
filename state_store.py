@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from settings import check_no_symlink
+from settings import check_no_symlink, resolve_model
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -133,7 +133,7 @@ class Store:
             return None
         model = value.get("model")
         if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
-            return model
+            return resolve_model(model)
         return None
 
     def set_model(self, user: int, model: str | None) -> None:

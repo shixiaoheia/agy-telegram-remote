@@ -26,8 +26,8 @@ OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
     ("Gemini 3.6 Flash", "gemini-3.6-flash-low", "Low 思考"),
     ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-high", "High 深度推理 (推荐)"),
     ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-low", "Low 推理"),
-    ("Anthropic Claude", "claude-sonnet-4-6", "Sonnet 4.6 (Thinking)"),
-    ("Anthropic Claude", "claude-opus-4-6-thinking", "Opus 4.6 (Thinking)"),
+    ("Anthropic Claude", "claude-sonnet-5-5", "Sonnet 5.5 (Thinking)"),
+    ("Anthropic Claude", "claude-opus-5-5-thinking", "Opus 5.5 (Thinking)"),
     ("开源模型", "gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
 )
 
@@ -49,8 +49,13 @@ MODEL_ALIASES: dict[str, str] = {
     "pro": "gemini-3.1-pro-high",
     "pro-high": "gemini-3.1-pro-high",
     "pro-low": "gemini-3.1-pro-low",
-    "sonnet": "claude-sonnet-4-6",
-    "opus": "claude-opus-4-6-thinking",
+    "sonnet": "claude-sonnet-5-5",
+    "sonnet-5.5": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5-thinking",
+    "opus-5.5": "claude-opus-5-5-thinking",
+    # Keep old commands, config files and saved preferences usable on upgrades.
+    "claude-sonnet-4-6": "claude-sonnet-5-5",
+    "claude-opus-4-6-thinking": "claude-opus-5-5-thinking",
     "gpt": "gpt-oss-120b-medium",
     "120b": "gpt-oss-120b-medium",
 }
