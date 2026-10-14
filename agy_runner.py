@@ -48,6 +48,11 @@ class Result:
 def classify(message: str) -> str:
     """Heuristic diagnostic categories, not assertions about account state."""
     low = message.lower()
+    if any(s in low for s in ("model is not available for your plan",
+                              "model is not available for your account",
+                              "model not enabled for your account",
+                              "model requires a paid subscription")):
+        return "entitlement"
     if "read-only file system" in low or re.search(r"\berofs\b", low):
         return "filesystem_readonly"
     if any(s in low for s in ("permission denied", "operation not permitted", "eacces")):
@@ -56,6 +61,8 @@ def classify(message: str) -> str:
         return "location"
     if "no capacity available" in low:
         return "capacity"
+    if any(s in low for s in ("quota", "rate limit", "resource_exhausted", "429")):
+        return "quota"
     if any(s in low for s in ("invalid model", "model not found", "model unavailable",
                               "unsupported model", "unknown model", "model is not available")):
         return "model"
@@ -65,8 +72,6 @@ def classify(message: str) -> str:
                              "oauth", "sign in", "signin", "headlessauthrequired",
                              "401", "re-authenticate", "credentials")):
         return "auth"
-    if any(s in low for s in ("quota", "rate limit", "resource_exhausted", "429")):
-        return "quota"
     if "soft-denied" in low or "permissiondenied" in low:
         return "permission"
     if any(s in low for s in ("connection", "network", "dns", "timed out",

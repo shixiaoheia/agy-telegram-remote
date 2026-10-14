@@ -112,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 菜单加入 Gemini 4 Argon（均衡、深度）和 Claude Sonnet/Opus 5.5（极速、均衡、深度、最高）。这些选项通过完整模型标识调用，不叠加另一份 `--effort` 参数。`/model argon`、`/model sonnet-5.5`、`/model opus-5.5` 可快捷选择；原有 `/model sonnet`、`/model opus` 和 4.6 偏好保持不变。旧版 5.5 标识解析为对应 5.5 的均衡档，不再转回 4.6。
 
-发送 `/model refresh` 会先读取服务器 `agy models`，再逐项发出固定回复检测；成功后保存检测结果，菜单隐藏检测失败或 CLI 已不提供的选项，并加入新发现的模型。目录读取失败时保留上次结果。首次检测前菜单是候选目录，不代表账号已能调用；刷新会消耗模型额度。检测不改用户选定模型、配置、权限或历史，也不重跑原任务。
+发送 `/model refresh` 会先读取服务器 `agy models`，再逐项发出固定回复检测；成功后保存检测结果，并加入新发现的模型。菜单隐藏 CLI 已不提供或明确提示账号/套餐无权限的选项；网络、额度、容量、授权或地区等失败仍保留选项并显示警告，不当作套餐资格判断。同一模型有已验证档位时，菜单优先打开该档位。目录读取失败时保留上次结果。首次检测前菜单是候选目录，不代表账号已能调用；刷新会消耗模型额度。检测不改用户选定模型、配置、权限或历史，也不重跑原任务。免费与付费账号共用同一程序，以各自服务器的检测结果决定可选模型。
 
 截至 2026-10-14，[官方模型列表](https://antigravity.google/docs/models/)说明：Argon 限 Ultra/Enterprise；Claude 5.5 支持非试用 Pro、Ultra/Enterprise；Gemini 3.7/3.6 Flash 和 3.1 Pro 列为 Enterprise 选项。Claude 4.6 和 GPT-OSS 标注于 2026-11-02 移除，当前仍保留兼容入口。实际目录、套餐权限、地区和调用能力均需在目标服务器确认。
 

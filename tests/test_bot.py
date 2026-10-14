@@ -902,6 +902,34 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_model_health(), original)
         self.assertEqual(self.runner.calls, 0)
 
+    async def test_free_and_paid_catalogs_follow_account_results_without_migrating_model(self):
+        paid = [model for _, model, _ in OFFICIAL_MODELS
+                if model.startswith("gemini-4-argon-") or "-5-5-" in model]
+        self.store.set_model(12345, "gemini-3.8-flash-high")
+        for entitled in (False, True):
+            health = {model: {"outcome": "success" if entitled else "error",
+                              "category": "unknown" if entitled else "entitlement"}
+                      for model in paid}
+            health["gemini-3.8-flash-high"] = {"outcome": "success"}
+            self.store.set_model_health(health)
+            await self.handle(update("/model"))
+            buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+            self.assertEqual("model:claude-opus-5-5-medium" in buttons, entitled)
+            self.assertEqual("model:gemini-4-argon-high" in buttons, entitled)
+            self.assertIn("model:gemini-3.8-flash-high", buttons)
+            self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
+
+    async def test_temporary_probe_failures_remain_selectable_with_diagnostics(self):
+        for category in ("quota", "capacity", "network", "auth", "location"):
+            self.store.set_model_health({"claude-sonnet-4-6": {"outcome": "error", "category": category}})
+            await self.handle(update("/model"))
+            text, keyboard = self.api.messages[-1][1:]
+            buttons = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
+            self.assertIn("model:claude-sonnet-4-6", buttons)
+            self.assertIn("不代表套餐无权限", text)
+            await self.handle(update("/model sonnet"))
+            self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+
     async def test_conversation_memory_is_persisted_and_passed(self):
         self.runner.result = Result("success", text="Turn 1 ok", conversation_id="conv-turn-1", num_turns=1)
         await self.handle(update("Hello first turn"))
