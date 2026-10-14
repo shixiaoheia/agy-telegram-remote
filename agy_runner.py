@@ -446,6 +446,7 @@ class Runner:
             raise RuntimeError("Model discovery is blocked after failed cleanup")
         process = None
         readers: list[asyncio.Task] = []
+        captures_future = None
         try:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
                 str(self.settings.agy), "models", cwd=self.settings.workspace,
@@ -461,7 +462,8 @@ class Runner:
             overflow = asyncio.Event()
             readers = [asyncio.create_task(read_bounded(stream, 65536, overflow))
                        for stream in (process.stdout, process.stderr)]
-            captures = await asyncio.wait_for(asyncio.gather(*readers), timeout=15)
+            captures_future = asyncio.gather(*readers)
+            captures = await asyncio.wait_for(captures_future, timeout=15)
             await asyncio.wait_for(process.wait(), timeout=2)
             if process.returncode != 0 or overflow.is_set():
                 raise ValueError("CLI model discovery failed")
@@ -482,6 +484,8 @@ class Runner:
                     if not reader.done():
                         reader.cancel()
                 await asyncio.gather(*readers, return_exceptions=True)
+                if captures_future is not None:
+                    await asyncio.gather(captures_future, return_exceptions=True)
                 if self.blocked:
                     raise RuntimeError("Model discovery cleanup failed")
 

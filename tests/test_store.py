@@ -111,8 +111,8 @@ class StoreTests(unittest.TestCase):
         self.assertFalse(path.exists())
 
     def test_invalid_release_preferences_recover_without_rewriting_private_files(self):
-        for old, new in (("claude-sonnet-5-5", "claude-sonnet-4-6"),
-                         ("claude-opus-5-5-thinking", "claude-opus-4-6-thinking")):
+        for old, new in (("claude-sonnet-5-5", "claude-sonnet-5-5-medium"),
+                         ("claude-opus-5-5-thinking", "claude-opus-5-5-medium")):
             with self.subTest(model=old):
                 path = self.directory / "model-12345.json"
                 atomic_json(path, {"user_id": 12345, "model": old, "updated_at": 123})

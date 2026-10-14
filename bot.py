@@ -85,8 +85,6 @@ FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # reject several providers.  Flash variants can still use the same friendly
 # picker: it switches the *model* suffix instead of passing --effort.
 OFFICIAL_MODEL_IDS = frozenset(model_id for _, model_id, _ in OFFICIAL_MODELS)
-FLASH_VARIANT_RE = re.compile(r"^(gemini-3\.(?:6|7|8)-flash)-(high|medium|low)$")
-PRO_VARIANT_RE = re.compile(r"^(gemini-3\.1-pro)-(high|low)$")
 CATALOG_VARIANT_RE = re.compile(r"^((?:gemini|claude)-[A-Za-z0-9.-]+)-(low|medium|high|max)$")
 
 
@@ -375,15 +373,11 @@ def supports_effort(model: str) -> bool:
 
 def variant_model_for_effort(model: str, effort: str,
                             model_ids=OFFICIAL_MODEL_IDS) -> str | None:
-    """Return the catalog model selected by a Gemini reasoning button."""
-    flash = CATALOG_VARIANT_RE.fullmatch(model)
-    if flash:
-        candidate = f"{flash.group(1)}-{effort}"
+    """Return a concrete catalog slug, never an unsupported reasoning suffix."""
+    match = CATALOG_VARIANT_RE.fullmatch(model)
+    if match:
+        candidate = f"{match.group(1)}-{effort}"
         return candidate if candidate in model_ids else None
-    pro = PRO_VARIANT_RE.fullmatch(model)
-    if pro:
-        candidate = f"{pro.group(1)}-{effort}"
-        return candidate if candidate in OFFICIAL_MODEL_IDS else None
     return None
 
 
