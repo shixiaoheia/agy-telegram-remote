@@ -85,8 +85,7 @@ FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # reject several providers.  Flash variants can still use the same friendly
 # picker: it switches the *model* suffix instead of passing --effort.
 OFFICIAL_MODEL_IDS = frozenset(model_id for _, model_id, _ in OFFICIAL_MODELS)
-FLASH_VARIANT_RE = re.compile(r"^(gemini-3\.(?:6|7|8)-flash)-(high|medium|low)$")
-PRO_VARIANT_RE = re.compile(r"^(gemini-3\.1-pro)-(high|low)$")
+CATALOG_VARIANT_RE = re.compile(r"^((?:gemini|claude)-[A-Za-z0-9.-]+)-(low|medium|high|max)$")
 
 
 def clean_model_reply(text: str) -> str:
@@ -369,24 +368,21 @@ def history_summary(records: list[dict]) -> tuple[str, dict | None]:
 
 def supports_effort(model: str) -> bool:
     """Only future/custom models may receive the separate CLI --effort flag."""
-    return not model or model not in OFFICIAL_MODEL_IDS
+    return not model or (model not in OFFICIAL_MODEL_IDS and not CATALOG_VARIANT_RE.fullmatch(model))
 
 
-def variant_model_for_effort(model: str, effort: str) -> str | None:
-    """Return the catalog model selected by a Gemini reasoning button."""
-    flash = FLASH_VARIANT_RE.fullmatch(model)
-    if flash:
-        candidate = f"{flash.group(1)}-{effort}"
-        return candidate if candidate in OFFICIAL_MODEL_IDS else None
-    pro = PRO_VARIANT_RE.fullmatch(model)
-    if pro:
-        candidate = f"{pro.group(1)}-{effort}"
-        return candidate if candidate in OFFICIAL_MODEL_IDS else None
+def variant_model_for_effort(model: str, effort: str,
+                            model_ids=OFFICIAL_MODEL_IDS) -> str | None:
+    """Return a concrete catalog slug, never an unsupported reasoning suffix."""
+    match = CATALOG_VARIANT_RE.fullmatch(model)
+    if match:
+        candidate = f"{match.group(1)}-{effort}"
+        return candidate if candidate in model_ids else None
     return None
 
 
 def selected_variant_effort(model: str) -> str | None:
-    match = FLASH_VARIANT_RE.fullmatch(model) or PRO_VARIANT_RE.fullmatch(model)
+    match = CATALOG_VARIANT_RE.fullmatch(model)
     return match.group(2) if match else None
 
 
@@ -398,7 +394,7 @@ def effort_label(effort: str | None, model: str) -> str:
     chosen = selected_variant_effort(model) or effort
     if not supports_effort(model) and not chosen:
         return "模型内置"
-    return {"low": "极速", "medium": "均衡", "high": "深度"}.get(chosen or "", "默认")
+    return {"low": "极速", "medium": "均衡", "high": "深度", "max": "最高"}.get(chosen or "", "默认")
 
 
 def model_health_text(result: dict | None) -> str:
@@ -660,7 +656,10 @@ class Bridge:
     async def _refresh_model_health(self, chat_id: int) -> None:
         results: dict[str, dict] = {}
         try:
-            for _, model, _ in OFFICIAL_MODELS:
+            models = await self.runner.list_models()
+            results = {model: {"outcome": "error", "category": "model"}
+                       for model in OFFICIAL_MODEL_IDS if model not in models}
+            for model in models:
                 try:
                     result = await asyncio.wait_for(
                         self.runner.run(MODEL_PROBE_PROMPT, asyncio.Event(), model=model), timeout=45,
@@ -670,16 +669,18 @@ class Bridge:
                     } else "error", "category": result.category or "unknown"}
                 except asyncio.TimeoutError:
                     results[model] = {"outcome": "timed_out", "category": "network"}
+                if self.runner.blocked:
+                    raise RuntimeError("Model probe cleanup failed")
             self.store.set_model_health(results)
             available = sum(item["outcome"] == "success" for item in results.values())
             self.queue_reply(
                 chat_id,
-                f"✅ 模型可用性检测完成：{available}/{len(OFFICIAL_MODELS)} 个模型已验证可用。\n"
+                f"✅ 模型可用性检测完成：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
                 "发送 /model 查看可用模型；失败原因已在列表中标注。",
             )
         except Exception as error:
             LOG.warning("model_health_check_failed type=%s", type(error).__name__)
-            self.queue_reply(chat_id, "⚠️ 模型可用性检测未完成；请确认当前没有运行中的任务后重试。")
+            self.queue_reply(chat_id, "⚠️ 模型目录或可用性检测未完成，保留上次检测结果；请检查 agy 版本和授权后重试。")
         finally:
             self.model_check_task = None
 
@@ -1098,6 +1099,9 @@ class Bridge:
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
     MODEL_CHOICES = (
+        ("Gemini 4 Argon", ("gemini-4-argon-high", "gemini-4-argon-medium")),
+        *((f"Claude {family.title()} 5.5", tuple(f"claude-{family}-5-5-{level}"
+           for level in ("medium", "low", "high", "max"))) for family in ("sonnet", "opus")),
         ("Gemini 3.8 Flash", ("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low")),
         ("Gemini 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
         ("Gemini 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
@@ -1107,8 +1111,32 @@ class Bridge:
         ("GPT-OSS 120B", ("gpt-oss-120b-medium",)),
     )
 
+    def _model_choices(self):
+        """Add newly discovered slugs without rewriting saved user preferences."""
+        choices = list(self.MODEL_CHOICES)
+        known = {model for _, variants in choices for model in variants}
+        groups: dict[str, list[str]] = {}
+        for model, result in self._model_health().get("models", {}).items():
+            if model in known or len(model) > 57 or result.get("category") == "model":
+                continue
+            match = CATALOG_VARIANT_RE.fullmatch(model)
+            group = match.group(1) if match else model
+            groups.setdefault(group, []).append(model)
+        for group, variants in groups.items():
+            matching = next((i for i, (_, ids) in enumerate(choices)
+                             if any(x.startswith(group + "-") for x in ids)), None)
+            if matching is not None:
+                label, ids = choices[matching]
+                choices[matching] = (label, (*ids, *variants))
+            else:
+                choices.append((group, tuple(variants)))
+        return choices
+
+    def _variant_ids(self):
+        return frozenset(model for _, variants in self._model_choices() for model in variants)
+
     def _model_label(self, model: str) -> str:
-        for label, variants in self.MODEL_CHOICES:
+        for label, variants in self._model_choices():
             if model in variants:
                 effort = selected_variant_effort(model)
                 return f"{label} · {effort_label(effort, model)}" if effort else label
@@ -1116,11 +1144,13 @@ class Bridge:
 
     def _model_picker(self, user: int) -> tuple[str, dict]:
         current = self.store.get_model(user) or self.settings.model or ""
-        buttons = [
-            {"text": ("✓ " if current in variants else "") + label,
-             "callback_data": f"model:{variants[0]}"}
-            for label, variants in self.MODEL_CHOICES
-        ]
+        buttons = []
+        for label, variants in self._model_choices():
+            usable = [x for x in variants if not self._model_is_known_unavailable(x)]
+            if not usable:
+                continue
+            buttons.append({"text": ("✓ " if current in variants else "") + label,
+                            "callback_data": f"model:{usable[0]}"})
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append([{"text": "恢复默认", "callback_data": "model:default"},
                      {"text": "关闭", "callback_data": "selector:close"}])
@@ -1131,9 +1161,13 @@ class Bridge:
         model = current if model is None else model
         curr = selected_variant_effort(current) or self.store.get_effort(user)
         buttons = []
-        for effort in ("low", "medium", "high"):
-            variant = variant_model_for_effort(model, effort)
+        for effort in ("low", "medium", "high", "max"):
+            if effort == "max" and not selected_variant_effort(model):
+                continue
+            variant = variant_model_for_effort(model, effort, self._variant_ids())
             if selected_variant_effort(model) and variant is None:
+                continue
+            if variant and self._model_is_known_unavailable(variant):
                 continue
             selected = current == variant if variant else curr == effort and current == model
             buttons.append({"text": ("✓ " if selected else "") + effort_label(effort, ""),
@@ -1142,7 +1176,7 @@ class Bridge:
             {"text": "返回模型", "callback_data": "selector:models"},
             {"text": "关闭", "callback_data": "selector:close"},
         ]]}
-        label = next((label for label, variants in self.MODEL_CHOICES if model in variants), model_label)
+        label = next((label for label, variants in self._model_choices() if model in variants), model_label)
         return f"{label}\n选择思考强度后生效", keyboard
 
     def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
@@ -1253,8 +1287,8 @@ class Bridge:
         if data.startswith("effort:"):
             target = data[7:].strip().lower()
             model = self.store.get_model(user) or self.settings.model or ""
-            if target in {"low", "medium", "high"}:
-                variant = variant_model_for_effort(model, target)
+            if target in {"low", "medium", "high", "max"}:
+                variant = variant_model_for_effort(model, target, self._variant_ids())
                 if variant is not None:
                     if self._model_is_known_unavailable(variant):
                         if cq_id and hasattr(self.api, "answer_callback_query"):

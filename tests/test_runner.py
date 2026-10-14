@@ -209,6 +209,38 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
     def runner(self, **kwargs):
         return Runner(self.settings, outer_grace=0, terminate_grace=0.1, **kwargs)
 
+    async def test_list_models_reads_slugs_without_prompt_or_secret_environment(self):
+        self.executable(
+            "import sys, os\n"
+            "assert sys.argv[1:] == ['models']\n"
+            "assert 'TELEGRAM_BOT_TOKEN' not in os.environ\n"
+            "print('Available models:')\n"
+            "print('gemini-4-argon-high  Gemini 4 Argon (High)')\n"
+            "print('claude-opus-5-5-max  Claude Opus 5.5 (Max)')\n"
+            "print('gemini-4-argon-high  duplicate')\n"
+        )
+        self.assertEqual(await self.runner().list_models(),
+                         ('gemini-4-argon-high', 'claude-opus-5-5-max'))
+
+    async def test_list_models_rejects_failed_empty_and_overflow_outputs(self):
+        for body in ("import sys; print('gemini-4-argon-high'); sys.exit(1)",
+                     "print('No models available')", "print('x' * 70000)"):
+            self.executable(body)
+            runner = self.runner()
+            with self.assertRaises(ValueError):
+                await runner.list_models()
+            self.assertFalse(runner.blocked)
+
+    async def test_list_models_cancellation_cleans_process_group(self):
+        self.executable("import time; time.sleep(60)")
+        runner = self.runner()
+        task = asyncio.create_task(runner.list_models())
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(runner.blocked)
+
     async def test_real_success_and_arguments(self):
         self.executable(
             "import json,sys,os\n"

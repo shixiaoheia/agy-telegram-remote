@@ -13,8 +13,12 @@ TOKEN_RE = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,200}\Z")
 PATH_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
 MODEL_RE = re.compile(r"[A-Za-z0-9._-]{2,64}\Z")
 
-# CLI-recognized model catalog, verified against `agy models` (agy 1.2.16).
+# Bootstrap catalog; /model refresh discovers the installed CLI's actual slugs.
 OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
+    ("Gemini 4 Argon", "gemini-4-argon-high", "High 深度推理"),
+    ("Gemini 4 Argon", "gemini-4-argon-medium", "Medium 推理"),
+    *(("Anthropic Claude", f"claude-{family}-5-5-{level}", f"{family.title()} 5.5 ({level})")
+      for family in ("sonnet", "opus") for level in ("low", "medium", "high", "max")),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-high", "High 思考 (推荐)"),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-medium", "Medium 思考"),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-low", "Low 思考"),
@@ -32,6 +36,8 @@ OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
 )
 
 MODEL_ALIASES: dict[str, str] = {
+    "argon": "gemini-4-argon-high",
+    "4": "gemini-4-argon-high",
     "3.8": "gemini-3.8-flash-high",
     "3.8-high": "gemini-3.8-flash-high",
     "3.8-med": "gemini-3.8-flash-medium",
@@ -50,12 +56,13 @@ MODEL_ALIASES: dict[str, str] = {
     "pro-high": "gemini-3.1-pro-high",
     "pro-low": "gemini-3.1-pro-low",
     "sonnet": "claude-sonnet-4-6",
-    "sonnet-5.5": "claude-sonnet-4-6",
+    "sonnet-5.5": "claude-sonnet-5-5-medium",
     "opus": "claude-opus-4-6-thinking",
-    "opus-5.5": "claude-opus-4-6-thinking",
-    # Recover IDs introduced by the faulty 5.5 catalog without rewriting private state.
-    "claude-sonnet-5-5": "claude-sonnet-4-6",
-    "claude-opus-5-5-thinking": "claude-opus-4-6-thinking",
+    "opus-5.5": "claude-opus-5-5-medium",
+    "claude-sonnet-5-5": "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-thinking": "claude-sonnet-5-5-medium",
+    "claude-opus-5-5": "claude-opus-5-5-medium",
+    "claude-opus-5-5-thinking": "claude-opus-5-5-medium",
     "gpt": "gpt-oss-120b-medium",
     "120b": "gpt-oss-120b-medium",
 }

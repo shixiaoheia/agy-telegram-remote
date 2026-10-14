@@ -14,6 +14,7 @@ from agy_runner import Result
 from bot import Bridge, Job, describe, describe_html
 from state_store import Store
 from telegram_api import TelegramError
+from settings import OFFICIAL_MODELS
 
 def update(text, user=12345, chat_type="private", update_id=1):
     return {
@@ -106,6 +107,9 @@ class FakeAPI:
         return 4
 
 class FakeRunner:
+    async def list_models(self):
+        return tuple(model for _, model, _ in OFFICIAL_MODELS)
+
     def __init__(self):
         self.calls = 0
         self.launched = 0
@@ -604,7 +608,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
         health = self.store.get_model_health()["models"]
-        self.assertEqual(len(health), 14)
+        self.assertEqual(len(health), len(OFFICIAL_MODELS))
         self.assertTrue(all(item["outcome"] == "success" for item in health.values()))
         await self.handle(update("/model"))
         buttons = [button["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
@@ -840,13 +844,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_release_button_selects_supported_model_and_task_uses_it(self):
         for old, new, label in (
-            ("claude-sonnet-5-5", "claude-sonnet-4-6", "Claude Sonnet 4.6"),
-            ("claude-opus-5-5-thinking", "claude-opus-4-6-thinking", "Claude Opus 4.6"),
+            ("claude-sonnet-5-5", "claude-sonnet-5-5-medium", "Claude Sonnet 5.5"),
+            ("claude-opus-5-5-thinking", "claude-opus-5-5-medium", "Claude Opus 5.5"),
         ):
             with self.subTest(model=old):
                 await self.handle(callback_update(f"model:{old}"))
+                self.assertIn(label, self.api.messages[-1][1])
+                await self.handle(callback_update(f"choose:{new}"))
                 self.assertEqual(self.store.get_model(12345), new)
-                self.assertIn(f"当前：{label}", self.api.messages[-1][1])
                 self.assertIsNone(self.store.get_effort(12345))
                 await self.handle(update("hello"))
                 await self.finish_job()
@@ -856,10 +861,46 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_model(12345, "claude-sonnet-5-5")
         await self.handle(update("/model"))
         text, keyboard = self.api.messages[-1][1:]
-        self.assertIn("当前：Claude Sonnet 4.6", text)
+        self.assertIn("当前：Claude Sonnet 5.5", text)
         buttons = [button for row in keyboard["inline_keyboard"] for button in row]
-        self.assertIn({"text": "✓ Claude Sonnet 4.6", "callback_data": "model:claude-sonnet-4-6"}, buttons)
-        self.assertFalse(any("5-5" in button["callback_data"] for button in buttons))
+        self.assertIn({"text": "✓ Claude Sonnet 5.5", "callback_data": "model:claude-sonnet-5-5-medium"}, buttons)
+
+    async def test_new_model_pickers_bind_supported_slugs_and_clear_extra_effort(self):
+        for model, expected in (
+            ("gemini-4-argon-high", ("medium", "high")),
+            ("claude-opus-5-5-medium", ("low", "medium", "high", "max")),
+        ):
+            await self.handle(callback_update(f"model:{model}"))
+            buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+            base = model.rsplit("-", 1)[0]
+            self.assertEqual([b for b in buttons if b.startswith("choose:")],
+                             [f"choose:{base}-{level}" for level in expected])
+            chosen = f"{base}-{expected[-1]}"
+            await self.handle(callback_update(f"choose:{chosen}"))
+            self.assertEqual(self.store.get_model(12345), chosen)
+            self.assertIsNone(self.store.get_effort(12345))
+
+    async def test_refresh_discovers_new_family_and_hides_missing_models(self):
+        self.runner.list_models = AsyncMock(return_value=("gemini-4.1-flash-high", "gemini-4.1-flash-low"))
+        self.store.set_model(12345, "claude-sonnet-4-6")
+        await self.bridge._refresh_model_health(12345)
+        await self.handle(update("/model"))
+        buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+        self.assertIn("model:gemini-4.1-flash-high", buttons)
+        self.assertNotIn("model:claude-sonnet-4-6", buttons)
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        await self.handle(callback_update("model:gemini-4.1-flash-high"))
+        buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+        self.assertIn("choose:gemini-4.1-flash-low", buttons)
+        self.assertNotIn("choose:gemini-4.1-flash-medium", buttons)
+
+    async def test_refresh_discovery_failure_preserves_health_and_does_not_probe(self):
+        self.store.set_model_health({"gemini-3.8-flash-high": {"outcome": "success"}})
+        original = self.store.get_model_health()
+        self.runner.list_models = AsyncMock(side_effect=ValueError("failed"))
+        await self.bridge._refresh_model_health(12345)
+        self.assertEqual(self.store.get_model_health(), original)
+        self.assertEqual(self.runner.calls, 0)
 
     async def test_conversation_memory_is_persisted_and_passed(self):
         self.runner.result = Result("success", text="Turn 1 ok", conversation_id="conv-turn-1", num_turns=1)

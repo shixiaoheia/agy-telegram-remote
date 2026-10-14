@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
 
-from settings import Settings
+from settings import MODEL_RE, Settings
 
 SMOKE_PROMPT = (
     "Reply with exactly: AGY ready. Do not use any tools, run commands, "
@@ -439,6 +439,55 @@ class Runner:
         self.outer_grace = outer_grace
         self.terminate_grace = terminate_grace
         self.blocked = False
+
+    async def list_models(self) -> tuple[str, ...]:
+        """Read CLI slugs with the same environment and process-group boundary."""
+        if self.blocked:
+            raise RuntimeError("Model discovery is blocked after failed cleanup")
+        process = None
+        readers: list[asyncio.Task] = []
+        captures_future = None
+        try:
+            spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+                str(self.settings.agy), "models", cwd=self.settings.workspace,
+                env=child_environment(self.settings.home),
+                stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, start_new_session=True,
+            ))
+            try:
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                process = await spawn
+                raise
+            overflow = asyncio.Event()
+            readers = [asyncio.create_task(read_bounded(stream, 65536, overflow))
+                       for stream in (process.stdout, process.stderr)]
+            captures_future = asyncio.gather(*readers)
+            captures = await asyncio.wait_for(captures_future, timeout=15)
+            await asyncio.wait_for(process.wait(), timeout=2)
+            if process.returncode != 0 or overflow.is_set():
+                raise ValueError("CLI model discovery failed")
+            models = []
+            for line in captures[0].data.decode("utf-8", errors="strict").splitlines():
+                columns = line.strip().split()
+                if columns and MODEL_RE.fullmatch(columns[0]) and "-" in columns[0]:
+                    models.append(columns[0])
+            models = list(dict.fromkeys(models))
+            if not models or len(models) > 128:
+                raise ValueError("CLI returned no bounded model catalog")
+            return tuple(models)
+        finally:
+            if process is not None:
+                if not await cleanup_group(process, grace=self.terminate_grace):
+                    self.blocked = True
+                for reader in readers:
+                    if not reader.done():
+                        reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+                if captures_future is not None:
+                    await asyncio.gather(captures_future, return_exceptions=True)
+                if self.blocked:
+                    raise RuntimeError("Model discovery cleanup failed")
 
     async def run(self, prompt: str, cancel: asyncio.Event,
                   model: str | None = None, conversation_id: str | None = None,
