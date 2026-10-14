@@ -93,7 +93,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 | --- | --- |
 | `/start` | 查看欢迎页和快速开始说明 |
 | `/model` | 点击选择模型，再选择思考强度 |
-| `/model refresh` | 重新检查官方模型是否可用 |
+| `/model refresh` | 读取服务器 CLI 模型目录，检测账号可用性并更新菜单 |
 | `/mode` | 选择执行模式 |
 | `/new` 或 `/reset` | 清空当前对话记忆，开始新会话 |
 | `/status` | 查看机器人和当前任务状态 |
@@ -110,7 +110,11 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 选择 Gemini 系列后，再点击思考强度才会切换：Flash 提供极速、均衡、深度，Pro 提供极速和深度。点击“返回模型”或“关闭”不会更改当前设置。Claude 与 GPT-OSS 使用内置思考配置，点击后直接生效。
 
-Claude 菜单使用 agy 1.2.16 实际识别的 Sonnet 4.6 与 Opus 4.6（Thinking）；`/model sonnet` 与 `/model opus` 选择对应模型。此前错误发布的 5.5 模型标识、按钮及已保存偏好会按对应系列恢复到 4.6，菜单和结果均显示实际调用名称。原有 4.6 配置、权限和历史记录保留。上游网页出现新模型不代表当前 CLI 和账号已可调用，应以服务器 `agy models` 为准。
+菜单加入 Gemini 4 Argon（均衡、深度）和 Claude Sonnet/Opus 5.5（极速、均衡、深度、最高）。这些选项通过完整模型标识调用，不叠加另一份 `--effort` 参数。`/model argon`、`/model sonnet-5.5`、`/model opus-5.5` 可快捷选择；原有 `/model sonnet`、`/model opus` 和 4.6 偏好保持不变。旧版 5.5 标识解析为对应 5.5 的均衡档，不再转回 4.6。
+
+发送 `/model refresh` 会先读取服务器 `agy models`，再逐项发出固定回复检测；成功后保存检测结果，菜单隐藏检测失败或 CLI 已不提供的选项，并加入新发现的模型。目录读取失败时保留上次结果。首次检测前菜单是候选目录，不代表账号已能调用；刷新会消耗模型额度。检测不改用户选定模型、配置、权限或历史，也不重跑原任务。
+
+截至 2026-10-14，[官方模型列表](https://antigravity.google/docs/models/)说明：Argon 限 Ultra/Enterprise；Claude 5.5 支持非试用 Pro、Ultra/Enterprise；Gemini 3.7/3.6 Flash 和 3.1 Pro 列为 Enterprise 选项。Claude 4.6 和 GPT-OSS 标注于 2026-11-02 移除，当前仍保留兼容入口。实际目录、套餐权限、地区和调用能力均需在目标服务器确认。
 
 若收到 `User location is not supported for the API use`，表示 Google 拒绝了当前地区的调用，需检查服务器出口及 Google 账号所属地区；修改模型名称、刷新模型或重新授权不能保证解决。参见 [官方地区支持说明](https://antigravity.google/docs/faq/)。程序会提示地区限制，不自动重跑原任务。
 

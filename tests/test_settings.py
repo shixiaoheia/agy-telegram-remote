@@ -53,8 +53,8 @@ class ConfigurationTests(unittest.TestCase):
         self.assertTrue(Settings.from_mapping(config_values()).skip_permissions)
 
     def test_invalid_release_config_recovers_without_changing_permissions(self):
-        for old, new in (("claude-sonnet-5-5", "claude-sonnet-4-6"),
-                         ("claude-opus-5-5-thinking", "claude-opus-4-6-thinking")):
+        for old, new in (("claude-sonnet-5-5", "claude-sonnet-5-5-medium"),
+                         ("claude-opus-5-5-thinking", "claude-opus-5-5-medium")):
             with self.subTest(model=old):
                 values = config_values() | {"AGY_MODEL": old, "AGY_SKIP_PERMISSIONS": "false"}
                 upgraded = merged_config(values, "", "", "/root")
