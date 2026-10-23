@@ -35,6 +35,7 @@ COMMITTED=0
 SWITCHED=0
 CONFIG_CHANGED=0
 UNIT_CHANGED=0
+COMMIT_CHANGED=0
 OLD_ACTIVE=0
 OLD_ENABLED=0
 OLD_TARGET=
@@ -181,6 +182,13 @@ as_user() {
 rollback() {
   echo '部署未通过验证，正在恢复旧配置、旧服务和旧程序入口……' >&2
   systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+  if [[ "$COMMIT_CHANGED" == 1 ]]; then
+    if [[ -f "$BACKUP/current_commit" ]]; then
+      cp -p -- "$BACKUP/current_commit" "$CONFIG_DIR/current_commit"
+    else
+      rm -f -- "$CONFIG_DIR/current_commit"
+    fi
+  fi
   if [[ "$SWITCHED" == 1 ]]; then
     [[ ! -L "$APP" ]] || rm -f -- "$APP"
     if [[ -n "$LEGACY" && -d "$LEGACY" && ! -e "$APP" ]]; then
@@ -213,6 +221,22 @@ rollback() {
     systemctl restart "$SERVICE" || echo '旧服务恢复启动失败，请人工检查。' >&2
   fi
   echo '已尝试回退；依赖安装、Google 登录及已经发生的任务修改不会被撤销。' >&2
+}
+
+write_commit_record() {
+  local commit="$1" marker="$CONFIG_DIR/current_commit" temporary
+  [[ ! -L "$marker" && ( ! -e "$marker" || -f "$marker" ) ]] \
+    || fail '版本记录文件类型异常。'
+  temporary="$(mktemp "$CONFIG_DIR/.current-commit-XXXXXXXX")" || return 1
+  if ! printf '%s\n' "$commit" > "$temporary" || ! chmod 0600 "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  COMMIT_CHANGED=1
+  if ! mv -f -- "$temporary" "$marker"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
 }
 
 on_exit() {
@@ -364,6 +388,8 @@ main() {
   root_dir "$CONFIG_DIR" 0700 root
 
   [[ ! -L "$CONFIG" && ! -L "$UNIT" ]] || fail '配置或服务文件是符号链接。'
+  [[ ! -L "$CONFIG_DIR/current_commit" && ( ! -e "$CONFIG_DIR/current_commit" || -f "$CONFIG_DIR/current_commit" ) ]] \
+    || fail '版本记录文件类型异常。'
   if [[ -L "$APP" ]]; then
     OLD_TARGET="$(readlink -f -- "$APP")"
     [[ "$OLD_TARGET" == "$RELEASES/"* && -d "$OLD_TARGET" ]] || fail '程序入口指向未知位置。'
@@ -426,6 +452,7 @@ main() {
   BACKUP="$(mktemp -d "$BACKUPS/deploy-XXXXXXXX")"
   [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/config.env"
   [[ ! -f "$UNIT" ]] || cp -p -- "$UNIT" "$BACKUP/service"
+  [[ ! -f "$CONFIG_DIR/current_commit" ]] || cp -p -- "$CONFIG_DIR/current_commit" "$BACKUP/current_commit"
   OLD_ACTIVE=0
   OLD_ENABLED=0
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
@@ -538,7 +565,7 @@ _ONBOARDING_EOF
   mv -- "$STAGE" "$release"
   STAGE=
   echo "$commit" > "$release/.commit"
-  echo "$commit" > "$CONFIG_DIR/current_commit" 2>/dev/null || true
+  write_commit_record "$commit"
   SWITCHED=1
   if [[ -d "$APP" && ! -L "$APP" ]]; then
     LEGACY="$BACKUP/legacy-app"
@@ -593,3 +620,4 @@ _ONBOARDING_EOF
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   main "$@"
 fi
+
