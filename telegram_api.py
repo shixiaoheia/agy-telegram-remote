@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from http.client import HTTPException
 import socket
+import threading
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -83,7 +84,8 @@ class TelegramAPI:
         request_timeout = max(6.0, float(timeout) + 3.0)
         return await asyncio.to_thread(self._request, "getUpdates", payload, request_timeout)
 
-    def _download_file(self, file_path: str, destination: Path, maximum: int) -> int:
+    def _download_file(self, file_path: str, destination: Path, maximum: int,
+                       cancel: threading.Event | None = None) -> int:
         """Download a Telegram file into a new private regular file, bounded in bytes."""
         if (not isinstance(file_path, str) or not re.fullmatch(r"[A-Za-z0-9._/-]{1,512}", file_path)
                 or file_path.startswith("/") or ".." in file_path.split("/")):
@@ -91,8 +93,12 @@ class TelegramAPI:
         if maximum < 1 or destination.parent.is_symlink() or destination.exists():
             raise TelegramError()
         try:
+            if cancel is not None and cancel.is_set():
+                raise TelegramError()
             request = Request(self._file_endpoint + file_path, method="GET")
             with urlopen(request, timeout=self.request_timeout) as response:
+                if cancel is not None and cancel.is_set():
+                    raise TelegramError()
                 length = response.headers.get("Content-Length")
                 if length is not None and (not length.isdigit() or int(length) > maximum):
                     raise TelegramError(413)
@@ -101,7 +107,11 @@ class TelegramAPI:
                     total = 0
                     with os.fdopen(fd, "wb") as output:
                         while True:
+                            if cancel is not None and cancel.is_set():
+                                raise TelegramError()
                             chunk = response.read(min(65536, maximum + 1 - total))
+                            if cancel is not None and cancel.is_set():
+                                raise TelegramError()
                             if not chunk:
                                 break
                             total += len(chunk)
@@ -121,8 +131,31 @@ class TelegramAPI:
         except (URLError, OSError, socket.timeout, ValueError, HTTPException, RecursionError):
             raise TelegramError() from None
 
-    async def download_file(self, file_path: str, destination: Path, maximum: int) -> int:
-        return await asyncio.to_thread(self._download_file, file_path, destination, maximum)
+    async def download_file(self, file_path: str, destination: Path, maximum: int,
+                            *, cancel: asyncio.Event | None = None) -> int:
+        # A cancelled to_thread await does not stop its thread. Signal it and drain
+        # it before the caller releases the job directory or workspace slot.
+        stopped = threading.Event()
+        if cancel is not None and cancel.is_set():
+            stopped.set()
+        worker = asyncio.create_task(asyncio.to_thread(
+            self._download_file, file_path, destination, maximum, stopped,
+        ))
+        watcher = asyncio.create_task(cancel.wait()) if cancel is not None else None
+        try:
+            if watcher is not None:
+                done, _ = await asyncio.wait((worker, watcher), return_when=asyncio.FIRST_COMPLETED)
+                if watcher in done:
+                    stopped.set()
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            stopped.set()
+            await asyncio.gather(worker, return_exceptions=True)
+            raise
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
 
     async def send(self, chat_id: int, text: str, reply_markup: dict | None = None,
                    parse_mode: str | None = None) -> object:
@@ -188,3 +221,4 @@ def chunks_utf16(text: str, units: int = 3500) -> list[str]:
     if current:
         chunks.append("".join(current))
     return chunks
+

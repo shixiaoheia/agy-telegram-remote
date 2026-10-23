@@ -21,8 +21,10 @@ jobs:
       - name: Install shell checker
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Verify source and offline tests
+        timeout-minutes: 3
         run: bash scripts/verify.sh
       - name: Verify with installer umask
+        timeout-minutes: 3
         run: |
           umask 077
           bash scripts/verify.sh
@@ -43,3 +45,4 @@ jobs:
         env:
           AGY_TEST_ISOLATED_CONTAINER: "1"
         run: bash scripts/test_account_debian12.sh --confirm-isolated-environment
+

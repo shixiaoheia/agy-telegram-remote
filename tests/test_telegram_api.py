@@ -192,6 +192,47 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.call_args.args[0], "getUpdates")
         self.assertEqual(request.call_args.args[2], 13.0)
 
+    async def test_cancelled_download_drains_thread_before_cleanup(self):
+        reading, release = threading.Event(), threading.Event()
+
+        class Response:
+            headers = {}
+            reads = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self, _size):
+                self.reads += 1
+                if self.reads == 1:
+                    return b"partial"
+                reading.set()
+                if not release.wait(2):
+                    raise RuntimeError("test download was not released")
+                return b"tail"
+
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / "input.txt"
+            cancel = asyncio.Event()
+            with patch("telegram_api.urlopen", return_value=Response()):
+                task = asyncio.create_task(self.api.download_file(
+                    "documents/input.txt", target, 20, cancel=cancel,
+                ))
+                try:
+                    self.assertTrue(await asyncio.to_thread(reading.wait, 1))
+                    cancel.set()
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    self.assertFalse(task.done())
+                finally:
+                    release.set()
+                with self.assertRaises(TelegramError):
+                    await asyncio.wait_for(task, 1)
+            self.assertFalse(target.exists())
+
     async def test_download_file_is_bounded_and_private(self):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / "input.txt"
@@ -214,3 +255,4 @@ class ChunkTests(unittest.TestCase):
 
     def test_empty_text(self):
         self.assertEqual(chunks_utf16(""), [])
+

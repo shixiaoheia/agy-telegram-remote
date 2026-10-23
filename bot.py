@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from agy_runner import Result, Runner
-from settings import ConfigError, MODEL_RE, OFFICIAL_MODELS, resolve_model, Settings
+from settings import ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model, resolve_model, Settings
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 
@@ -60,6 +60,7 @@ MAX_ALBUM_BYTES = 30 * 1024 * 1024
 ALBUM_SETTLE_SECONDS = 1.5
 SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
 TYPING_HEARTBEAT_SECONDS = 4
+PROGRESS_UPDATE_SECONDS = 5
 CAPACITY_FALLBACKS = {
     "gemini-3.8-flash-low": "gemini-3.8-flash-high",
     "gemini-3.8-flash-medium": "gemini-3.8-flash-high",
@@ -652,6 +653,8 @@ class Bridge:
             return {"checked_at": 0.0, "models": {}}
 
     def _model_is_known_unavailable(self, model: str) -> bool:
+        if is_retired_model(model):
+            return True
         result = self._model_health().get("models", {}).get(model)
         return (isinstance(result, dict) and result.get("outcome") != "success"
                 and result.get("category") in {"model", "entitlement"})
@@ -659,7 +662,8 @@ class Bridge:
     async def _refresh_model_health(self, chat_id: int) -> None:
         results: dict[str, dict] = {}
         try:
-            models = await self.runner.list_models()
+            models = tuple(model for model in await self.runner.list_models()
+                           if not is_retired_model(model))
             results = {model: {"outcome": "error", "category": "model"}
                        for model in OFFICIAL_MODEL_IDS if model not in models}
             for model in models:
@@ -895,11 +899,15 @@ class Bridge:
             )
             self.store.save_history(job.user, job.history_title, record)
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
+            if job.progress_task:
+                job.progress_task.cancel()
+                await asyncio.gather(job.progress_task, return_exceptions=True)
             await self._finish_progress(job, result.outcome)
             delivered = True if job.steered else await self.send_html(job.chat, describe_html(record))
-            self.store.save(job.user, record | {
+            final_record = self.store.save(job.user, record | {
                 "delivery": "superseded_by_steer" if job.steered else ("sent" if delivered else "failed_or_partial")
             })
+            self.store.save_history(job.user, job.history_title, final_record)
         except asyncio.CancelledError:
             job.cancel.set()
             # Runner normally consumes cancellation only after cleaning its group.
@@ -983,15 +991,33 @@ class Bridge:
                 f"需要停止时可点下方按钮。")
 
     async def _refresh_progress(self, job: Job) -> None:
+        delay = PROGRESS_UPDATE_SECONDS
         while not self.stop.is_set() and not job.cancel.is_set():
-            await asyncio.sleep(5)
+            await asyncio.sleep(delay)
+            if self.stop.is_set() or job.cancel.is_set():
+                return
             if job.status_message_id is None or self.slot is not job:
                 continue
             try:
-                await self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
+                edit = asyncio.create_task(self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
                     "inline_keyboard": [[{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}]]
-                })
-            except (TelegramError, AttributeError):
+                }))
+                try:
+                    await asyncio.shield(edit)
+                except asyncio.CancelledError:
+                    # A thread-backed HTTP request must finish before the final
+                    # card edit, otherwise an old request can overwrite completion.
+                    await asyncio.gather(edit, return_exceptions=True)
+                    raise
+                delay = PROGRESS_UPDATE_SECONDS
+            except TelegramError as error:
+                if error.code == 429:
+                    delay = max(PROGRESS_UPDATE_SECONDS, error.retry_after)
+                elif error.code == 0 or 500 <= error.code < 600:
+                    delay = min(30, delay * 2)
+                else:
+                    return
+            except AttributeError:
                 return
 
     async def _finish_progress(self, job: Job, outcome: str) -> None:
@@ -1076,7 +1102,11 @@ class Bridge:
             server_size = info.get("file_size", size)
             if type(server_size) is not int or not 0 < server_size <= MAX_ATTACHMENT_BYTES:
                 raise ValueError("oversized file")
-            downloaded = await self.api.download_file(info["file_path"], destination, MAX_ATTACHMENT_BYTES)
+            if job.cancel.is_set() or self.stop.is_set():
+                raise ValueError("attachment cancelled")
+            downloaded = await self.api.download_file(
+                info["file_path"], destination, MAX_ATTACHMENT_BYTES, cancel=job.cancel,
+            )
             if not isinstance(downloaded, int) or not 0 < downloaded <= MAX_ATTACHMENT_BYTES:
                 raise ValueError("invalid downloaded file")
         except (TelegramError, OSError, ValueError, AttributeError):
@@ -1098,6 +1128,8 @@ class Bridge:
         if job.attachment_dir is not None:
             try:
                 job.attachment_dir.rmdir()
+            except FileNotFoundError:
+                pass
             except OSError:
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
@@ -1106,12 +1138,7 @@ class Bridge:
         *((f"Claude {family.title()} 5.5", tuple(f"claude-{family}-5-5-{level}"
            for level in ("medium", "low", "high", "max"))) for family in ("sonnet", "opus")),
         ("Gemini 3.8 Flash", ("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low")),
-        ("Gemini 3.7 Flash", ("gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low")),
         ("Gemini 3.1 Pro", ("gemini-3.1-pro-high", "gemini-3.1-pro-low")),
-        ("Gemini 3.6 Flash", ("gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low")),
-        ("Claude Sonnet 4.6", ("claude-sonnet-4-6",)),
-        ("Claude Opus 4.6", ("claude-opus-4-6-thinking",)),
-        ("GPT-OSS 120B", ("gpt-oss-120b-medium",)),
     )
 
     def _model_choices(self):
@@ -1120,7 +1147,8 @@ class Bridge:
         known = {model for _, variants in choices for model in variants}
         groups: dict[str, list[str]] = {}
         for model, result in self._model_health().get("models", {}).items():
-            if model in known or len(model) > 57 or result.get("category") in {"model", "entitlement"}:
+            if (is_retired_model(model) or model in known or len(model) > 57
+                    or result.get("category") in {"model", "entitlement"}):
                 continue
             match = CATALOG_VARIANT_RE.fullmatch(model)
             group = match.group(1) if match else model
@@ -1139,6 +1167,8 @@ class Bridge:
         return frozenset(model for _, variants in self._model_choices() for model in variants)
 
     def _model_label(self, model: str) -> str:
+        if is_retired_model(model):
+            return f"{model}（已移除，请重新选择）"
         for label, variants in self._model_choices():
             if model in variants:
                 effort = selected_variant_effort(model)
@@ -1260,7 +1290,7 @@ class Bridge:
             target = data.split(":", 1)[1].strip()
             reset = target.lower() in {"default", "reset", "auto", "clear"} and not choosing
             resolved = resolve_model(target)
-            if not reset and (not MODEL_RE.fullmatch(resolved) or
+            if not reset and (is_retired_model(resolved) or not MODEL_RE.fullmatch(resolved) or
                               (choosing and resolved not in OFFICIAL_MODEL_IDS)):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     await self.api.answer_callback_query(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
@@ -1300,6 +1330,9 @@ class Bridge:
         if data.startswith("effort:"):
             target = data[7:].strip().lower()
             model = self.store.get_model(user) or self.settings.model or ""
+            if is_retired_model(model):
+                await self.api.answer_callback_query(cq_id, text="该模型已移除，请重新打开 /model", show_alert=True)
+                return
             if target in {"low", "medium", "high", "max"}:
                 variant = variant_model_for_effort(model, target, self._variant_ids())
                 if variant is not None:
@@ -1645,6 +1678,9 @@ class Bridge:
                 self.queue_reply(chat_id, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model <模型名或别名>")
                 return
             resolved = resolve_model(target)
+            if is_retired_model(resolved):
+                self.queue_reply(chat_id, "该模型已从项目移除，请发送 /model 选择其他模型。")
+                return
             if not MODEL_RE.fullmatch(resolved):
                 self.queue_reply(
                     chat_id,
@@ -1888,6 +1924,9 @@ class Bridge:
             return
 
         user_model = self.store.get_model(user) or self.settings.model or ""
+        if is_retired_model(user_model):
+            self.queue_reply(chat_id, "当前保存的模型已移除，请先发送 /model 重新选择；本次没有启动任务。")
+            return
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
         effort = self.store.get_effort(user) or ""
@@ -1903,12 +1942,31 @@ class Bridge:
         self.slot = job  # reserve before first await
         try:
             self.store.maintain()
+            self.store.save(user, {
+                "job_id": job.job_id, "outcome": "running", "delivery": "pending",
+                "detail": "任务准备或执行中；服务中断时不会自动重试。",
+                "model": job.model, "effort": job.effort, "mode": job.mode,
+            })
+            job.worker = asyncio.create_task(self._prepare_and_work(job, text, items))
+        except Exception:
+            self.slot = None
+            self.runner.blocked = True
+            LOG.error("job_prepare_failed id=%s", job.job_id)
+            self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+
+    async def _prepare_and_work(self, job: Job, text: str, items: list[tuple[dict, bool]]) -> None:
+        """Download outside polling; retain the slot until all writes and cleanup finish."""
+        chat_id = job.chat
+        accepted = False
+        try:
             prompt = text
             if items:
                 try:
                     received = []
                     total_bytes = 0
                     for item, photo in items:
+                        if job.cancel.is_set() or self.stop.is_set():
+                            raise ValueError("attachment cancelled")
                         path, display_name = await self._receive_attachment(job, item, photo)
                         received.append((path, display_name))
                         total_bytes += path.stat().st_size
@@ -1916,11 +1974,8 @@ class Bridge:
                             raise ValueError("album too large")
                 except (ValueError, OSError):
                     self._cleanup_attachments(job)
-                    self.slot = None
-                    self.queue_reply(
-                        chat_id,
-                        "⚠️ 附件未接收：仅支持截图或常见的文本、日志、代码文件，单文件最大 10MB；本组没有启动任务。"
-                    )
+                    self.queue_reply(chat_id, "🛑 已取消附件接收，没有启动任务。" if job.cancel.is_set() else
+                                     "⚠️ 附件未接收：仅支持截图或常见的文本、日志、代码文件，单文件最大 10MB；本组没有启动任务。")
                     return
                 instruction = text or "请读取并分析该附件，说明发现的问题和建议。"
                 paths = "\n".join(f"- {name}: {path}" for path, name in received)
@@ -1930,23 +1985,38 @@ class Bridge:
                     job.attachment_feedback = f"📎 已收到 {len(received)} 个附件：{names}。本次任务会读取它们。"
             if len(prompt) > self.settings.max_prompt or "\x00" in prompt:
                 self._cleanup_attachments(job)
-                self.slot = None
                 self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
                 return
-            self.store.save(user, {
-                "job_id": job.job_id, "outcome": "running", "delivery": "pending",
-                "detail": "任务准备或执行中；服务中断时不会自动重试。",
-                "model": job.model,
-                "effort": job.effort,
-                "mode": job.mode,
-            })
-            job.worker = asyncio.create_task(self._accept_and_work(job, prompt))
-        except Exception:
-            self._cleanup_attachments(job)
-            self.slot = None
+            if job.cancel.is_set() or self.stop.is_set():
+                self.queue_reply(chat_id, "🛑 已取消附件接收，没有启动任务。")
+                return
+            accepted = True
+            await self._accept_and_work(job, prompt)
+        except asyncio.CancelledError:
+            job.cancel.set()
+            raise
+        except Exception as error:
             self.runner.blocked = True
-            LOG.error("job_prepare_failed id=%s", job.job_id)
+            LOG.error("job_prepare_failed id=%s type=%s", job.job_id, type(error).__name__)
             self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+        finally:
+            self._cleanup_attachments(job)
+            if not accepted:
+                try:
+                    record = self.store.save(job.user, {
+                        "job_id": job.job_id, "outcome": "cancelled" if job.cancel.is_set() else "not_started",
+                        "detail": "附件或任务准备未完成，没有启动 agy。",
+                        "delivery": "unknown", "model": job.model, "effort": job.effort, "mode": job.mode,
+                    })
+                    self.store.save_history(job.user, job.history_title, record)
+                    if job.reset_after:
+                        self.store.reset_conversation(job.user)
+                except (OSError, ValueError):
+                    self.runner.blocked = True
+                    LOG.error("job_prepare_record_failed id=%s", job.job_id)
+                    self.queue_reply(chat_id, "任务准备记录保存失败，已暂停新任务；请检查服务器。")
+            if self.slot is job:
+                self.slot = None
 
     async def consume_updates(self, updates: object) -> None:
         if not isinstance(updates, list):
@@ -2134,3 +2204,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
