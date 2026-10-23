@@ -107,6 +107,9 @@ class Store:
             record["title"] = self.redact(" ".join(str(record["title"]).split()))[:160]
         if "metadata_warning" in record:
             record["metadata_warning"] = self.redact(str(record["metadata_warning"]))[:500]
+        for key, limit in (("attachment_summary", 400), ("execution_summary", 1200)):
+            if key in record:
+                record[key] = self.redact(str(record[key]))[:limit]
         for key in ("text", "detail"):
             text = self.redact(str(record.get(key, "")))
             if len(text) > self.max_reply:
@@ -121,7 +124,7 @@ class Store:
             "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",
             "conversation_id", "num_turns",
             "session_tokens", "session_token_reminder", "model_fallback_from",
-            "title", "metadata_warning",
+            "title", "metadata_warning", "attachment_summary", "execution_summary",
         ) if key in record}
         atomic_json(self._path(user), record)
         return record

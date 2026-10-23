@@ -178,7 +178,7 @@ class TelegramAPI:
                 await asyncio.sleep(error.retry_after)
 
     async def edit(self, chat_id: int, message_id: int, text: str,
-                   reply_markup: dict | None = None) -> object:
+                   reply_markup: dict | None = None, parse_mode: str | None = None) -> object:
         payload: dict[str, object] = {
             "chat_id": chat_id,
             "message_id": message_id,
@@ -187,6 +187,8 @@ class TelegramAPI:
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
+        if parse_mode is not None:
+            payload["parse_mode"] = parse_mode
         return await self.call("editMessageText", **payload)
 
     async def set_commands(self, commands: list[dict[str, str]]) -> object:
