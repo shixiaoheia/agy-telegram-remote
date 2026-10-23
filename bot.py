@@ -1983,6 +1983,9 @@ class Bridge:
                 return
             accepted = True
             await self._accept_and_work(job, prompt)
+        except asyncio.CancelledError:
+            job.cancel.set()
+            raise
         except Exception as error:
             self.runner.blocked = True
             LOG.error("job_prepare_failed id=%s type=%s", job.job_id, type(error).__name__)
@@ -1990,14 +1993,19 @@ class Bridge:
         finally:
             self._cleanup_attachments(job)
             if not accepted:
-                record = self.store.save(job.user, {
-                    "job_id": job.job_id, "outcome": "cancelled" if job.cancel.is_set() else "not_started",
-                    "detail": "附件或任务准备未完成，没有启动 agy。",
-                    "delivery": "unknown", "model": job.model, "effort": job.effort, "mode": job.mode,
-                })
-                self.store.save_history(job.user, job.history_title, record)
-                if job.reset_after:
-                    self.store.reset_conversation(job.user)
+                try:
+                    record = self.store.save(job.user, {
+                        "job_id": job.job_id, "outcome": "cancelled" if job.cancel.is_set() else "not_started",
+                        "detail": "附件或任务准备未完成，没有启动 agy。",
+                        "delivery": "unknown", "model": job.model, "effort": job.effort, "mode": job.mode,
+                    })
+                    self.store.save_history(job.user, job.history_title, record)
+                    if job.reset_after:
+                        self.store.reset_conversation(job.user)
+                except (OSError, ValueError):
+                    self.runner.blocked = True
+                    LOG.error("job_prepare_record_failed id=%s", job.job_id)
+                    self.queue_reply(chat_id, "任务准备记录保存失败，已暂停新任务；请检查服务器。")
             if self.slot is job:
                 self.slot = None
 

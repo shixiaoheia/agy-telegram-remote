@@ -573,7 +573,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_model_command_switch_and_reset(self):
         await self.handle(update("/model claude-sonnet-5-5-medium"))
-        self.assertIn("claude-sonnet-5-5-medium", self.api.messages[-1][1])
+        self.assertIn("Claude Sonnet 5.5", self.api.messages[-1][1])
         self.assertIsNotNone(self.api.messages[-1][2])
         self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5-medium")
         self.assertIsNone(self.store.get_effort(12345))
@@ -593,7 +593,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
 
         await self.handle(update("/model opus"))
-        self.assertIn("claude-opus-5-5-medium", self.api.messages[-1][1])
+        self.assertIn("Claude Opus 5.5", self.api.messages[-1][1])
         self.assertEqual(self.store.get_model(12345), "claude-opus-5-5-medium")
 
         await self.handle(update("/model pro"))

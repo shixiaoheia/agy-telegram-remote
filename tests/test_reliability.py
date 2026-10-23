@@ -106,10 +106,6 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         job = Job(12345, 12345, status_message_id=1)
         self.bridge.slot = job
 
-        async def recovered(*args):
-            job.cancel.set()
-
-        self.api.edit = AsyncMock(side_effect=[TelegramError(), TelegramError(503), None])
         # End only after the recovered edit, without introducing real timer waits.
         calls = 0
 
@@ -118,7 +114,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             calls += 1
             if calls < 3:
                 raise TelegramError(0 if calls == 1 else 503)
-            await recovered()
+            job.cancel.set()
 
         self.api.edit = AsyncMock(side_effect=edit)
         with patch("bot.asyncio.sleep", new_callable=AsyncMock) as sleep:
