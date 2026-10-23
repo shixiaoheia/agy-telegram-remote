@@ -1,5 +1,6 @@
 """Regressions for control responsiveness, progress recovery and stored results."""
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ try:
 except ImportError:
     from common import settings_at
     from test_bot import FakeAPI, FakeRunner, attachment_update, callback_update, update
-from bot import Bridge, Job
+from bot import Bridge, Job, deployment_version
 from agy_runner import Result
 from settings import OFFICIAL_MODELS, is_retired_model, resolve_model
 from state_store import Store
@@ -46,6 +47,63 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.reply_worker
         self.store.close()
         self.temp.cleanup()
+
+    async def test_corrupt_history_button_preserves_file_and_later_updates(self):
+        path = self.settings.state_dir / "history-12345.json"
+        damaged = b'{"items": broken'
+        path.write_bytes(damaged)
+        await self.bridge.consume_updates([
+            callback_update("history:" + "a" * 12), update("/status", update_id=2),
+        ])
+        await self.bridge.reply_worker
+        self.assertEqual(path.read_bytes(), damaged)
+        self.assertEqual(self.bridge.offset, 3)
+        self.assertEqual(self.runner.calls, 0)
+        self.assertTrue(any("无法读取任务历史" in text for _, text, _ in self.api.messages))
+        self.assertTrue(any("部署版本" in text for _, text, _ in self.api.messages))
+        self.assertTrue(self.api.answered_callbacks)
+
+    async def test_history_button_permission_error_is_not_exposed(self):
+        with patch.object(self.store, "history_item", side_effect=PermissionError("PRIVATE_PATH")):
+            await self.bridge.handle(callback_update("history:" + "a" * 12))
+        await self.bridge.reply_worker
+        self.assertIn("原记录已保留", self.api.messages[-1][1])
+        self.assertNotIn("PRIVATE_PATH", self.api.messages[-1][1])
+        self.assertEqual(self.runner.calls, 0)
+
+    async def test_deployment_version_accepts_only_full_commit_marker(self):
+        directory = Path(self.temp.name)
+        marker = directory / ".commit"
+        marker.write_text("A" * 40 + "\n", encoding="ascii")
+        self.assertEqual(deployment_version(directory), "a" * 12)
+        for content in ("short", "x" * 40, "a" * 43, "凭据", "a" * 40 + "\nSECRET"):
+            marker.write_text(content, encoding="utf-8")
+            self.assertIn("未知", deployment_version(directory))
+
+    async def test_deployment_version_missing_link_and_fifo_are_unknown(self):
+        directory = Path(self.temp.name)
+        marker = directory / ".commit"
+        self.assertIn("未知", deployment_version(directory))
+        target = directory / "external"
+        target.write_text("b" * 40, encoding="ascii")
+        marker.symlink_to(target)
+        self.assertIn("未知", deployment_version(directory))
+        marker.unlink()
+        os.mkfifo(marker)
+        self.assertIn("未知", deployment_version(directory))
+
+    async def test_status_uses_cached_running_version_and_start_time(self):
+        with patch("bot.deployment_version", return_value="123456789abc"):
+            bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        bridge._started_at = 1700000000
+        with patch("bot.deployment_version", side_effect=AssertionError("must not reread marker")):
+            await bridge.handle(update("/status"))
+        await bridge.reply_worker
+        text = self.api.messages[-1][1]
+        self.assertIn("部署版本：123456789abc", text)
+        self.assertIn("服务启动：", text)
+        self.assertIn("服务器时间", text)
+        self.assertEqual(self.runner.calls, 0)
 
     async def test_large_chinese_results_do_not_block_later_tasks(self):
         self.runner.result = Result("success", text="中" * 30000)
