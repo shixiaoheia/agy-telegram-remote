@@ -61,6 +61,55 @@ class StoreTests(unittest.TestCase):
         path = self.directory / "history-12345.json"
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_history_keeps_ten_full_unicode_results_and_delivery_updates(self):
+        self.store.max_reply = 30000
+        for index in range(12):
+            record = self.store.save(12345, {
+                "job_id": f"{index:012x}", "outcome": "success",
+                "text": "中" * 30000, "detail": ("😀" if index % 2 else "\x00") * 30000,
+                "delivery": "pending",
+            })
+            self.store.save_history(12345, "中文任务", record)
+            record = self.store.save(12345, record | {"delivery": "sent"})
+            self.store.save_history(12345, "中文任务", record)
+        history = self.store.history(12345)
+        self.assertEqual(len(history), 10)
+        self.assertEqual(history[0]["job_id"], f"{11:012x}")
+        self.assertEqual(history[-1]["job_id"], f"{2:012x}")
+        self.assertTrue(all(item["text"] == "中" * 30000 for item in history))
+        self.assertTrue(all(item["delivery"] == "sent" for item in history))
+        self.assertEqual(history[0]["detail"], "😀" * 30000)
+        self.assertEqual(history[-1]["detail"], "\x00" * 30000)
+        self.assertGreater((self.directory / "history-12345.json").stat().st_size,
+                           12 * self.store.max_reply + 65536)
+        self.assertEqual((self.directory / "history-12345.json").stat().st_mode & 0o777, 0o600)
+
+    def test_legacy_history_above_old_limit_is_readable_and_preserved(self):
+        self.store.max_reply = 30000
+        records = [{"user_id": 12345, "job_id": f"{i:012x}", "updated_at": time.time(),
+                    "text": "中" * 30000, "detail": "", "outcome": "success"} for i in range(5)]
+        path = self.directory / "history-12345.json"
+        atomic_json(path, {"user_id": 12345, "items": records})
+        self.assertGreater(path.stat().st_size, 12 * self.store.max_reply + 65536)
+        self.store.maintain()
+        self.assertEqual(len(self.store.history(12345)), 5)
+        new_record = self.store.save(12345, {"job_id": "f" * 12, "text": "new", "outcome": "success"})
+        self.store.save_history(12345, "new task", new_record)
+        self.assertEqual(len(self.store.history(12345)), 6)
+        self.assertEqual(self.store.history_item(12345, f"{0:012x}")["text"], records[0]["text"])
+
+    def test_oversized_history_write_is_rejected_without_replacing_saved_history(self):
+        record = self.store.save(12345, {"job_id": "a" * 12, "outcome": "success", "text": "saved"})
+        self.store.save_history(12345, "saved task", record)
+        path = self.directory / "history-12345.json"
+        before = path.read_bytes()
+        with self.assertRaises(ValueError):
+            self.store.save_history(12345, "invalid record", {
+                "job_id": "b" * 12, "text": "x" * (self.store._history_maximum() + 1),
+            })
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.store.history_item(12345, "a" * 12)["text"], "saved")
+
     def test_interrupted_record_not_reexecuted(self):
         self.store.save(12345, {"job_id": "job", "outcome": "running"})
         self.store.recover_interrupted()
@@ -193,3 +242,4 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(public.stat().st_mode & 0o777, 0o755)
         with self.assertRaises(PermissionError):
             Store(public, self.store.allowed, 1000, 7)
+

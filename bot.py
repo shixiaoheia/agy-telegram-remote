@@ -62,6 +62,7 @@ ALBUM_SETTLE_SECONDS = 1.5
 SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
 TYPING_HEARTBEAT_SECONDS = 4
 PROGRESS_UPDATE_SECONDS = 5
+RESTART_DELAY_SECONDS = 0.8
 CAPACITY_FALLBACKS = {
     "gemini-3.8-flash-low": "gemini-3.8-flash-high",
     "gemini-3.8-flash-medium": "gemini-3.8-flash-high",
@@ -646,6 +647,34 @@ class Bridge:
         self.model_check_task: asyncio.Task | None = None
         self.pending_album: dict | None = None
         self.album_task: asyncio.Task | None = None
+        self.restart_task: asyncio.Task | None = None
+        self.steer_tasks: set[asyncio.Task] = set()
+
+    def _restart_pending(self) -> bool:
+        return self.restart_task is not None and not self.restart_task.done()
+
+    def _restart_busy(self) -> bool:
+        return (self.slot is not None or self.pending_album is not None
+                or (self.album_task is not None and not self.album_task.done())
+                or (self.model_check_task is not None and not self.model_check_task.done())
+                or any(not task.done() for task in self.steer_tasks))
+
+    async def _do_restart(self) -> None:
+        try:
+            await asyncio.sleep(RESTART_DELAY_SECONDS)
+            if self.stop.is_set():
+                return
+            if self._restart_busy() or self.runner.blocked:
+                self.queue_reply(self.settings.owner_id, "⚠️ 任务或清理状态发生变化，已取消本次重启。请等待全部结束后重试。")
+                return
+            # No await between the final idle check and exec: new work cannot
+            # enter the event loop in this interval.
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as error:
+            LOG.error("restart_execv_failed type=%s", type(error).__name__)
+            self.queue_reply(self.settings.owner_id, "⚠️ 重新载入失败，请检查服务器后重试。")
+        finally:
+            self.restart_task = None
 
     def _model_health(self) -> dict:
         try:
@@ -693,6 +722,9 @@ class Bridge:
             self.model_check_task = None
 
     def _start_model_health_refresh(self, chat_id: int) -> None:
+        if self._restart_pending():
+            self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。")
+            return
         if self.slot is not None:
             self.queue_reply(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。")
             return
@@ -1518,6 +1550,9 @@ class Bridge:
             return
         if not self._is_allowed(user) or sender.get("is_bot") is True:
             return
+        if not command and self._restart_pending():
+            self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再发送任务或附件。")
+            return
         group_id = message.get("media_group_id")
         if (album_items is None and isinstance(group_id, str) and group_id
                 and (has_photo or has_document) and self.slot is None):
@@ -1698,6 +1733,8 @@ class Bridge:
             job.cancel.set()
             job.activity = "正在停止当前任务并应用你的修正"
             job.steer_task = asyncio.create_task(self._restart_with_correction(job, correction))
+            self.steer_tasks.add(job.steer_task)
+            job.steer_task.add_done_callback(self.steer_tasks.discard)
             self.queue_reply(chat_id, "⚡ 已收到修正：正在安全停止当前任务，清理完成后会自动按新要求重新执行。")
             return
         if command == "/history":
@@ -1756,22 +1793,21 @@ class Bridge:
             if user != admin_id:
                 self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。")
                 return
-            if self.slot is not None and not self.slot.cancel.is_set():
+            if self.runner.blocked:
+                self.queue_reply(chat_id, "⚠️ 服务存在未确认的清理或保存异常，请在服务器检查并重启服务。")
+                return
+            if self._restart_busy():
                 self.queue_reply(
                     chat_id,
-                    "⚠️ 当前有正在执行的任务，请等待其完成或先发送 /cancel 后再重启。"
+                    "⚠️ 当前有正在执行的任务或资源尚未清理完成（含附件接收、模型检测）。请等待全部结束后再重启。"
                 )
+                return
+            if self._restart_pending():
+                self.queue_reply(chat_id, "⏳ 重启已安排，请稍候，不需要重复发送。")
                 return
             self.queue_reply(chat_id, "🔄 守护进程正在重新载入并启动，请稍候约 3-5 秒后发送 /status 验证……")
 
-            async def _do_restart():
-                await asyncio.sleep(0.8)
-                try:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
-                except Exception as err:
-                    LOG.error("restart_execv_failed: %s", err)
-
-            asyncio.create_task(_do_restart())
+            self.restart_task = asyncio.create_task(self._do_restart())
             return
         if command == "/whitelist":
             admin_id = self.settings.owner_id
@@ -2194,6 +2230,10 @@ class Bridge:
                     backoff = min(30.0, backoff * 2)
         finally:
             self.stop.set()
+            if self.restart_task is not None:
+                self.restart_task.cancel()
+                await asyncio.gather(self.restart_task, return_exceptions=True)
+                self.restart_task = None
             self.pending_album = None
             if self.album_task is not None:
                 self.album_task.cancel()
