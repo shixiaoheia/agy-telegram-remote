@@ -306,6 +306,61 @@ rollback
             self.assertEqual((base / "config").read_text(), "old config")
             self.assertEqual((base / "unit").read_text(), "old unit")
 
+    def test_commit_record_and_rollback_preserve_previous_or_missing_version(self):
+        for has_previous in (True, False):
+            with self.subTest(previous=has_previous), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                (base / "etc").mkdir()
+                (base / "backup").mkdir()
+                marker = base / "etc/current_commit"
+                if has_previous:
+                    marker.write_text("a" * 40 + "\n")
+                    (base / "backup/current_commit").write_text("a" * 40 + "\n")
+                code = r'''
+source "$1"
+CONFIG_DIR="$2/etc"; APP="$2/app"; CONFIG="$2/config"; UNIT="$2/unit"; BACKUP="$2/backup"
+systemctl() { return 0; }
+write_commit_record bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+[[ "$COMMIT_CHANGED" == 1 && $(cat "$CONFIG_DIR/current_commit") == bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ]]
+[[ $(stat -c %a "$CONFIG_DIR/current_commit") == 600 ]]
+rollback
+'''
+                subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(base)],
+                               check=True, capture_output=True)
+                if has_previous:
+                    self.assertEqual(marker.read_text(), "a" * 40 + "\n")
+                else:
+                    self.assertFalse(marker.exists())
+                self.assertEqual(list((base / "etc").glob(".current-commit-*")), [])
+
+    def test_commit_record_replace_failure_is_not_ignored(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            marker = base / "current_commit"
+            marker.write_text("a" * 40 + "\n")
+            code = r'''
+source "$1"
+CONFIG_DIR="$2"
+mv() { return 9; }
+if write_commit_record bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then exit 7; fi
+'''
+            subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(base)],
+                           check=True, capture_output=True)
+            self.assertEqual(marker.read_text(), "a" * 40 + "\n")
+            self.assertEqual(list(base.glob(".current-commit-*")), [])
+
+    def test_commit_record_refuses_link_without_changing_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            target = base / "target"
+            target.write_text("do not change")
+            (base / "current_commit").symlink_to(target)
+            code = 'source "$1"; CONFIG_DIR="$2"; write_commit_record bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+            result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(base)],
+                                    capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(target.read_text(), "do not change")
+
     def test_rollback_restores_legacy_directory(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -728,3 +783,4 @@ sleep 30
                 rc = auth_login(mock_agy, Path(td), Path(td), timeout=5, exchange_timeout=0.3)
             self.assertEqual(rc, 1)
             self.assertIn("超时", buf_err.getvalue())
+

@@ -102,6 +102,10 @@ class Store:
         record = dict(value)
         record["user_id"] = user
         record["updated_at"] = time.time()
+        if "title" in record:
+            record["title"] = self.redact(" ".join(str(record["title"]).split()))[:160]
+        if "metadata_warning" in record:
+            record["metadata_warning"] = self.redact(str(record["metadata_warning"]))[:500]
         for key in ("text", "detail"):
             text = self.redact(str(record.get(key, "")))
             if len(text) > self.max_reply:
@@ -116,6 +120,7 @@ class Store:
             "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",
             "conversation_id", "num_turns",
             "session_tokens", "session_token_reminder", "model_fallback_from",
+            "title", "metadata_warning",
         ) if key in record}
         atomic_json(self._path(user), record)
         return record
@@ -495,7 +500,12 @@ class Store:
             if record and record.get("outcome") == "running":
                 record.update(outcome="interrupted", delivery="unknown",
                               detail="服务在上次任务期间中断；任务可能产生了修改，没有自动重跑。")
-                self.save(user, record)
+                record = self.save(user, record)
+            if record and record.get("outcome") == "interrupted":
+                existing = next((entry for entry in self.history(user)
+                                 if entry.get("job_id") == record.get("job_id")), None)
+                if existing is None or existing.get("outcome") == "running":
+                    self.save_history(user, record.get("title") or "服务中断的任务", record)
 
     def offset(self) -> int:
         try:

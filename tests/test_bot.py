@@ -516,11 +516,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         entered, release = asyncio.Event(), asyncio.Event()
         original = self.api.send
 
-        async def slow_send(chat, text):
+        async def slow_send(chat, text, **kwargs):
             if "任务执行中" in text:
                 entered.set()
                 await release.wait()
-            await original(chat, text)
+            return await original(chat, text, **kwargs)
 
         self.api.send = slow_send
         try:
