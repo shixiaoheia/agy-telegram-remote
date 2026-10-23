@@ -134,7 +134,8 @@ class FakeRunner:
         self.last_conversation_id = None
         self.last_prompt = None
 
-    async def run(self, prompt, cancel, model=None, conversation_id=None):
+    async def run(self, prompt, cancel, model=None, conversation_id=None,
+                  effort=None, mode=None, progress=None):
         self.last_prompt = prompt
         self.last_model = model
         self.last_conversation_id = conversation_id

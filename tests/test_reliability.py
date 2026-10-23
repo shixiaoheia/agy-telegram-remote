@@ -35,6 +35,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
 
     async def asyncTearDown(self):
+        if self.bridge.model_check_task is not None:
+            task = self.bridge.model_check_task
+            self.bridge._cancel_model_health()
+            await asyncio.gather(task, return_exceptions=True)
         if self.bridge.restart_task is not None:
             self.bridge.restart_task.cancel()
             await asyncio.gather(self.bridge.restart_task, return_exceptions=True)
@@ -47,6 +51,130 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.reply_worker
         self.store.close()
         self.temp.cleanup()
+
+    async def test_internal_runner_typeerror_is_never_retried(self):
+        self.runner.run = AsyncMock(side_effect=TypeError("internal failure after entry"))
+        with self.assertRaises(TypeError):
+            await self.bridge._run_task(Job(12345, 12345), "one execution only")
+        self.runner.run.assert_awaited_once()
+
+    async def test_worker_typeerror_blocks_without_replaying_side_effects(self):
+        effects = []
+        async def fail(*args, **kwargs):
+            effects.append("executed")
+            raise TypeError("private failure")
+        self.runner.run = fail
+        await self.bridge.handle(update("task"))
+        await self.bridge.slot.worker
+        self.assertEqual(effects, ["executed"])
+        self.assertTrue(self.runner.blocked)
+        await self.bridge.handle(update("another task"))
+        self.assertEqual(effects, ["executed"])
+
+    async def test_model_cancel_waits_for_cleanup_and_preserves_full_cache(self):
+        started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        self.runner.list_models = AsyncMock(return_value=("gemini-3.8-flash-high", "gemini-3.1-pro-high"))
+        self.store.set_model_health({"existing": {"outcome": "success"}})
+        before = self.store.get_model_health()
+        async def probe(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+        self.runner.run = AsyncMock(side_effect=probe)
+        await self.bridge.handle(update("/model refresh"))
+        task = self.bridge.model_check_task
+        await started.wait()
+        try:
+            await self.bridge.handle(update("/status"))
+            await self.bridge.reply_worker
+            self.assertIn("1/2：gemini-3.8-flash-high", self.api.messages[-1][1])
+            await self.bridge.handle(update("/cancel", user=67890))
+            self.assertFalse(self.bridge.model_check_cancelling)
+            await self.bridge.handle(update("/cancel"))
+            await cleaning.wait()
+            await self.bridge.handle(update("/cancel"))
+            await self.bridge.handle(update("new task"))
+            await self.bridge.handle(update("/restart"))
+            self.assertIsNone(self.bridge.slot)
+            self.assertIsNone(self.bridge.restart_task)
+            self.assertFalse(task.done())
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+        self.assertIsNone(self.bridge.model_check_task)
+        self.runner.run.assert_awaited_once()
+        self.assertEqual(self.store.get_model_health(), before)
+
+    async def test_cancel_model_discovery_before_any_probe(self):
+        entered, cleaned = asyncio.Event(), asyncio.Event()
+        async def discover():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+        self.runner.list_models = discover
+        await self.bridge.handle(update("/model refresh"))
+        task = self.bridge.model_check_task
+        await entered.wait()
+        await self.bridge.handle(update("/cancel"))
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(self.runner.calls, 0)
+        self.assertIsNone(self.bridge.model_check_task)
+
+    async def test_immediate_model_cancel_clears_reservation(self):
+        await self.bridge.handle(update("/model refresh"))
+        task = self.bridge.model_check_task
+        await self.bridge.handle(update("/cancel"))
+        await asyncio.gather(task, return_exceptions=True)
+        self.assertIsNone(self.bridge.model_check_task)
+        self.assertIsNone(self.bridge.model_check_user)
+        self.assertFalse(self.bridge.model_check_cancelling)
+        self.assertEqual(self.runner.calls, 0)
+
+    async def test_shutdown_awaits_already_cancelled_model_cleanup(self):
+        entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        async def discover():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release.wait()
+        self.runner.list_models = discover
+        await self.bridge.handle(update("/model refresh"))
+        check = self.bridge.model_check_task
+        await entered.wait()
+        await self.bridge.handle(update("/cancel"))
+        await cleaning.wait()
+        self.bridge.stop.set()
+        with patch.object(self.bridge, "initialize_with_retry", new=AsyncMock()):
+            shutdown = asyncio.create_task(self.bridge.run())
+            try:
+                await asyncio.sleep(0)
+                self.assertFalse(shutdown.done())
+                self.assertFalse(check.done())
+            finally:
+                release.set()
+                await shutdown
+        self.assertTrue(check.done())
+        self.assertIsNone(self.bridge.model_check_task)
+
+    async def test_shutdown_cancels_active_model_probe(self):
+        self.runner.hold = True
+        await self.bridge.handle(update("/model refresh"))
+        check = self.bridge.model_check_task
+        await self.runner.started.wait()
+        self.bridge.stop.set()
+        with patch.object(self.bridge, "initialize_with_retry", new=AsyncMock()):
+            await asyncio.wait_for(self.bridge.run(), 2)
+        self.assertTrue(check.done())
+        self.assertIsNone(self.bridge.model_check_task)
+        self.assertEqual(self.runner.calls, 1)
 
     async def test_corrupt_history_button_preserves_file_and_later_updates(self):
         path = self.settings.state_dir / "history-12345.json"
