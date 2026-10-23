@@ -58,6 +58,7 @@ class FakeAPI:
     def __init__(self):
         self.messages = []
         self.sent_messages = []
+        self.edits = []
         self.message_indices = {}
         self.sent_count = 0
         self.fail_at = set()
@@ -83,6 +84,7 @@ class FakeAPI:
         return {"message_id": self.sent_count}
 
     async def edit(self, chat_id, message_id, text, reply_markup=None):
+        self.edits.append((chat_id, text, reply_markup))
         if message_id in self.message_indices:
             self.messages[self.message_indices[message_id]] = (chat_id, text, reply_markup)
         else:
@@ -866,7 +868,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=old):
                 await self.handle(callback_update(f"model:{old}"))
-                self.assertIn(label, self.api.messages[-1][1])
+                self.assertIn(label, self.api.edits[-1][1])
                 await self.handle(callback_update(f"choose:{new}"))
                 self.assertEqual(self.store.get_model(12345), new)
                 self.assertIsNone(self.store.get_effort(12345))
@@ -907,7 +909,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("model:claude-sonnet-5-5-medium", buttons)
         self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5-medium")
         await self.handle(callback_update("model:gemini-4.1-flash-high"))
-        buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
+        buttons = [b["callback_data"] for row in self.api.edits[-1][2]["inline_keyboard"] for b in row]
         self.assertIn("choose:gemini-4.1-flash-low", buttons)
         self.assertNotIn("choose:gemini-4.1-flash-medium", buttons)
 
@@ -1315,7 +1317,7 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(callback_update("mode:accept-edits", user=12345))
         await self.bridge.reply_worker
         self.assertEqual(self.store.get_mode(12345), "accept-edits")
-        self.assertIn("落地编辑模式", self.api.messages[-1][1])
+        self.assertIn("落地编辑模式", self.api.edits[-1][1])
 
     async def test_whitelist_management(self):
         # Non-admin user (67890) tries to add user -> rejected
