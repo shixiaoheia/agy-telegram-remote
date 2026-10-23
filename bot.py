@@ -11,6 +11,7 @@ import re
 import signal
 import sys
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -908,6 +909,16 @@ class Bridge:
                 "delivery": "superseded_by_steer" if job.steered else ("sent" if delivered else "failed_or_partial")
             })
             self.store.save_history(job.user, job.history_title, final_record)
+            card_updated = True if job.steered else await self._finish_progress(
+                job, result.outcome, final_record["delivery"],
+            )
+            if not delivered and not card_updated:
+                await self.send_text(
+                    job.chat,
+                    f"{LABELS.get(result.outcome, '任务已结束')}\n"
+                    "⚠️ 结果发送失败或不完整，已保存。点击“查看结果”或发送 /last 取回，不会重新执行任务。",
+                    reply_markup=self._completion_buttons(job),
+                )
         except asyncio.CancelledError:
             job.cancel.set()
             # Runner normally consumes cancellation only after cleaning its group.
@@ -1020,19 +1031,32 @@ class Bridge:
             except AttributeError:
                 return
 
-    async def _finish_progress(self, job: Job, outcome: str) -> None:
+    def _completion_buttons(self, job: Job) -> dict:
+        return {"inline_keyboard": [
+            [{"text": "📖 查看结果", "callback_data": f"history:{job.job_id}"},
+             {"text": "📚 最近任务", "callback_data": "tasks:history"}],
+            [{"text": "🧠 新建对话", "callback_data": "tasks:new"}],
+        ]}
+
+    async def _finish_progress(self, job: Job, outcome: str, delivery: str = "pending") -> bool:
         if job.status_message_id is None:
-            return
+            return False
         try:
+            delivery_text = {
+                "pending": "结果已保存，正在尝试发送；也可点击下方按钮取回。",
+                "sent": "结果已发送。可通过下方按钮查看结果、最近任务或新建对话。",
+                "failed_or_partial": "⚠️ 结果发送失败或不完整，已保存。点击“查看结果”或发送 /last 取回，不会重新执行任务。",
+            }.get(delivery, "结果已保存，可点击下方按钮查看。")
             completion = (
                 "⚡ 已停止当前任务，将按你的修正重新开始。"
                 if job.steered else
-                f"{LABELS.get(outcome, '任务已结束')}\n━━━━━━━━━━━━━━━━━━━━\n任务状态已结束，结果将在下一条消息展示。"
+                f"{LABELS.get(outcome, '任务已结束')}\n━━━━━━━━━━━━━━━━━━━━\n{delivery_text}"
             )
             await self.api.edit(job.chat, job.status_message_id, completion,
-                                {"inline_keyboard": []})
+                                {"inline_keyboard": []} if job.steered else self._completion_buttons(job))
+            return True
         except (TelegramError, AttributeError):
-            pass
+            return False
 
     async def _restart_with_correction(self, job: Job, correction: str) -> None:
         """Wait for the old process to clean up, then start the corrected text task."""
@@ -1079,6 +1103,12 @@ class Bridge:
         suffix = ".jpg" if is_photo else Path(original).suffix.lower()
         if not is_photo and suffix not in SAFE_DOCUMENT_SUFFIXES:
             raise ValueError("unsupported document")
+        # User-facing names preserve Chinese; paths remain private ASCII-only names.
+        display_name = re.split(r"[/\\]", original)[-1]
+        display_name = " ".join("".join(
+            char for char in self.store.redact(display_name)
+            if not unicodedata.category(char).startswith("C")
+        ).split())[:160]
         name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(original).name)[:96]
         if not name or name in {".", ".."}:
             name = "screenshot.jpg" if is_photo else "attachment" + suffix
@@ -1113,11 +1143,15 @@ class Bridge:
             destination.unlink(missing_ok=True)
             raise ValueError("attachment download failed") from None
         job.attachments.append(destination)
+        if is_photo or not display_name:
+            display_name = destination.name
+        elif destination.name != name:
+            display_name += f"（附件{len(job.attachments)}）"
         job.attachment_feedback = (
-            f"📎 已收到：{attachment_kind(name, is_photo)}「{name}」，"
+            f"📎 已收到：{attachment_kind(name, is_photo)}「{display_name}」，"
             f"{attachment_size(downloaded)}。本次任务会读取它。"
         )
-        return destination, destination.name
+        return destination, display_name
 
     def _cleanup_attachments(self, job: Job) -> None:
         for item in job.attachments:
@@ -1271,6 +1305,17 @@ class Bridge:
                     cq_id, text="📖 正在打开任务结果" if record else "该历史记录不存在或已过期")
             if record:
                 self.queue_reply(chat_id, describe_html(record), html_mode=True)
+            return
+
+        if data in {"tasks:history", "tasks:new"}:
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id)
+            # Reuse the existing user-scoped command semantics, including deferred
+            # /new during a running task. These buttons never launch a model job.
+            await self.handle({"message": {
+                "chat": chat, "from": sender,
+                "text": "/history" if data == "tasks:history" else "/new",
+            }})
             return
 
         if data in {"selector:models", "selector:close"}:
