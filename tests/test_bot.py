@@ -752,6 +752,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_job()
         self.assertEqual(self.api.parse_modes[-1], "HTML")
         self.assertIn("<b>标题</b>", self.api.messages[-1][1])
+        self.assertEqual(self.store.load(12345)["text"], self.runner.result.text)
+
+    async def test_html_rejection_fallback_keeps_link_destination(self):
+        attempts = []
+        async def send(chat, text, **kwargs):
+            attempts.append((text, kwargs.get("parse_mode")))
+            if kwargs.get("parse_mode") == "HTML":
+                raise TelegramError(400)
+            return {"message_id": len(attempts)}
+        self.api.send = send
+        self.assertTrue(await self.bridge.send_html(12345, '<a href="https://example.com?a=1&amp;b=2">Docs</a>'))
+        self.assertEqual(attempts[-1], ('Docs (https://example.com?a=1&b=2)', None))
 
     async def test_model_command_highlights_current_model(self):
         self.store.set_model(12345, "claude-sonnet-5-5-medium")
