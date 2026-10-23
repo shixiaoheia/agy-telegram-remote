@@ -62,6 +62,7 @@ class FakeAPI:
         self.backlog = []
         self.webhook = ""
         self.accept_gate = None
+        self.accept_entered = asyncio.Event()
         self.answered_callbacks = []
         self.calls = []
         self.parse_modes = []
@@ -69,6 +70,7 @@ class FakeAPI:
     async def send(self, chat_id, text, reply_markup=None, parse_mode=None):
         self.sent_count += 1
         if self.accept_gate and self.sent_count == 1:
+            self.accept_entered.set()
             await self.accept_gate.wait()
         if self.sent_count in self.fail_at:
             raise TelegramError()
@@ -202,9 +204,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_preparation_before_launch(self):
         self.api.accept_gate = asyncio.Event()
         task = asyncio.create_task(self.bridge.handle(update("task")))
-        await asyncio.sleep(0)
-        await self.handle(update("/cancel"))
-        self.api.accept_gate.set()
+        try:
+            await asyncio.wait_for(self.api.accept_entered.wait(), 1)
+            await self.handle(update("/cancel"))
+        finally:
+            self.api.accept_gate.set()
         await task
         await self.finish_job()
         self.assertEqual(self.runner.launched, 0)

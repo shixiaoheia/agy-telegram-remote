@@ -999,9 +999,16 @@ class Bridge:
             if job.status_message_id is None or self.slot is not job:
                 continue
             try:
-                await self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
+                edit = asyncio.create_task(self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
                     "inline_keyboard": [[{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}]]
-                })
+                }))
+                try:
+                    await asyncio.shield(edit)
+                except asyncio.CancelledError:
+                    # A thread-backed HTTP request must finish before the final
+                    # card edit, otherwise an old request can overwrite completion.
+                    await asyncio.gather(edit, return_exceptions=True)
+                    raise
                 delay = PROGRESS_UPDATE_SECONDS
             except TelegramError as error:
                 if error.code == 429:
@@ -1121,6 +1128,8 @@ class Bridge:
         if job.attachment_dir is not None:
             try:
                 job.attachment_dir.rmdir()
+            except FileNotFoundError:
+                pass
             except OSError:
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
