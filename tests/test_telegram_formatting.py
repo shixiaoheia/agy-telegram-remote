@@ -27,7 +27,7 @@ class TelegramHTML(HTMLParser):
         for name, value in attrs:
             assert (tag == "a" and name == "href" and value.startswith(("https://", "http://"))) or (
                 tag == "code" and name == "class" and re.fullmatch(r"language-[A-Za-z0-9_+.#-]{1,32}", value)
-            ), (tag, attrs)
+            ) or (tag == "blockquote" and name == "expandable" and value is None), (tag, attrs)
         self.stack.append(tag)
 
     def handle_endtag(self, tag):

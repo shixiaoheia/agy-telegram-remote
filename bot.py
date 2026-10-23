@@ -131,6 +131,7 @@ class Job:
     mode: str = ""
     started_at: float = field(default_factory=time.monotonic)
     status_message_id: int | None = None
+    result_started: bool = False
     progress_task: asyncio.Task | None = None
     activity: str = "正在准备任务"
     phase: str = "preparing"
@@ -342,12 +343,85 @@ def describe(record: dict) -> str:
 
 def describe_html(record: dict) -> str:
     """Render an agy result as Telegram HTML without trusting model-provided tags."""
-    if not record.get("text"):
-        return html.escape(describe(record))
-    marker = "AGY_MODEL_REPLY_MARKER"
-    plain = dict(record)
-    plain["text"] = marker
-    return html.escape(describe(plain)).replace(marker, render_markdown_html(str(record["text"])))
+    parts = [question_html(record.get("title", ""), record.get("attachment_summary", ""))]
+    outcome = str(record.get("outcome", "error"))
+    if outcome != "success":
+        parts.append(html.escape(LABELS.get(outcome, "⚠️ 结果需核对")))
+    if record.get("text"):
+        parts.append(render_markdown_html(str(record["text"])))
+    elif record.get("detail"):
+        parts.append(html.escape(str(record["detail"])))
+    help_text = CATEGORY_HELP.get(record.get("category")) or OUTCOME_HELP.get(outcome)
+    if help_text:
+        parts.append("💡 " + html.escape(help_text))
+    if record.get("metadata_warning"):
+        parts.append("⚠️ " + html.escape(str(record["metadata_warning"])))
+    if record.get("delivery") in {"failed", "failed_or_partial"}:
+        parts.append("⚠️ 上次发送未完成；这里是已保存的结果，没有重新执行任务。")
+    if record.get("model_fallback_from"):
+        parts.append("⚠️ 模型自动切换（原模型暂时无容量）：" + html.escape(display_model(str(record["model_fallback_from"])))
+                     + " → " + html.escape(display_model(str(record.get("model") or ""))))
+    if outcome not in {"success", "not_started", "running"}:
+        parts.append("ℹ️ 没有自动重跑任务；取消不会撤销已发生的修改。/last 只取回记录。")
+    summary = str(record.get("execution_summary") or "").strip()
+    if summary:
+        parts.append("<blockquote expandable><b>执行过程</b>\n" + html.escape(summary) + "</blockquote>")
+    parts.append(result_footer(record))
+    if record.get("session_token_reminder"):
+        tokens = record.get("session_tokens", 0)
+        cumulative = f"约 {tokens:,} Token" if type(tokens) is int and tokens >= 0 else "较多上下文"
+        parts.append(f"💡 当前会话累计{cumulative}；回复变慢或上下文混乱时，可发送 /new 开启新会话。")
+    return "\n\n".join(part for part in parts if part)
+
+
+def ui_excerpt(value: object, limit: int = 120, fallback: str = "未命名任务") -> str:
+    value = " ".join(str(value or "").split()) or fallback
+    return value if len(value) <= limit else value[:limit - 1] + "…"
+
+
+def display_model(model: str, effort: str = "") -> str:
+    """Use readable names in cards while leaving stored model identifiers intact."""
+    match = re.fullmatch(r"gemini-(\d+(?:\.\d+)?)-(flash|pro|argon)(?:-(low|medium|high|max))?", model)
+    if match:
+        label = f"Gemini {match[1]} {match[2].title()}"
+        effort = match[3] or effort
+    else:
+        match = re.fullmatch(r"claude-(sonnet|opus)-(\d+)-(\d+)(?:-(low|medium|high|max))?", model)
+        if match:
+            label = f"Claude {match[1].title()} {match[2]}.{match[3]}"
+            effort = match[4] or effort
+        else:
+            label = model or "默认模型（由 agy 决定）"
+    return ui_excerpt(label, 90) + (f" ({effort.capitalize()})" if effort else "")
+
+
+def question_html(title: object, attachment: object = "") -> str:
+    parts = ["❓ 提问：<b>" + html.escape(ui_excerpt(title, fallback="历史任务")) + "</b>"]
+    if attachment:
+        parts.append(html.escape(ui_excerpt(attachment, 180)))
+    return "<blockquote>" + "\n".join(parts) + "</blockquote>"
+
+
+def result_footer(record: dict) -> str:
+    model = display_model(str(record.get("model") or ""), str(record.get("effort") or ""))
+    duration = record.get("duration_seconds")
+    elapsed = (f"{duration:g}s" if type(duration) in {int, float} and 0 <= duration <= 1e12
+               and math.isfinite(duration) else "未提供")
+    def count(key: str) -> str:
+        value = record.get(key)
+        return f"{value:,}" if type(value) is int and value >= 0 else "—"
+    lines = [f"🤖 {html.escape(model)} · ⏱ {elapsed}",
+             f"📊 输入 {count('input_tokens')} · 输出 {count('output_tokens')} · 共 {count('total_tokens')} tokens"]
+    mode = record.get("mode")
+    turns = record.get("num_turns")
+    details = []
+    if mode:
+        details.append("规划模式" if mode == "plan" else "编辑模式" if mode == "accept-edits" else str(mode))
+    if type(turns) is int and turns > 0:
+        details.append(f"第 {turns} 轮对话")
+    if details:
+        lines.append(html.escape(" · ".join(details)))
+    return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
 def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
@@ -540,9 +614,9 @@ class Bridge:
 
     def _status_card(self, user: int, details: bool = False) -> tuple[str, dict]:
         keyboard = {"inline_keyboard": [[
-            {"text": "返回概览" if details else "详细信息",
+            {"text": "⬅️ 返回概览" if details else "📋 详细信息",
              "callback_data": "status:summary" if details else "status:details"},
-            {"text": "刷新状态", "callback_data": "status:details" if details else "status:summary"},
+            {"text": "🔄 刷新状态", "callback_data": "status:details" if details else "status:summary"},
         ]]}
         if details:
             return self.store.redact(self._status_details(user)), keyboard
@@ -748,8 +822,8 @@ class Bridge:
         scope = "当前模型" if model is not None else "全部模型"
         self.queue_reply(chat_id, f"🔎 正在检测{scope}，会消耗模型额度。\n/status 查看进度，/cancel 取消检测。检测提示要求不用工具、不读写工作目录。",
                          reply_markup={"inline_keyboard": [[
-                             {"text": "查看进度", "callback_data": "status:summary"},
-                             {"text": "取消检测", "callback_data": f"probe:cancel:{self.model_check_id}"},
+                             {"text": "⏳ 查看进度", "callback_data": "status:summary"},
+                             {"text": "🛑 取消检测", "callback_data": f"probe:cancel:{self.model_check_id}"},
                          ]]})
         self.model_check_task = asyncio.create_task(self._refresh_model_health(chat_id, model))
         self.model_check_task.add_done_callback(self._model_check_finished)
@@ -773,13 +847,22 @@ class Bridge:
             LOG.warning("telegram_delivery_failed code=%s", error.code)
             return False
 
-    async def send_html(self, chat: int, text: str) -> bool:
+    async def send_html(self, chat: int, text: str, reply_markup: dict | None = None,
+                        message_id: int | None = None, delivery_job: Job | None = None) -> bool:
         chunks = html_chunks(self.store.redact(text))
         total = len(chunks)
         for index, chunk in enumerate(chunks, 1):
             suffix = f"\n\n📄 [第 {index}/{total} 页]" if total > 1 else ""
+            markup = reply_markup if index == total else None
+            replace = index == 1 and type(message_id) is int and message_id > 0
             try:
-                await self.api.send(chat, chunk + suffix, parse_mode="HTML")
+                if replace:
+                    await self.api.edit(chat, message_id, chunk + suffix,
+                                        reply_markup=markup or {"inline_keyboard": []}, parse_mode="HTML")
+                elif markup is not None:
+                    await self.api.send(chat, chunk + suffix, parse_mode="HTML", reply_markup=markup)
+                else:
+                    await self.api.send(chat, chunk + suffix, parse_mode="HTML")
             except TelegramError as error:
                 LOG.warning("telegram_html_delivery_failed code=%s", error.code)
                 # Only a definite rejection can be retried. Downgrade this page,
@@ -787,8 +870,21 @@ class Bridge:
                 if error.code != 400:
                     return False
                 plain = plain_html_text(chunk)
-                if not await self.send_text(chat, plain + suffix):
+                if replace:
+                    # A rejected edit is safe to downgrade once. An ambiguous
+                    # network result must never duplicate the result as a send.
+                    # Link destinations can make the plain fallback longer.
+                    if len((plain + suffix).encode("utf-16-le")) // 2 > 4096:
+                        return False
+                    try:
+                        await self.api.edit(chat, message_id, plain + suffix,
+                                            reply_markup=markup or {"inline_keyboard": []})
+                    except TelegramError:
+                        return False
+                elif not await self.send_text(chat, plain + suffix, reply_markup=markup):
                     return False
+            if index == 1 and delivery_job is not None:
+                delivery_job.result_started = True
         return True
 
     def _release_job(self, job: Job) -> None:
@@ -820,7 +916,7 @@ class Bridge:
                 html_mode = False
             try:
                 if html_mode:
-                    await self.send_html(chat, text)
+                    await self.send_html(chat, text, reply_markup=reply_markup)
                 else:
                     await self.send_text(chat, text, reply_markup=reply_markup)
             finally:
@@ -829,32 +925,14 @@ class Bridge:
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
         try:
             job.phase = "starting"
-            model_info = f"（模型：{job.model}）" if job.model else ""
-            effort_info = f"\n⚡ 思考强度：{job.effort.capitalize()}" if job.effort else ""
-            mode_name = "推演规划 (Plan)" if job.mode == "plan" else ("落地编辑 (Accept-Edits)" if job.mode == "accept-edits" else job.mode)
-            mode_info = f"\n📋 执行模式：{mode_name}" if job.mode else ""
-            conv = self.store.get_conversation(job.user)
-            conv_tag = ""
-            if conv and conv.get("conversation_id"):
-                turns = conv.get("num_turns", 1)
-                conv_tag = f"\n🧠 会话记忆：已关联上下文 (第 {turns + 1} 轮)"
-            else:
-                conv_tag = "\n🧠 会话记忆：全新独立会话"
-
-            accept_msg = (
-                f"🚀 任务已接收{model_info}\n"
-                f"━━━━━━━━━━━━━━━━━━━━{conv_tag}{effort_info}{mode_info}\n"
-                f"阶段：正在准备执行环境\n"
-                f"⏳ 正在启动 Antigravity；状态会在此消息内更新。"
-            )
-            if job.attachment_feedback:
-                accept_msg += f"\n{job.attachment_feedback}"
+            job.activity = "正在启动模型"
+            accept_msg = self._progress_text(job)
             cancel_markup = {"inline_keyboard": [[{
                 "text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"
             }]]}
             try:
                 accept_started = time.monotonic()
-                sent = await self.api.send(job.chat, accept_msg, reply_markup=cancel_markup)
+                sent = await self.api.send(job.chat, accept_msg, reply_markup=cancel_markup, parse_mode="HTML")
                 LOG.info("telegram_task_accepted send_seconds=%.2f", time.monotonic() - accept_started)
                 job.status_message_id = sent.get("message_id") if isinstance(sent, dict) else None
                 accepted = True
@@ -868,6 +946,8 @@ class Bridge:
                     "model": job.model,
                     "effort": job.effort,
                     "mode": job.mode,
+                    "title": job.history_title,
+                    "attachment_summary": job.attachment_feedback,
                 })
                 self.store.save_history(job.user, job.history_title, record)
                 return
@@ -935,6 +1015,8 @@ class Bridge:
                     "mode": job.mode or getattr(result, "mode", ""),
                     "title": job.history_title,
                     "model_fallback_from": fallback_from,
+                    "attachment_summary": job.attachment_feedback,
+                    "execution_summary": "\n".join(job.execution_steps[-6:]),
                 }
             )
             self.store.save_history(job.user, job.history_title, record)
@@ -968,15 +1050,19 @@ class Bridge:
             if job.progress_task:
                 job.progress_task.cancel()
                 await asyncio.gather(job.progress_task, return_exceptions=True)
-            await self._finish_progress(job, result.outcome)
-            delivered = True if job.steered else await self.send_html(job.chat, describe_html(record))
+            if job.steered:
+                await self._finish_progress(job, result.outcome)
+            delivered = True if job.steered else await self.send_html(
+                job.chat, describe_html(record), reply_markup=self._completion_buttons(job),
+                message_id=job.status_message_id, delivery_job=job,
+            )
             final_record = self.store.save(job.user, record | {
                 "delivery": "superseded_by_steer" if job.steered else ("sent" if delivered else "failed_or_partial")
             })
             self.store.save_history(job.user, job.history_title, final_record)
-            card_updated = True if job.steered else await self._finish_progress(
-                job, result.outcome, final_record["delivery"],
-            )
+            card_updated = True if job.steered or delivered else False
+            if not card_updated and not job.result_started:
+                card_updated = await self._finish_progress(job, result.outcome, final_record["delivery"])
             if not delivered and not card_updated:
                 await self.send_text(
                     job.chat,
@@ -1046,15 +1132,21 @@ class Bridge:
 
     def _progress_text(self, job: Job) -> str:
         elapsed = max(0, int(time.monotonic() - job.started_at))
-        state = "正在取消并清理进程" if job.cancel.is_set() else "任务执行中"
-        activity = "正在取消并清理资源" if job.cancel.is_set() else job.activity
-        trace = "\n".join(job.execution_steps[-6:])
-        trace_block = f"执行过程：\n{trace}\n" if trace else ""
-        return (f"⏳ {state}\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"{trace_block}"
-                f"阶段：{activity}\n"
-                f"已运行：{elapsed}s\n"
-                f"需要停止时可点下方按钮。")
+        state = "🛑 正在取消并清理" if job.cancel.is_set() else "⏳ 任务执行中"
+        activity = "正在清理资源" if job.cancel.is_set() else ui_excerpt(job.activity, 90)
+        trace = [ui_excerpt(step, 160) for step in job.execution_steps[-6:]]
+        if trace:
+            attribute = " expandable" if len(trace) > 2 else ""
+            trace_block = (f"<blockquote{attribute}><b>执行过程</b>\n"
+                           + html.escape("\n".join(trace)) + "</blockquote>")
+        else:
+            trace_block = "<blockquote><b>执行过程</b>\n等待首个步骤…</blockquote>"
+        text = (question_html(job.history_title or job.original_prompt, job.attachment_feedback)
+                + f"\n\n<b>{state}</b>\n"
+                + f"阶段：{html.escape(activity)}\n"
+                + f"🤖 {html.escape(display_model(job.model, job.effort))} · ⏱ 已运行：{elapsed}s\n\n"
+                + trace_block)
+        return self.store.redact(text)
 
     async def _refresh_progress(self, job: Job) -> None:
         delay = PROGRESS_UPDATE_SECONDS
@@ -1067,7 +1159,7 @@ class Bridge:
             try:
                 edit = asyncio.create_task(self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
                     "inline_keyboard": [[{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}]]
-                }))
+                }, parse_mode="HTML"))
                 try:
                     await asyncio.shield(edit)
                 except asyncio.CancelledError:
@@ -1087,8 +1179,11 @@ class Bridge:
                 return
 
     def _completion_buttons(self, job: Job) -> dict:
+        return self._result_buttons(job.job_id)
+
+    def _result_buttons(self, job_id: str) -> dict:
         return {"inline_keyboard": [
-            [{"text": "📖 查看结果", "callback_data": f"history:{job.job_id}"},
+            [{"text": "📖 查看结果", "callback_data": f"history:{job_id}"},
              {"text": "📚 最近任务", "callback_data": "tasks:history"}],
             [{"text": "🧠 新建对话", "callback_data": "tasks:new"}],
         ]}
@@ -1105,7 +1200,7 @@ class Bridge:
             completion = (
                 "⚡ 已停止当前任务，将按你的修正重新开始。"
                 if job.steered else
-                f"{LABELS.get(outcome, '任务已结束')}\n━━━━━━━━━━━━━━━━━━━━\n{delivery_text}"
+                f"{LABELS.get(outcome, '任务已结束')}\n\n{delivery_text}"
             )
             await self.api.edit(job.chat, job.status_message_id, completion,
                                 {"inline_keyboard": []} if job.steered else self._completion_buttons(job))
@@ -1285,15 +1380,17 @@ class Bridge:
             verified = [x for x in usable if health.get(x, {}).get("outcome") == "success"]
             target = (verified or usable)[0]
             failed = health.get(target, {}).get("outcome") not in {None, "success"}
-            buttons.append({"text": ("✓ " if current in variants else "") + ("⚠️ " if failed else "") + label,
+            icon = ("⚡" if "Flash" in label else "🧠" if "Pro" in label else "✍️" if "Sonnet" in label
+                    else "💎" if "Opus" in label else "✨" if "Argon" in label else "🤖")
+            buttons.append({"text": ("✓ " if current in variants else "") + ("⚠️ " if failed else icon + " ") + label,
                             "callback_data": f"model:{target}"})
             if failed:
                 notices.append(f"{label}：{model_health_text(health[target])}")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-        rows.append([{"text": "检测当前模型", "callback_data": "probe:current"},
-                     {"text": "检测全部", "callback_data": "probe:all"}])
-        rows.append([{"text": "恢复默认", "callback_data": "model:default"},
-                     {"text": "关闭", "callback_data": "selector:close"}])
+        rows.append([{"text": "🔎 检测当前模型", "callback_data": "probe:current"},
+                     {"text": "🔎 检测全部", "callback_data": "probe:all"}])
+        rows.append([{"text": "↩️ 恢复默认", "callback_data": "model:default"},
+                     {"text": "✖️ 关闭", "callback_data": "selector:close"}])
         text = f"选择模型\n当前：{self._model_label(current)}"
         stamp = health.get(current, {}).get("checked_at", 0)
         if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0:
@@ -1321,11 +1418,12 @@ class Bridge:
             if variant and self._model_is_known_unavailable(variant):
                 continue
             selected = current == variant if variant else curr == effort and current == model
-            buttons.append({"text": ("✓ " if selected else "") + effort_label(effort, ""),
+            icon = {"low": "⚡", "medium": "⚖️", "high": "🔍", "max": "🧠"}[effort]
+            buttons.append({"text": ("✓ " if selected else "") + icon + " " + effort_label(effort, ""),
                             "callback_data": f"choose:{variant}" if variant else f"effort:{effort}"})
-        keyboard = {"inline_keyboard": [buttons, [
-            {"text": "返回模型", "callback_data": "selector:models"},
-            {"text": "关闭", "callback_data": "selector:close"},
+        keyboard = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [[
+            {"text": "⬅️ 返回模型", "callback_data": "selector:models"},
+            {"text": "✖️ 关闭", "callback_data": "selector:close"},
         ]]}
         label = next((label for label, variants in self._model_choices() if model in variants), model_label)
         return f"{label}\n选择思考强度后生效", keyboard
@@ -1370,8 +1468,8 @@ class Bridge:
                          f"补充预览：{self.store.redact(task_title(text))}\n"
                          "仅最新一条待确认补充有效，5 分钟后失效；不会自动执行。",
                          reply_markup={"inline_keyboard": [[
-                             {"text": "作为修正", "callback_data": prefix.format("apply")},
-                             {"text": "忽略补充", "callback_data": prefix.format("dismiss")},
+                             {"text": "✏️ 作为修正", "callback_data": prefix.format("apply")},
+                             {"text": "✖️ 忽略补充", "callback_data": prefix.format("dismiss")},
                          ]]})
         return True
 
@@ -1471,7 +1569,8 @@ class Bridge:
                 await self.api.answer_callback_query(
                     cq_id, text="📖 正在打开任务结果" if record else "该历史记录不存在或已过期")
             if record:
-                self.queue_reply(chat_id, describe_html(record), html_mode=True)
+                self.queue_reply(chat_id, describe_html(record), html_mode=True,
+                                 reply_markup=self._result_buttons(record["job_id"]))
             return
 
         if data in {"tasks:history", "tasks:new"}:
@@ -1532,8 +1631,8 @@ class Bridge:
                 return
             text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
             keyboard = {"inline_keyboard": [[
-                {"text": "更换模型", "callback_data": "selector:models"},
-                {"text": "关闭", "callback_data": "selector:close"},
+                {"text": "🤖 更换模型", "callback_data": "selector:models"},
+                {"text": "✖️ 关闭", "callback_data": "selector:close"},
             ]]}
             if not await self._collapse_selector(chat_id, message, text, keyboard):
                 self.queue_reply(chat_id, text, reply_markup=keyboard)
@@ -1808,7 +1907,9 @@ class Bridge:
             try:
                 record = self.store.load(user)
                 if record:
-                    self.queue_reply(chat_id, describe_html(record), html_mode=True)
+                    job_id = record.get("job_id", "")
+                    keyboard = self._result_buttons(job_id) if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id) else None
+                    self.queue_reply(chat_id, describe_html(record), html_mode=True, reply_markup=keyboard)
                     return
                 text = "ℹ️ 没有可取回的结果，或记录已过保留期。"
             except (OSError, ValueError):
@@ -2207,6 +2308,7 @@ class Bridge:
                         "job_id": job.job_id, "outcome": "cancelled" if job.cancel.is_set() else "not_started",
                         "detail": "附件或任务准备未完成，没有启动 agy。",
                         "delivery": "unknown", "model": job.model, "effort": job.effort, "mode": job.mode,
+                        "title": job.history_title,
                     })
                     self.store.save_history(job.user, job.history_title, record)
                     if job.reset_after:

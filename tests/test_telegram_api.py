@@ -140,9 +140,7 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
                 (200, {"ok": True, "result": {"url": ""}}),
                 (200, {"ok": True, "result": []}),
                 (200, {"ok": True, "result": {"message_id": 1}}),
-                # The completed task first removes the progress card's cancel button.
-                (200, {"ok": True, "result": True}),
-                # The result delivery then fails, while /last remains available.
+                # The result replaces the progress bubble; this edit fails.
                 (502, b"temporary gateway error"),
                 # Final card explains delivery failure and offers retrieval buttons.
                 (200, {"ok": True, "result": True}),

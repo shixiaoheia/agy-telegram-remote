@@ -69,6 +69,8 @@ class FakeAPI:
         self.answered_callbacks = []
         self.calls = []
         self.parse_modes = []
+        self.edit_parse_modes = []
+        self.fail_html_edits = False
 
     async def send(self, chat_id, text, reply_markup=None, parse_mode=None):
         self.sent_count += 1
@@ -83,7 +85,10 @@ class FakeAPI:
         self.parse_modes.append(parse_mode)
         return {"message_id": self.sent_count}
 
-    async def edit(self, chat_id, message_id, text, reply_markup=None):
+    async def edit(self, chat_id, message_id, text, reply_markup=None, parse_mode=None):
+        if self.fail_html_edits and parse_mode == "HTML":
+            raise TelegramError()
+        self.edit_parse_modes.append(parse_mode)
         self.edits.append((chat_id, text, reply_markup))
         if message_id in self.message_indices:
             self.messages[self.message_indices[message_id]] = (chat_id, text, reply_markup)
@@ -242,7 +247,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_job()
 
     async def test_delivery_failure_keeps_result_without_rerun(self):
-        self.api.fail_at = {2}
+        self.api.fail_html_edits = True
         await self.handle(update("task"))
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
@@ -259,14 +264,17 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.load(12345)["outcome"], "not_started")
 
     async def test_result_saved_before_delivery(self):
-        original_send = self.api.send
-        async def checked(chat, text):
+        original_edit = self.api.edit
+        checked_results = []
+        async def checked(chat, message_id, text, **kwargs):
             if "the result" in text:
                 self.assertEqual(self.store.load(12345)["text"], "the result")
-            await original_send(chat, text)
-        self.api.send = checked
+                checked_results.append(message_id)
+            return await original_edit(chat, message_id, text, **kwargs)
+        self.api.edit = checked
         await self.handle(update("task"))
         await self.finish_job()
+        self.assertEqual(len(checked_results), 1)
 
     async def test_last_cannot_read_other_user(self):
         self.store.save(12345, {"outcome": "success", "text": "secret"})
@@ -669,7 +677,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
         self.assertEqual(self.runner.last_model, "gemini-3.1-pro-high")
-        self.assertIn("gemini-3.1-pro-high", self.api.messages[-1][1])
+        self.assertIn("Gemini 3.1 Pro (High)", self.api.messages[-1][1])
+        self.assertEqual(self.store.load(12345)["model"], "gemini-3.1-pro-high")
 
     async def test_fixed_effort_model_clears_legacy_effort_before_task(self):
         self.store.set_model(12345, "claude-sonnet-5-5-medium")
@@ -771,7 +780,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         msg = self.api.messages[-1][1]
         self.assertIn("当前：Claude Sonnet 5.5 · 均衡", msg)
         labels = [button["text"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
-        self.assertEqual([label for label in labels if label.startswith("✓")], ["✓ Claude Sonnet 5.5"])
+        self.assertEqual([label for label in labels if label.startswith("✓")], ["✓ ✍️ Claude Sonnet 5.5"])
 
     async def test_start_shows_new_user_welcome(self):
         await self.handle(update("/start"))
@@ -895,7 +904,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         text, keyboard = self.api.messages[-1][1:]
         self.assertIn("当前：Claude Sonnet 5.5", text)
         buttons = [button for row in keyboard["inline_keyboard"] for button in row]
-        self.assertIn({"text": "✓ Claude Sonnet 5.5", "callback_data": "model:claude-sonnet-5-5-medium"}, buttons)
+        self.assertIn({"text": "✓ ✍️ Claude Sonnet 5.5", "callback_data": "model:claude-sonnet-5-5-medium"}, buttons)
 
     async def test_new_model_pickers_bind_supported_slugs_and_clear_extra_effort(self):
         for model, expected in (

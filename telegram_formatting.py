@@ -328,8 +328,23 @@ def render_markdown_html(text: str, *, quoted: bool = False) -> str:
             if first:
                 label = ADMONITION_LABELS[first.group(1).upper()]
                 content[0] = f"**{label}**" + (f"：{first.group(2)}" if first.group(2) else "")
+            credit = ""
+            code_fence = ""
+            for quoted_line in content[:-1]:
+                candidate = FENCE.match(quoted_line)
+                if candidate:
+                    marker = candidate.group(1)
+                    if not code_fence:
+                        code_fence = marker
+                    elif marker[0] == code_fence[0] and len(marker) >= len(code_fence) and not candidate.group(2).strip():
+                        code_fence = ""
+            if not code_fence and len(content) > 1 and re.match(r"^(?:[—–-]\s*)?(?:来源|出处|Source)\s*[:：]", content[-1], re.IGNORECASE):
+                credit = content.pop()
             body = render_markdown_html("\n".join(content), quoted=True)
-            lines.append(f"<blockquote>{body}</blockquote>" if body else "")
+            attribute = " expandable" if len(content) > 4 or len(body) > 600 else ""
+            lines.append(f"<blockquote{attribute}>{body}</blockquote>" if body else "")
+            if credit:
+                lines.append("— " + render_inline_markdown(re.sub(r"^[—–-]\s*", "", credit)))
             continue
         if "|" in line and index + 1 < len(raw) and is_table_separator(raw[index + 1]):
             headers = table_cells(line)
@@ -382,6 +397,7 @@ def html_chunks(text: str, units: int = 3400) -> list[str]:
     current: list[str] = []
     stack: list[tuple[str, str]] = []
     used = 0
+    boundary: tuple[int, int, list[tuple[str, str]]] | None = None
 
     def close_tags() -> str:
         return "".join(f"</{name}>" for name, _ in reversed(stack))
@@ -390,21 +406,41 @@ def html_chunks(text: str, units: int = 3400) -> list[str]:
         token = match.group(0)
         name = TAG_NAME.match(token) if token.startswith("<") else None
         if name:
+            if name.group(1) == "pre" and not token.startswith("</") and used:
+                end = text.find("</pre>", match.end())
+                if end >= 0:
+                    size = len(plain_html_text(text[match.start():end + 6]).encode("utf-16-le")) // 2
+                    if size <= units and used + size > units:
+                        chunks.append("".join(current) + close_tags())
+                        current = [opening for _, opening in stack]
+                        used, boundary = 0, None
             current.append(token)
             if token.startswith("</"):
                 if stack and stack[-1][0] == name.group(1):
                     stack.pop()
             else:
                 stack.append((name.group(1), token))
+            if token.startswith("</") and name.group(1) in {"pre", "blockquote"}:
+                boundary = (len(current), used, list(stack))
             continue
         value = html.unescape(token)
         size = sum(2 if ord(char) > 0xFFFF else 1 for char in value)
         if used and used + size > units:
-            chunks.append("".join(current) + close_tags())
-            current = [opening for _, opening in stack]
-            used = 0
+            if boundary and boundary[1] >= units // 2:
+                cut, consumed, previous = boundary
+                closing = "".join(f"</{tag}>" for tag, _ in reversed(previous))
+                chunks.append("".join(current[:cut]) + closing)
+                current = [opening for _, opening in previous] + current[cut:]
+                used -= consumed
+            else:
+                chunks.append("".join(current) + close_tags())
+                current = [opening for _, opening in stack]
+                used = 0
+            boundary = None
         current.append(token)
         used += size
+        if token == "\n" and not any(tag in {"pre", "code"} for tag, _ in stack):
+            boundary = (len(current), used, list(stack))
     if used or not chunks:
         chunks.append("".join(current) + close_tags())
     return chunks
