@@ -132,6 +132,29 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c.args[0] for c in sleep.await_args_list], [5, 17])
         self.assertEqual(self.api.edit.await_count, 2)
 
+    async def test_stopping_progress_waits_for_inflight_edit(self):
+        job = Job(12345, 12345, status_message_id=1)
+        self.bridge.slot = job
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def edit(*args):
+            entered.set()
+            await release.wait()
+
+        self.api.edit = AsyncMock(side_effect=edit)
+        with patch("bot.PROGRESS_UPDATE_SECONDS", 0):
+            task = asyncio.create_task(self.bridge._refresh_progress(job))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 1)
+        self.assertEqual(self.api.edit.await_count, 1)
+
     async def test_last_and_history_keep_settings_and_final_delivery(self):
         self.store.set_model(12345, "custom-model")
         self.store.set_effort(12345, "high")
