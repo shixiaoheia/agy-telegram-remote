@@ -103,7 +103,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 | `/model refresh` | 读取服务器 CLI 模型目录，检测账号可用性并更新菜单 |
 | `/mode` | 选择执行模式 |
 | `/new` 或 `/reset` | 清空当前对话记忆，开始新会话 |
-| `/status` | 查看机器人和当前任务状态 |
+| `/status` | 查看机器人、当前任务状态、部署提交号与带时区的服务启动时间 |
 | `/cancel` | 取消当前任务 |
 | `/steer <修正内容>` | 停止当前纯文字任务，并按原任务加修正重新执行 |
 | `/history` | 查看最近 10 条任务并打开完整结果 |

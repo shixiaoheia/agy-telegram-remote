@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import signal
+import stat
 import sys
 import time
 import unicodedata
@@ -630,6 +631,25 @@ def system_status(workspace: Path, start_time: float) -> str:
     return "\n".join(lines)
 
 
+def deployment_version(directory: Path | None = None) -> str:
+    """Read only the running release's bounded commit marker, without Git."""
+    path = (directory if directory is not None else Path(__file__).resolve().parent) / ".commit"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 42:
+                return "未知（未提供有效版本标记）"
+            value = os.read(fd, 43).decode("ascii").strip()
+            if re.fullmatch(r"[0-9a-fA-F]{40}", value):
+                return value.lower()[:12]
+        finally:
+            os.close(fd)
+    except (OSError, UnicodeError, ValueError):
+        pass
+    return "未知（未提供有效版本标记）"
+
+
 class Bridge:
     def __init__(self, settings: Settings, api: TelegramAPI, store: Store,
                  runner: Runner, ready_file: Path | None = None):
@@ -637,6 +657,7 @@ class Bridge:
         self.ready_file = ready_file
         self.polling_ready = False
         self._started_at = time.time()
+        self._deployment_version = deployment_version()
         self.slot: Job | None = None
         self.stop = asyncio.Event()
         self.offset = store.offset()
@@ -1331,7 +1352,15 @@ class Bridge:
             return
 
         if data.startswith("history:"):
-            record = self.store.history_item(user, data[8:])
+            try:
+                record = self.store.history_item(user, data[8:])
+            except (OSError, ValueError) as error:
+                LOG.warning("history_callback_read_failed type=%s", type(error).__name__)
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(
+                        cq_id, text="无法读取任务历史，请检查服务器状态。", show_alert=True)
+                self.queue_reply(chat_id, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。")
+                return
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(
                     cq_id, text="📖 正在打开任务结果" if record else "该历史记录不存在或已过期")
@@ -1680,6 +1709,9 @@ class Bridge:
                 text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
             else:
                 text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
+            started = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(self._started_at))
+            text += (f"\n🔖 部署版本：{self._deployment_version}"
+                     f"\n🕒 服务启动：{started}（服务器时间）")
             text += conv_info + effort_info + mode_info + disk_info + permission_info
             self.queue_reply(chat_id, text)
             return
