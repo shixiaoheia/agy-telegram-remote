@@ -45,7 +45,7 @@ class ConfigurationTests(unittest.TestCase):
         s2 = Settings.from_mapping(config_values() | {"AGY_MODEL": "3.8"})
         self.assertEqual(s2.model, "gemini-3.8-flash-high")
         s3 = Settings.from_mapping(config_values() | {"AGY_MODEL": "opus"})
-        self.assertEqual(s3.model, "claude-opus-4-6-thinking")
+        self.assertEqual(s3.model, "claude-opus-5-5-medium")
         with self.assertRaises(ConfigError):
             Settings.from_mapping(config_values() | {"AGY_MODEL": "bad;injection"})
 
@@ -157,3 +157,4 @@ class ConfigurationTests(unittest.TestCase):
             workspace=Path("/root"),
         )
         self.assertEqual(s.owner_id, 22222)
+

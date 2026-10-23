@@ -108,13 +108,15 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 
 发送 `/model` 后，卡片只显示当前模型与选择按钮。当前选项用静态 `✓` 标记，不再重复列出所有模型和档位。
 
-选择 Gemini 系列后，再点击思考强度才会切换：Flash 提供极速、均衡、深度，Pro 提供极速和深度。点击“返回模型”或“关闭”不会更改当前设置。Claude 与 GPT-OSS 使用内置思考配置，点击后直接生效。
+选择模型系列后，再点击思考强度才会切换：Flash 提供极速、均衡、深度，Pro 提供极速和深度，Claude 5.5 提供极速、均衡、深度、最高。点击“返回模型”或“关闭”不会更改当前设置。
 
-菜单加入 Gemini 4 Argon（均衡、深度）和 Claude Sonnet/Opus 5.5（极速、均衡、深度、最高）。这些选项通过完整模型标识调用，不叠加另一份 `--effort` 参数。`/model argon`、`/model sonnet-5.5`、`/model opus-5.5` 可快捷选择；原有 `/model sonnet`、`/model opus` 和 4.6 偏好保持不变。旧版 5.5 标识解析为对应 5.5 的均衡档，不再转回 4.6。
+菜单保留 Gemini 4 Argon、Gemini 3.8 Flash、Gemini 3.1 Pro 和 Claude Sonnet/Opus 5.5。这些选项通过完整模型标识调用，不叠加另一份 `--effort` 参数。`/model argon`、`/model sonnet`、`/model opus` 可快捷选择；Sonnet/Opus 别名指向 5.5 均衡档，原有带 `-5.5` 的别名仍可用。
+
+GPT-OSS 120B、Claude Opus/Sonnet 4.6、Gemini 3.7/3.6 Flash 已从目录、快捷别名与动态发现中移除，旧按钮也不能再选择。历史记录保留；旧配置或偏好如仍指向这些模型，会提示先用 `/model` 重新选择，不自动替换模型或执行任务。
 
 发送 `/model refresh` 会先读取服务器 `agy models`，再逐项发出固定回复检测；成功后保存检测结果，并加入新发现的模型。菜单隐藏 CLI 已不提供或明确提示账号/套餐无权限的选项；网络、额度、容量、授权或地区等失败仍保留选项并显示警告，不当作套餐资格判断。同一模型有已验证档位时，菜单优先打开该档位。目录读取失败时保留上次结果。首次检测前菜单是候选目录，不代表账号已能调用；刷新会消耗模型额度。检测不改用户选定模型、配置、权限或历史，也不重跑原任务。免费与付费账号共用同一程序，以各自服务器的检测结果决定可选模型。
 
-截至 2026-10-14，[官方模型列表](https://antigravity.google/docs/models/)说明：Argon 限 Ultra/Enterprise；Claude 5.5 支持非试用 Pro、Ultra/Enterprise；Gemini 3.7/3.6 Flash 和 3.1 Pro 列为 Enterprise 选项。Claude 4.6 和 GPT-OSS 标注于 2026-11-02 移除，当前仍保留兼容入口。实际目录、套餐权限、地区和调用能力均需在目标服务器确认。
+模型资格可参考[官方模型列表](https://antigravity.google/docs/models/)，实际目录、套餐权限、地区和调用能力均需在目标服务器确认。
 
 若收到 `User location is not supported for the API use`，表示 Google 拒绝了当前地区的调用，需检查服务器出口及 Google 账号所属地区；修改模型名称、刷新模型或重新授权不能保证解决。参见 [官方地区支持说明](https://antigravity.google/docs/faq/)。程序会提示地区限制，不自动重跑原任务。
 
@@ -258,3 +260,4 @@ python3 -B -m unittest discover -s tests
 - 🚀 如需稳定 VPS，可通过 [搬瓦工 BandwagonHost 专属邀请链接](https://bandwagonhost.com/aff.php?aff=80815) 支持项目。
 
 ⭐ 如果这个项目对你有帮助，欢迎在 GitHub 右上角点一个 Star 支持一下！
+

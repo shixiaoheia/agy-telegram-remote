@@ -22,17 +22,8 @@ OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-high", "High 思考 (推荐)"),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-medium", "Medium 思考"),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-low", "Low 思考"),
-    ("Gemini 3.7 Flash", "gemini-3.7-flash-high", "High 思考"),
-    ("Gemini 3.7 Flash", "gemini-3.7-flash-medium", "Medium 思考"),
-    ("Gemini 3.7 Flash", "gemini-3.7-flash-low", "Low 思考"),
-    ("Gemini 3.6 Flash", "gemini-3.6-flash-high", "High 思考"),
-    ("Gemini 3.6 Flash", "gemini-3.6-flash-medium", "Medium 思考"),
-    ("Gemini 3.6 Flash", "gemini-3.6-flash-low", "Low 思考"),
     ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-high", "High 深度推理 (推荐)"),
     ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-low", "Low 推理"),
-    ("Anthropic Claude", "claude-sonnet-4-6", "Sonnet 4.6 (Thinking)"),
-    ("Anthropic Claude", "claude-opus-4-6-thinking", "Opus 4.6 (Thinking)"),
-    ("开源模型", "gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
 )
 
 MODEL_ALIASES: dict[str, str] = {
@@ -43,29 +34,28 @@ MODEL_ALIASES: dict[str, str] = {
     "3.8-med": "gemini-3.8-flash-medium",
     "3.8-low": "gemini-3.8-flash-low",
     "flash": "gemini-3.8-flash-high",
-    "3.7": "gemini-3.7-flash-high",
-    "3.7-high": "gemini-3.7-flash-high",
-    "3.7-med": "gemini-3.7-flash-medium",
-    "3.7-low": "gemini-3.7-flash-low",
-    "3.6": "gemini-3.6-flash-high",
-    "3.6-high": "gemini-3.6-flash-high",
-    "3.6-med": "gemini-3.6-flash-medium",
-    "3.6-low": "gemini-3.6-flash-low",
     "3.1": "gemini-3.1-pro-high",
     "pro": "gemini-3.1-pro-high",
     "pro-high": "gemini-3.1-pro-high",
     "pro-low": "gemini-3.1-pro-low",
-    "sonnet": "claude-sonnet-4-6",
+    "sonnet": "claude-sonnet-5-5-medium",
     "sonnet-5.5": "claude-sonnet-5-5-medium",
-    "opus": "claude-opus-4-6-thinking",
+    "opus": "claude-opus-5-5-medium",
     "opus-5.5": "claude-opus-5-5-medium",
     "claude-sonnet-5-5": "claude-sonnet-5-5-medium",
     "claude-sonnet-5-5-thinking": "claude-sonnet-5-5-medium",
     "claude-opus-5-5": "claude-opus-5-5-medium",
     "claude-opus-5-5-thinking": "claude-opus-5-5-medium",
-    "gpt": "gpt-oss-120b-medium",
-    "120b": "gpt-oss-120b-medium",
 }
+
+
+def is_retired_model(name: str) -> bool:
+    """Explicitly removed families must not return through CLI discovery or old buttons."""
+    return re.fullmatch(
+        r"(?:gemini-3\.[67]-flash(?:-[a-z0-9-]+)?|"
+        r"claude-(?:sonnet|opus)-4-6(?:-[a-z0-9-]+)?|gpt-oss-120b(?:-[a-z0-9-]+)?|"
+        r"3\.[67](?:-(?:low|med|medium|high))?|gpt|120b)", name.strip().lower(),
+    ) is not None
 
 
 def resolve_model(name: str) -> str:
@@ -297,3 +287,4 @@ def check_no_symlink(path: Path) -> None:
                 raise ConfigError("部署路径包含符号链接，已停止。")
         except PermissionError:
             pass
+

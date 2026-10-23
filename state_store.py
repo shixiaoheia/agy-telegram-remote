@@ -110,7 +110,7 @@ class Store:
         record = {key: record[key] for key in (
             "user_id", "updated_at", "job_id", "outcome", "text", "detail",
             "category", "agy_status", "exit_code", "stdout_bytes", "stderr_bytes",
-            "cleanup_ok", "delivery", "model", "duration_seconds",
+            "cleanup_ok", "delivery", "model", "effort", "mode", "duration_seconds",
             "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",
             "conversation_id", "num_turns",
             "session_tokens", "session_token_reminder", "model_fallback_from",
@@ -495,3 +495,4 @@ class Store:
         if type(value) is not int or value < 0:
             raise ValueError("Invalid update watermark")
         atomic_json(self.directory / "offset.json", value)
+

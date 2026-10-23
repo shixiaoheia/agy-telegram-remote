@@ -101,7 +101,7 @@ class FakeAPI:
             return True
         raise AssertionError(method)
 
-    async def download_file(self, _file_path, destination, maximum):
+    async def download_file(self, _file_path, destination, maximum, *, cancel=None):
         self.assert_download_limit = maximum
         destination.write_bytes(b"test")
         return 4
@@ -360,6 +360,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                                                 media_group_id="album-2"))
             album_task = self.bridge.album_task
             await album_task
+        await self.finish_job()
         self.assertEqual(self.runner.calls, 0)
         self.assertIsNone(self.bridge.slot)
         self.assertEqual(list((self.settings.workspace / ".agy-telegram-inputs").rglob("*")), [])
@@ -419,8 +420,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_or_unsafe_document_never_starts_task(self):
         oversized = {"file_id": "large_file", "file_size": 10 * 1024 * 1024 + 1, "file_name": "large.log"}
         await self.handle(attachment_update(document=oversized))
+        await self.finish_job()
         unsafe = {"file_id": "secret_file", "file_size": 4, "file_name": ".env"}
         await self.handle(attachment_update(document=unsafe, update_id=2))
+        await self.finish_job()
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
         self.assertEqual(self.runner.calls, 0)
         self.assertIn("单文件最大 10MB", self.api.messages[-1][1])
 
@@ -567,15 +572,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runner.calls, 0)
 
     async def test_model_command_switch_and_reset(self):
-        await self.handle(update("/model claude-sonnet-4-6"))
-        self.assertIn("已切换至：claude-sonnet-4-6｜思考强度：模型内置", self.api.messages[-1][1])
-        self.assertIsNone(self.api.messages[-1][2])
-        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        await self.handle(update("/model claude-sonnet-5-5-medium"))
+        self.assertIn("claude-sonnet-5-5-medium", self.api.messages[-1][1])
+        self.assertIsNotNone(self.api.messages[-1][2])
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5-medium")
         self.assertIsNone(self.store.get_effort(12345))
 
         # Check /model reflects the new choice
         await self.handle(update("/model"))
-        self.assertIn("当前：Claude Sonnet 4.6", self.api.messages[-1][1])
+        self.assertIn("当前：Claude Sonnet 5.5 · 均衡", self.api.messages[-1][1])
 
         # Reset model
         await self.handle(update("/model default"))
@@ -588,8 +593,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-high")
 
         await self.handle(update("/model opus"))
-        self.assertIn("已切换至：claude-opus-4-6-thinking｜思考强度：模型内置", self.api.messages[-1][1])
-        self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
+        self.assertIn("claude-opus-5-5-medium", self.api.messages[-1][1])
+        self.assertEqual(self.store.get_model(12345), "claude-opus-5-5-medium")
 
         await self.handle(update("/model pro"))
         self.assertIn("Gemini 3.1 Pro", self.api.messages[-1][1])
@@ -614,8 +619,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         buttons = [button["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
         self.assertIn("model:gemini-3.8-flash-high", buttons)
 
-        self.store.set_model_health({"claude-sonnet-4-6": {"outcome": "error", "category": "model"}})
-        await self.handle(update("/model claude-sonnet-4-6"))
+        self.store.set_model_health({"claude-sonnet-5-5-medium": {"outcome": "error", "category": "model"}})
+        await self.handle(update("/model claude-sonnet-5-5-medium"))
         self.assertIn("当前检测为不可用", self.api.messages[-1][1])
         self.assertIsNone(self.store.get_model(12345))
 
@@ -653,15 +658,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gemini-3.1-pro-high", self.api.messages[-1][1])
 
     async def test_fixed_effort_model_clears_legacy_effort_before_task(self):
-        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model(12345, "claude-sonnet-5-5-medium")
         self.store.set_effort(12345, "high")
         await self.handle(update("check a safe task"))
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
-        self.assertEqual(self.runner.last_model, "claude-sonnet-4-6")
+        self.assertEqual(self.runner.last_model, "claude-sonnet-5-5-medium")
         self.assertIsNone(self.store.get_effort(12345))
         record = self.store.load(12345)
-        self.assertEqual(record.get("model"), "claude-sonnet-4-6")
+        self.assertEqual(record.get("model"), "claude-sonnet-5-5-medium")
 
     async def test_result_includes_duration_tag(self):
         record = {
@@ -735,12 +740,12 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<b>标题</b>", self.api.messages[-1][1])
 
     async def test_model_command_highlights_current_model(self):
-        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model(12345, "claude-sonnet-5-5-medium")
         await self.handle(update("/model"))
         msg = self.api.messages[-1][1]
-        self.assertIn("当前：Claude Sonnet 4.6", msg)
+        self.assertIn("当前：Claude Sonnet 5.5 · 均衡", msg)
         labels = [button["text"] for row in self.api.messages[-1][2]["inline_keyboard"] for button in row]
-        self.assertEqual([label for label in labels if label.startswith("✓")], ["✓ Claude Sonnet 4.6"])
+        self.assertEqual([label for label in labels if label.startswith("✓")], ["✓ Claude Sonnet 5.5"])
 
     async def test_start_shows_new_user_welcome(self):
         await self.handle(update("/start"))
@@ -767,7 +772,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_command_sends_inline_keyboard(self):
         self.store.set_model_health({
             "gemini-3.8-flash-high": {"outcome": "success", "category": ""},
-            "claude-sonnet-4-6": {"outcome": "success", "category": ""},
+            "claude-sonnet-5-5-medium": {"outcome": "success", "category": ""},
         })
         await self.handle(update("/model"))
         self.assertIsNotNone(self.api.messages[-1][2])
@@ -775,7 +780,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("inline_keyboard", keyboard)
         buttons = [btn["callback_data"] for row in keyboard["inline_keyboard"] for btn in row]
         self.assertIn("model:gemini-3.8-flash-high", buttons)
-        self.assertIn("model:claude-sonnet-4-6", buttons)
+        self.assertIn("model:claude-sonnet-5-5-medium", buttons)
         self.assertIn("model:default", buttons)
 
     async def test_model_command_shows_picker_before_health_check(self):
@@ -783,8 +788,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         keyboard = self.api.messages[-1][2]
         buttons = [btn["callback_data"] for row in keyboard["inline_keyboard"] for btn in row]
         self.assertIn("model:gemini-3.8-flash-high", buttons)
-        self.assertIn("model:gemini-3.7-flash-high", buttons)
-        self.assertIn("model:claude-opus-4-6-thinking", buttons)
+        self.assertIn("model:gemini-3.8-flash-high", buttons)
+        self.assertIn("model:claude-opus-5-5-medium", buttons)
 
     async def test_task_acceptance_has_cancel_button_and_hides_internal_id(self):
         self.runner.hold = True
@@ -826,16 +831,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn({"command": "history", "description": "查看最近 10 条任务"}, command_call["commands"])
 
     async def test_callback_query_switches_model_and_answers(self):
-        await self.handle(callback_update("model:claude-opus-4-6-thinking", cq_id="cq_opus"))
-        self.assertEqual(self.store.get_model(12345), "claude-opus-4-6-thinking")
+        await self.handle(callback_update("choose:claude-opus-5-5-medium", cq_id="cq_opus"))
+        self.assertEqual(self.store.get_model(12345), "claude-opus-5-5-medium")
         self.assertEqual(len(self.api.answered_callbacks), 1)
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_opus")
         self.assertEqual("模型已切换", self.api.answered_callbacks[0][1])
-        self.assertIn("当前：Claude Opus 4.6", self.api.messages[-1][1])
+        self.assertIn("当前：Claude Opus 5.5 · 均衡", self.api.messages[-1][1])
         self.assertEqual(self.api.sent_count, 0)
 
     async def test_callback_query_resets_model_default(self):
-        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model(12345, "claude-sonnet-5-5-medium")
         await self.handle(callback_update("model:default", cq_id="cq_def"))
         self.assertIsNone(self.store.get_model(12345))
         self.assertEqual(self.api.answered_callbacks[0][0], "cq_def")
@@ -882,13 +887,13 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_discovers_new_family_and_hides_missing_models(self):
         self.runner.list_models = AsyncMock(return_value=("gemini-4.1-flash-high", "gemini-4.1-flash-low"))
-        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model(12345, "claude-sonnet-5-5-medium")
         await self.bridge._refresh_model_health(12345)
         await self.handle(update("/model"))
         buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
         self.assertIn("model:gemini-4.1-flash-high", buttons)
-        self.assertNotIn("model:claude-sonnet-4-6", buttons)
-        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        self.assertNotIn("model:claude-sonnet-5-5-medium", buttons)
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5-medium")
         await self.handle(callback_update("model:gemini-4.1-flash-high"))
         buttons = [b["callback_data"] for row in self.api.messages[-1][2]["inline_keyboard"] for b in row]
         self.assertIn("choose:gemini-4.1-flash-low", buttons)
@@ -921,14 +926,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_temporary_probe_failures_remain_selectable_with_diagnostics(self):
         for category in ("quota", "capacity", "network", "auth", "location"):
-            self.store.set_model_health({"claude-sonnet-4-6": {"outcome": "error", "category": category}})
+            self.store.set_model_health({"claude-sonnet-5-5-medium": {"outcome": "error", "category": category}})
             await self.handle(update("/model"))
             text, keyboard = self.api.messages[-1][1:]
             buttons = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
-            self.assertIn("model:claude-sonnet-4-6", buttons)
+            self.assertIn("model:claude-sonnet-5-5-medium", buttons)
             self.assertIn("不代表套餐无权限", text)
             await self.handle(update("/model sonnet"))
-            self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+            self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5-medium")
 
     async def test_conversation_memory_is_persisted_and_passed(self):
         self.runner.result = Result("success", text="Turn 1 ok", conversation_id="conv-turn-1", num_turns=1)
@@ -1038,18 +1043,18 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.sent_count, 0)
 
     async def test_variant_button_from_old_card_selects_its_own_model(self):
-        self.store.set_model(12345, "gemini-3.7-flash-high")
+        self.store.set_model(12345, "gemini-3.8-flash-high")
         await self.handle(callback_update("choose:gemini-3.8-flash-low"))
         self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-low")
 
     async def test_unavailable_high_does_not_hide_available_low(self):
-        self.store.set_model(12345, "claude-sonnet-4-6")
+        self.store.set_model(12345, "claude-sonnet-5-5-medium")
         self.store.set_model_health({"gemini-3.1-pro-high": {"outcome": "error", "category": "model"}})
         await self.handle(callback_update("model:gemini-3.1-pro-high"))
         self.assertIn("选择思考强度", self.api.messages[-1][1])
         await self.handle(callback_update("choose:gemini-3.1-pro-high"))
         self.assertTrue(self.api.answered_callbacks[-1][2])
-        self.assertEqual(self.store.get_model(12345), "claude-sonnet-4-6")
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5-medium")
         await self.handle(callback_update("choose:gemini-3.1-pro-low"))
         self.assertEqual(self.store.get_model(12345), "gemini-3.1-pro-low")
 
@@ -1267,11 +1272,11 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.sent_count, 1)
 
     async def test_gemini_reasoning_buttons_switch_catalog_variant_without_cli_effort(self):
-        self.store.set_model(12345, "gemini-3.7-flash-high")
+        self.store.set_model(12345, "gemini-3.8-flash-high")
         await self.bridge.handle(callback_update("effort:medium", user=12345))
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
-        self.assertEqual(self.store.get_model(12345), "gemini-3.7-flash-medium")
+        self.assertEqual(self.store.get_model(12345), "gemini-3.8-flash-medium")
         self.assertIsNone(self.store.get_effort(12345))
         self.assertIn("思考强度：均衡", self.api.messages[-1][1])
 
@@ -1433,3 +1438,4 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         # 3. Try changing mode
         await self.bridge.handle(callback_update("mode:plan", user=98765, cq_id="cq_unauth_3"))
         self.assertEqual(self.api.answered_callbacks[-1], ("cq_unauth_3", "⚠️ 无操作权限", True))
+
