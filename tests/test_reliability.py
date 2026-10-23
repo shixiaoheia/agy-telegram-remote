@@ -12,6 +12,7 @@ except ImportError:
     from common import settings_at
     from test_bot import FakeAPI, FakeRunner, attachment_update, callback_update, update
 from bot import Bridge, Job
+from agy_runner import Result
 from settings import OFFICIAL_MODELS, is_retired_model, resolve_model
 from state_store import Store
 from telegram_api import TelegramError
@@ -42,6 +43,142 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.reply_worker
         self.store.close()
         self.temp.cleanup()
+
+    async def test_completion_buttons_retrieve_history_and_start_new_conversation_without_execution(self):
+        await self.bridge.handle(update("first task"))
+        job = self.bridge.slot
+        await job.worker
+        card = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertIn("结果已发送", card[1])
+        buttons = [b["callback_data"] for row in card[2]["inline_keyboard"] for b in row]
+        self.assertEqual(buttons, [f"history:{job.job_id}", "tasks:history", "tasks:new"])
+        await self.bridge.handle(callback_update(buttons[0]))
+        await self.bridge.reply_worker
+        self.assertIn("the result", self.api.messages[-1][1])
+        await self.bridge.handle(callback_update("tasks:history"))
+        await self.bridge.reply_worker
+        self.assertIn("first task", self.api.messages[-1][1])
+        self.store.set_conversation(12345, "existing-conversation")
+        await self.bridge.handle(callback_update("tasks:new"))
+        await self.bridge.reply_worker
+        self.assertIsNone(self.store.get_conversation(12345))
+        self.assertEqual(self.runner.calls, 1)
+
+    async def test_old_completion_button_returns_its_own_result(self):
+        self.runner.result = Result("success", text="first saved result")
+        await self.bridge.handle(update("first task"))
+        first = self.bridge.slot
+        await first.worker
+        self.runner.result = Result("success", text="second saved result")
+        await self.bridge.handle(update("second task"))
+        await self.bridge.slot.worker
+        await self.bridge.handle(callback_update(f"history:{first.job_id}"))
+        await self.bridge.reply_worker
+        self.assertIn("first saved result", self.api.messages[-1][1])
+        self.assertNotIn("second saved result", self.api.messages[-1][1])
+        self.assertEqual(self.runner.calls, 2)
+
+    async def test_completion_buttons_cannot_access_another_user_or_group(self):
+        record = self.store.save(12345, {"job_id": "a" * 12, "outcome": "success", "text": "private result"})
+        self.store.save_history(12345, "private task", record)
+        self.store.set_conversation(12345, "private-conversation")
+        await self.bridge.handle(callback_update("history:" + "a" * 12, user=67890, chat_id=67890))
+        for action in ("tasks:history", "tasks:new", "history:" + "a" * 12):
+            await self.bridge.handle(callback_update(action, user=98765, chat_id=98765))
+            event = callback_update(action)
+            event["callback_query"]["message"]["chat"]["type"] = "group"
+            await self.bridge.handle(event)
+        if self.bridge.reply_worker:
+            await self.bridge.reply_worker
+        self.assertFalse(any("private result" in text for _, text, _ in self.api.messages))
+        self.assertEqual(self.store.get_conversation(12345)["conversation_id"], "private-conversation")
+        self.assertEqual(self.runner.calls, 0)
+
+    async def test_new_conversation_button_during_execution_defers_reset(self):
+        self.store.set_conversation(12345, "old-conversation")
+        self.runner.hold = True
+        self.runner.result = Result("success", text="done", conversation_id="old-conversation")
+        await self.bridge.handle(update("safe task"))
+        await self.runner.started.wait()
+        job = self.bridge.slot
+        await self.bridge.handle(callback_update("tasks:new"))
+        self.assertTrue(job.reset_after)
+        self.assertIsNotNone(self.store.get_conversation(12345))
+        self.runner.finish.set()
+        await job.worker
+        self.assertIsNone(self.store.get_conversation(12345))
+        self.assertEqual(self.runner.calls, 1)
+
+    async def test_delivery_failure_updates_card_and_retrieval_does_not_rerun(self):
+        self.api.fail_at = {2}
+        await self.bridge.handle(update("safe task"))
+        job = self.bridge.slot
+        await job.worker
+        card = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertIn("任务完成", card[1])
+        self.assertIn("结果发送失败或不完整", card[1])
+        self.assertIn("不会重新执行任务", card[1])
+        self.assertNotIn("下一条消息", card[1])
+        self.assertEqual(self.store.history_item(12345, job.job_id)["delivery"], "failed_or_partial")
+        await self.bridge.handle(callback_update(f"history:{job.job_id}"))
+        await self.bridge.reply_worker
+        self.assertIn("the result", self.api.messages[-1][1])
+        self.assertEqual(self.runner.calls, 1)
+
+    async def test_error_result_delivered_does_not_claim_execution_success(self):
+        self.runner.result = Result("error", detail="fixture error")
+        await self.bridge.handle(update("safe task"))
+        job = self.bridge.slot
+        await job.worker
+        card = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertIn("执行异常", card[1])
+        self.assertIn("结果已发送", card[1])
+        self.assertNotIn("任务完成", card[1])
+
+    async def test_failed_result_and_card_edit_send_short_retrieval_notice(self):
+        self.api.fail_at = {2}
+        self.api.edit = AsyncMock(side_effect=TelegramError())
+        await self.bridge.handle(update("safe task"))
+        job = self.bridge.slot
+        await job.worker
+        self.assertIn("结果发送失败或不完整", self.api.messages[-1][1])
+        buttons = self.api.messages[-1][2]["inline_keyboard"]
+        self.assertEqual(buttons[0][0]["callback_data"], f"history:{job.job_id}")
+        self.assertEqual(self.api.sent_count, 3)
+        self.assertEqual(self.runner.calls, 1)
+        self.assertEqual(self.store.load(12345)["delivery"], "failed_or_partial")
+
+    async def test_chinese_attachment_names_are_visible_while_disk_names_stay_safe(self):
+        document = {"file_id": "chinese_log", "file_size": 4, "file_name": "运行日志.log"}
+        await self.bridge.handle(attachment_update(document=document, caption="分析日志"))
+        job = self.bridge.slot
+        await job.worker
+        self.assertIn("运行日志.log", self.api.sent_messages[0][1])
+        self.assertIn("运行日志.log", self.runner.last_prompt)
+        self.assertTrue(job.attachments[0].name.isascii())
+        self.assertFalse(job.attachment_dir.exists())
+
+    async def test_chinese_display_names_strip_paths_controls_and_keep_collisions_distinct(self):
+        job = Job(12345, 12345)
+        try:
+            paths = []
+            for name in ("../目录\\运行\u202e日志\n.log", "错误日志.log"):
+                path, display = await self.bridge._receive_attachment(
+                    job, {"file_id": "fixture_log", "file_size": 4, "file_name": name}, False,
+                )
+                self.assertNotIn("目录", display)
+                self.assertNotIn("/", display)
+                self.assertNotIn("\\", display)
+                self.assertNotIn("\n", display)
+                self.assertNotIn("\u202e", display)
+                self.assertIn("日志.log", display)
+                self.assertTrue(path.name.isascii())
+                self.assertEqual(path.parent, self.settings.workspace / ".agy-telegram-inputs" / job.job_id)
+                paths.append(path)
+            self.assertEqual(len(set(paths)), 2)
+            self.assertTrue(all(p.read_bytes() == b"test" for p in paths))
+        finally:
+            self.bridge._cleanup_attachments(job)
 
     async def test_slow_download_does_not_block_status_or_cancel(self):
         started = asyncio.Event()

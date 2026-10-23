@@ -144,6 +144,8 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
                 (200, {"ok": True, "result": True}),
                 # The result delivery then fails, while /last remains available.
                 (502, b"temporary gateway error"),
+                # Final card explains delivery failure and offers retrieval buttons.
+                (200, {"ok": True, "result": True}),
                 (200, {"ok": True, "result": {"message_id": 2}}),
             ])
             await bridge.initialize()
