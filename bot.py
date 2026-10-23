@@ -359,7 +359,7 @@ def describe_html(record: dict) -> str:
     if record.get("delivery") in {"failed", "failed_or_partial"}:
         parts.append("⚠️ 上次发送未完成；这里是已保存的结果，没有重新执行任务。")
     if record.get("model_fallback_from"):
-        parts.append("⚠️ 原模型暂时无容量，已切换：" + html.escape(display_model(str(record["model_fallback_from"])))
+        parts.append("⚠️ 模型自动切换（原模型暂时无容量）：" + html.escape(display_model(str(record["model_fallback_from"])))
                      + " → " + html.escape(display_model(str(record.get("model") or ""))))
     if outcome not in {"success", "not_started", "running"}:
         parts.append("ℹ️ 没有自动重跑任务；取消不会撤销已发生的修改。/last 只取回记录。")
@@ -368,7 +368,9 @@ def describe_html(record: dict) -> str:
         parts.append("<blockquote expandable><b>执行过程</b>\n" + html.escape(summary) + "</blockquote>")
     parts.append(result_footer(record))
     if record.get("session_token_reminder"):
-        parts.append("💡 当前会话上下文较长；回复变慢或上下文混乱时，可发送 /new 开启新会话。")
+        tokens = record.get("session_tokens", 0)
+        cumulative = f"约 {tokens:,} Token" if type(tokens) is int and tokens >= 0 else "较多上下文"
+        parts.append(f"💡 当前会话累计{cumulative}；回复变慢或上下文混乱时，可发送 /new 开启新会话。")
     return "\n\n".join(part for part in parts if part)
 
 

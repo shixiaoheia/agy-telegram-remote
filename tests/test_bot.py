@@ -677,7 +677,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
         self.assertEqual(self.runner.last_model, "gemini-3.1-pro-high")
-        self.assertIn("gemini-3.1-pro-high", self.api.messages[-1][1])
+        self.assertIn("Gemini 3.1 Pro (High)", self.api.messages[-1][1])
+        self.assertEqual(self.store.load(12345)["model"], "gemini-3.1-pro-high")
 
     async def test_fixed_effort_model_clears_legacy_effort_before_task(self):
         self.store.set_model(12345, "claude-sonnet-5-5-medium")
