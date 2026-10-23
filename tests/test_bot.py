@@ -656,7 +656,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("agy auth login", message)
 
     async def test_status_explains_execution_permissions(self):
-        await self.handle(update("/status"))
+        await self.handle(update("/status details"))
         message = self.api.messages[-1][1]
         self.assertIn("工具自动审批", message)
         self.assertIn("额外可写目录", message)
@@ -769,7 +769,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("仅白名单私聊可使用", message)
 
     async def test_status_includes_workspace_disk_space(self):
-        await self.handle(update("/status"))
+        await self.handle(update("/status details"))
         msg = self.api.messages[-1][1]
         self.assertIn("工作空间可用磁盘", msg)
         self.assertIn("GB", msg)

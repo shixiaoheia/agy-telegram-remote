@@ -225,7 +225,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             bridge = Bridge(self.settings, self.api, self.store, self.runner)
         bridge._started_at = 1700000000
         with patch("bot.deployment_version", side_effect=AssertionError("must not reread marker")):
-            await bridge.handle(update("/status"))
+            await bridge.handle(update("/status details"))
         await bridge.reply_worker
         text = self.api.messages[-1][1]
         self.assertIn("部署版本：123456789abc", text)
