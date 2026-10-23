@@ -581,7 +581,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_command_show_current_and_examples(self):
         await self.handle(update("/model"))
         msg = self.api.messages[-1][1]
-        self.assertEqual(msg, "选择模型\n当前：默认（由 agy 决定）")
+        self.assertEqual(msg, "选择模型\n当前：默认（由 agy 决定）\n当前模型上次检测：未检测\n检测会消耗模型额度，不更改选定模型。")
         self.assertNotIn("gemini-", msg)
         self.assertEqual(self.runner.calls, 0)
 

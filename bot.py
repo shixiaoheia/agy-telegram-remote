@@ -740,7 +740,7 @@ class Bridge:
                      else "正在取消并清理" if job.cancel.is_set()
                      else {"preparing": "准备任务", "receiving": "接收附件", "starting": "启动模型",
                            "saving": "保存结果", "sending": "结果已完成，正在发送"}.get(job.phase, job.activity))
-            lines.extend([f"任务：{task_title(job.history_title)}", f"阶段：{stage}",
+            lines.extend([f"当前任务：{task_title(job.history_title)}", f"阶段：{stage}",
                           f"已运行：{max(0, int(time.monotonic() - job.started_at))} 秒"])
             current = job.model
         elif self.model_check_task is not None and not self.model_check_task.done():
@@ -2338,8 +2338,8 @@ class Bridge:
             self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
 
     async def _prepare_and_work(self, job: Job, text: str, items: list[tuple[dict, bool]]) -> None:
-        job.phase = "receiving" if items else "preparing"
         """Download outside polling; retain the slot until all writes and cleanup finish."""
+        job.phase = "receiving" if items else "preparing"
         chat_id = job.chat
         accepted = False
         try:
