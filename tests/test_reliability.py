@@ -34,6 +34,9 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
 
     async def asyncTearDown(self):
+        if self.bridge.restart_task is not None:
+            self.bridge.restart_task.cancel()
+            await asyncio.gather(self.bridge.restart_task, return_exceptions=True)
         self.runner.finish.set()
         if self.bridge.slot:
             self.bridge.slot.cancel.set()
@@ -43,6 +46,114 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.reply_worker
         self.store.close()
         self.temp.cleanup()
+
+    async def test_large_chinese_results_do_not_block_later_tasks(self):
+        self.runner.result = Result("success", text="中" * 30000)
+        for index in range(6):
+            await self.bridge.handle(update(f"task {index}"))
+            await self.bridge.slot.worker
+            self.assertFalse(self.runner.blocked)
+        self.assertEqual(self.runner.calls, 6)
+        history = self.store.history(12345)
+        self.assertEqual(len(history), 6)
+        self.assertTrue(all(item["delivery"] == "sent" and item["text"] == "中" * 30000
+                            for item in history))
+
+    async def test_restart_waits_until_cancelled_worker_cleanup_is_finished(self):
+        started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def run(_prompt, cancel, **kwargs):
+            started.set()
+            await cancel.wait()
+            cleaning.set()
+            await release.wait()
+            return Result("cancelled")
+
+        self.runner.run = run
+        with patch("bot.os.execv") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
+            await self.bridge.handle(update("safe task"))
+            await asyncio.wait_for(started.wait(), 1)
+            job = self.bridge.slot
+            try:
+                await self.bridge.handle(update("/cancel"))
+                await asyncio.wait_for(cleaning.wait(), 1)
+                await self.bridge.handle(update("/restart"))
+                self.assertIsNone(self.bridge.restart_task)
+                self.assertIs(self.bridge.slot, job)
+                execute.assert_not_called()
+            finally:
+                release.set()
+                await job.worker
+            await self.bridge.handle(update("/restart"))
+            restart = self.bridge.restart_task
+            self.assertIsNotNone(restart)
+            await restart
+            execute.assert_called_once()
+
+    async def test_restart_rejects_album_model_probe_and_pending_correction(self):
+        waiting = asyncio.create_task(asyncio.Event().wait())
+        try:
+            with patch("bot.os.execv") as execute:
+                for field, value in (("pending_album", {"user": 12345}),
+                                     ("album_task", waiting), ("model_check_task", waiting)):
+                    setattr(self.bridge, field, value)
+                    await self.bridge.handle(update("/restart"))
+                    self.assertIsNone(self.bridge.restart_task)
+                    setattr(self.bridge, field, None)
+                self.bridge.steer_tasks.add(waiting)
+                await self.bridge.handle(update("/restart"))
+                self.assertIsNone(self.bridge.restart_task)
+                self.bridge.steer_tasks.clear()
+                self.runner.blocked = True
+                await self.bridge.handle(update("/restart"))
+                self.assertIsNone(self.bridge.restart_task)
+                execute.assert_not_called()
+        finally:
+            self.runner.blocked = False
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    async def test_restart_reservation_blocks_new_work_and_duplicate_restarts(self):
+        with patch("bot.os.execv") as execute, patch("bot.RESTART_DELAY_SECONDS", 0.02):
+            await self.bridge.handle(update("/restart"))
+            restart = self.bridge.restart_task
+            await self.bridge.handle(update("a new task"))
+            await self.bridge.handle(attachment_update(
+                photo=[{"file_id": "photo", "file_size": 4}], media_group_id="album",
+            ))
+            await self.bridge.handle(update("/model refresh"))
+            await self.bridge.handle(update("/restart"))
+            self.assertIs(self.bridge.restart_task, restart)
+            self.assertIsNone(self.bridge.slot)
+            self.assertIsNone(self.bridge.pending_album)
+            self.assertIsNone(self.bridge.model_check_task)
+            self.assertEqual(self.runner.calls, 0)
+            await restart
+            execute.assert_called_once()
+            self.assertFalse(self.bridge._restart_pending())
+
+    async def test_restart_checks_for_new_busy_state_immediately_before_exec(self):
+        with patch("bot.os.execv") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
+            await self.bridge.handle(update("/restart"))
+            restart = self.bridge.restart_task
+            self.bridge.slot = Job(12345, 12345)
+            self.bridge.slot.cancel.set()
+            try:
+                await restart
+                execute.assert_not_called()
+                self.assertFalse(self.bridge._restart_pending())
+            finally:
+                self.bridge.slot = None
+
+    async def test_shutdown_cancels_pending_restart_without_exec(self):
+        with patch("bot.os.execv") as execute:
+            await self.bridge.handle(update("/restart"))
+            restart = self.bridge.restart_task
+            self.bridge.stop.set()
+            await asyncio.wait_for(self.bridge.run(), 1)
+            self.assertTrue(restart.done())
+            self.assertFalse(self.bridge._restart_pending())
+            execute.assert_not_called()
 
     async def test_completion_buttons_retrieve_history_and_start_new_conversation_without_execution(self):
         await self.bridge.handle(update("first task"))

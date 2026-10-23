@@ -13,6 +13,8 @@ from typing import Any
 
 from settings import check_no_symlink, resolve_model
 
+HISTORY_ITEMS = 10
+
 
 def atomic_json(path: Path, value: Any) -> None:
     data = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -367,11 +369,24 @@ class Store:
             raise ValueError("User is not allowed")
         return self.directory / f"history-{user}.json"
 
+    def _history_maximum(self) -> int:
+        # Each result has two capped text fields (up to six JSON bytes per
+        # character), plus metadata. History retains ten complete results,
+        # rather than sharing the byte allowance of a single result.
+        return HISTORY_ITEMS * (12 * self.max_reply + 16384) + 65536
+
+    def _write_history(self, user: int, items: list[dict]) -> None:
+        value = {"user_id": user, "items": items[:HISTORY_ITEMS]}
+        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+        if size > self._history_maximum():
+            raise ValueError("Oversized history record")
+        atomic_json(self._history_path(user), value)
+
     def save_history(self, user: int, title: str, record: dict) -> None:
         """Keep a small, private, per-user result history for /history."""
         title = self.redact(" ".join(str(title).split()))[:160] or "未命名任务"
         try:
-            value = read_json(self._history_path(user), 12 * self.max_reply + 65536)
+            value = read_json(self._history_path(user), self._history_maximum())
             items = value.get("items", []) if isinstance(value, dict) else []
         except FileNotFoundError:
             items = []
@@ -383,12 +398,12 @@ class Store:
         # Newest first. Keep full stored records, but never an unbounded history.
         items = [item] + [entry for entry in items
                           if isinstance(entry, dict) and entry.get("job_id") != item.get("job_id")]
-        atomic_json(self._history_path(user), {"user_id": user, "items": items[:10]})
+        self._write_history(user, items)
 
     def history(self, user: int) -> list[dict]:
         path = self._history_path(user)
         try:
-            value = read_json(path, 12 * self.max_reply + 65536)
+            value = read_json(path, self._history_maximum())
         except FileNotFoundError:
             return []
         if not isinstance(value, dict) or value.get("user_id") != user:
@@ -401,9 +416,9 @@ class Store:
                  and entry.get("user_id") == user
                  and isinstance(entry.get("updated_at"), (int, float))
                  and now - entry["updated_at"] <= self.retention]
-        if len(valid) != len(items):
-            atomic_json(path, {"user_id": user, "items": valid[:10]})
-        return valid[:10]
+        if len(valid) != len(items) or len(valid) > HISTORY_ITEMS:
+            self._write_history(user, valid)
+        return valid[:HISTORY_ITEMS]
 
     def history_item(self, user: int, job_id: str) -> dict | None:
         if not isinstance(job_id, str) or not re.fullmatch(r"[a-f0-9]{12}", job_id):
