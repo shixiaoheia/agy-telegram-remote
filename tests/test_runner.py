@@ -68,6 +68,16 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(classify("DNS resolution failed"), "network")
         self.assertEqual(classify("unrelated error"), "unknown")
 
+    def test_account_entitlement_is_distinct_from_temporary_model_failures(self):
+        for error in ("model is not available for your plan",
+                      "Permission denied: model is not available for your account",
+                      "model not enabled for your account",
+                      "model requires a paid subscription"):
+            self.assertEqual(classify(error), "entitlement")
+        self.assertEqual(classify("model unavailable: quota exhausted"), "quota")
+        self.assertEqual(classify("model unavailable: no capacity available"), "capacity")
+        self.assertEqual(classify("permission denied"), "filesystem_permission")
+
     def test_location_error_is_distinct_from_auth_and_model_errors(self):
         message = "FAILED_PRECONDITION (code 400): User location is not supported for the API use."
         result = self.parse({"status": "ERROR", "error": message}, code=1)

@@ -40,6 +40,7 @@ CATEGORY_HELP = {
     "auth": "需要重新授权：请在服务器运行 agy auth login，完成 Google 登录后再试。",
     "quota": "账号额度或限流：请稍后再试，或检查当前 Google 账号额度。",
     "model": "模型不可用或参数不兼容：发送 /model refresh 重新检测可用模型。",
+    "entitlement": "当前账号或套餐没有此模型权限：请选择已可用模型；更换账号或套餐后可用 /model refresh 重新检测。",
     "permission": "工具审批被拒绝：请检查 /status 中的自动审批设置与 agy 权限规则；需要编辑时使用 /mode code。",
     "filesystem_readonly": "文件系统只读：自动审批不能解除 systemd 的目录限制。请通过安装器 --write-paths 显式开放需要修改的应用目录，见 README。",
     "filesystem_permission": "系统权限不足：请核对目标文件权限、ACL 与服务 CapabilityBoundingSet；开启 agy 自动审批不能补足操作系统权限。",
@@ -405,6 +406,7 @@ def model_health_text(result: dict | None) -> str:
     category = str(result.get("category") or "unknown")
     labels = {
         "auth": "需要授权", "quota": "额度或限流", "model": "模型不可用",
+        "entitlement": "账号或套餐无权限",
         "location": "地区不受支持",
         "capacity": "容量暂时不足", "network": "网络异常", "process": "agy 无法启动",
     }
@@ -651,7 +653,8 @@ class Bridge:
 
     def _model_is_known_unavailable(self, model: str) -> bool:
         result = self._model_health().get("models", {}).get(model)
-        return isinstance(result, dict) and result.get("outcome") != "success"
+        return (isinstance(result, dict) and result.get("outcome") != "success"
+                and result.get("category") in {"model", "entitlement"})
 
     async def _refresh_model_health(self, chat_id: int) -> None:
         results: dict[str, dict] = {}
@@ -676,7 +679,7 @@ class Bridge:
             self.queue_reply(
                 chat_id,
                 f"✅ 模型可用性检测完成：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
-                "发送 /model 查看可用模型；失败原因已在列表中标注。",
+                "发送 /model 查看模型；账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。",
             )
         except Exception as error:
             LOG.warning("model_health_check_failed type=%s", type(error).__name__)
@@ -1117,7 +1120,7 @@ class Bridge:
         known = {model for _, variants in choices for model in variants}
         groups: dict[str, list[str]] = {}
         for model, result in self._model_health().get("models", {}).items():
-            if model in known or len(model) > 57 or result.get("category") == "model":
+            if model in known or len(model) > 57 or result.get("category") in {"model", "entitlement"}:
                 continue
             match = CATALOG_VARIANT_RE.fullmatch(model)
             group = match.group(1) if match else model
@@ -1145,16 +1148,26 @@ class Bridge:
     def _model_picker(self, user: int) -> tuple[str, dict]:
         current = self.store.get_model(user) or self.settings.model or ""
         buttons = []
+        notices = []
+        health = self._model_health().get("models", {})
         for label, variants in self._model_choices():
             usable = [x for x in variants if not self._model_is_known_unavailable(x)]
             if not usable:
                 continue
-            buttons.append({"text": ("✓ " if current in variants else "") + label,
-                            "callback_data": f"model:{usable[0]}"})
+            verified = [x for x in usable if health.get(x, {}).get("outcome") == "success"]
+            target = (verified or usable)[0]
+            failed = health.get(target, {}).get("outcome") not in {None, "success"}
+            buttons.append({"text": ("✓ " if current in variants else "") + ("⚠️ " if failed else "") + label,
+                            "callback_data": f"model:{target}"})
+            if failed:
+                notices.append(f"{label}：{model_health_text(health[target])}")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append([{"text": "恢复默认", "callback_data": "model:default"},
                      {"text": "关闭", "callback_data": "selector:close"}])
-        return f"选择模型\n当前：{self._model_label(current)}", {"inline_keyboard": rows}
+        text = f"选择模型\n当前：{self._model_label(current)}"
+        if notices:
+            text += "\n\n上次检测（不代表套餐无权限）：\n" + "\n".join(notices)
+        return text, {"inline_keyboard": rows}
 
     def _effort_picker(self, user: int, model_label: str, *, model: str | None = None) -> tuple[str, dict]:
         current = self.store.get_model(user) or self.settings.model or ""
