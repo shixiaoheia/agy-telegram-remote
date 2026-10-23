@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import html
 import logging
+import math
 import os
 import re
 import signal
@@ -15,6 +16,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from agy_runner import Result, Runner
@@ -64,6 +66,7 @@ SESSION_TOKEN_REMINDER_THRESHOLD = 100_000
 TYPING_HEARTBEAT_SECONDS = 4
 PROGRESS_UPDATE_SECONDS = 5
 RESTART_DELAY_SECONDS = 0.8
+CORRECTION_TTL_SECONDS = 300
 CAPACITY_FALLBACKS = {
     "gemini-3.8-flash-low": "gemini-3.8-flash-high",
     "gemini-3.8-flash-medium": "gemini-3.8-flash-high",
@@ -314,6 +317,10 @@ class Job:
     status_message_id: int | None = None
     progress_task: asyncio.Task | None = None
     activity: str = "正在准备任务"
+    phase: str = "preparing"
+    pending_correction: str = ""
+    correction_token: str = ""
+    correction_expires: float = 0.0
     attachment_dir: Path | None = None
     attachments: list[Path] = field(default_factory=list)
     attachment_feedback: str = ""
@@ -354,20 +361,55 @@ def task_title(text: str, fallback: str = "未命名任务") -> str:
     return " ".join(text.split())[:160] or fallback
 
 
+def record_time_label(stamp: object, now: float | None = None) -> str:
+    if type(stamp) not in {int, float} or not 0 < stamp <= 253402300799 or not math.isfinite(stamp):
+        return "时间未知"
+    try:
+        value = datetime.fromtimestamp(stamp)
+        today = datetime.fromtimestamp(time.time() if now is None else now).date()
+        day = ("今天" if value.date() == today else
+               "昨天" if value.date() == today - timedelta(days=1) else value.strftime("%m-%d "))
+        return day + value.strftime("%H:%M")
+    except (OSError, ValueError, OverflowError):
+        return "时间未知"
+
+
+def history_model_label(model: str) -> str:
+    match = re.match(r"claude-(sonnet|opus)-(\d+)-(\d+)", model)
+    if match:
+        return f"{match[1].title()} {match[2]}.{match[3]}"
+    match = re.match(r"gemini-(\d+(?:\.\d+)?)-(flash|pro|argon)", model)
+    if match:
+        return f"{match[2].title()} {match[1]}"
+    return model[:32] or "默认模型"
+
+
+def correction_prompt(job: Job, correction: str) -> str:
+    return ("这是对刚才已取消任务的修正。请以“最新修正”为准，不要沿用已取消任务的未完成结论。\n\n"
+            f"原任务：\n{job.original_prompt}\n\n最新修正：\n{correction}")
+
+
 def history_summary(records: list[dict]) -> tuple[str, dict | None]:
     if not records:
         return "📚 任务历史\n━━━━━━━━━━━━━━━━━━━━\nℹ️ 暂无已完成的任务记录。", None
-    lines = ["📚 任务历史（最近 10 条）", "━━━━━━━━━━━━━━━━━━━━"]
+    lines = ["📚 任务历史（最近 10 条）", "时间按服务器本地时区 " + time.strftime("%z"), "━━━━━━━━━━━━━━━━━━━━"]
     keyboard: list[list[dict[str, str]]] = []
     for index, record in enumerate(records, 1):
         title = task_title(str(record.get("title", "未命名任务")))
         outcome = str(record.get("outcome", "error"))
         duration = record.get("duration_seconds")
         duration_text = f" ｜ ⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
-        lines.append(f"{index}. {LABELS.get(outcome, '结果需核对')}{duration_text}\n   {title}")
+        stamp = record_time_label(record.get("updated_at"))
+        model = history_model_label(str(record.get("model") or ""))
+        delivery = {"failed": "⚠️ 未送达", "failed_or_partial": "⚠️ 未完整送达",
+                    "unknown": "⚠️ 投递未确认", "pending": "⚠️ 投递未确认",
+                    "superseded_by_steer": "已修正替代"}.get(str(record.get("delivery") or ""), "")
+        delivery_text = f" ｜ {delivery}" if delivery else ""
+        lines.append(f"{index}. {LABELS.get(outcome, '结果需核对')} ｜ {stamp} ｜ {model}"
+                     f"{duration_text}{delivery_text}\n   {title}")
         job_id = record.get("job_id")
         if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
-            label = f"{index}. {title}"[:60]
+            label = f"{index}. {stamp} {title}"[:60]
             keyboard.append([{"text": label, "callback_data": f"history:{job_id}"}])
     lines.append("━━━━━━━━━━━━━━━━━━━━\n点击下方任务可查看完整结果。")
     return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
@@ -673,10 +715,97 @@ class Bridge:
         self.model_check_user: int | None = None
         self.model_check_progress = ""
         self.model_check_cancelling = False
+        self.model_check_id = ""
+        self.model_check_started_at = 0.0
         self.pending_album: dict | None = None
         self.album_task: asyncio.Task | None = None
         self.restart_task: asyncio.Task | None = None
         self.steer_tasks: set[asyncio.Task] = set()
+
+    def _status_card(self, user: int, details: bool = False) -> tuple[str, dict]:
+        keyboard = {"inline_keyboard": [[
+            {"text": "返回概览" if details else "详细信息",
+             "callback_data": "status:summary" if details else "status:details"},
+            {"text": "刷新状态", "callback_data": "status:details" if details else "status:summary"},
+        ]]}
+        if details:
+            return self.store.redact(self._status_details(user)), keyboard
+        lines = ["📋 当前状态"]
+        job = self.slot
+        current = self.store.get_model(user) or self.settings.model or ""
+        if self.runner.blocked:
+            lines.append("⚠️ 新任务已暂停，请检查服务器；已保存结果仍可取回。")
+        if job is not None and job.user == user:
+            stage = ("正在清理并交接修正任务" if job.steered and job.steer_task and not job.steer_task.done()
+                     else "正在取消并清理" if job.cancel.is_set()
+                     else {"preparing": "准备任务", "receiving": "接收附件", "starting": "启动模型",
+                           "saving": "保存结果", "sending": "结果已完成，正在发送"}.get(job.phase, job.activity))
+            lines.extend([f"当前任务：{task_title(job.history_title)}", f"阶段：{stage}",
+                          f"已运行：{max(0, int(time.monotonic() - job.started_at))} 秒"])
+            current = job.model
+        elif self.model_check_task is not None and not self.model_check_task.done():
+            stage = "正在取消并清理模型检测" if self.model_check_cancelling else self.model_check_progress
+            lines.append(f"🔎 模型检测：{stage}")
+            if self.model_check_started_at:
+                lines.append(f"已运行：{max(0, int(time.monotonic() - self.model_check_started_at))} 秒")
+        elif self.pending_album is not None:
+            lines.append("正在接收你的相册" if self.pending_album["user"] == user else "工作目录正被其他用户占用")
+        elif job is not None:
+            lines.append("你当前没有任务；工作目录正被其他白名单用户占用。")
+        elif not self.runner.blocked:
+            lines.append("你当前没有任务，可以直接发送需求。")
+        lines.append(f"模型：{self._model_label(current)}")
+        lines.append(f"部署版本：{self._deployment_version}")
+        lines.append("路径、权限和启动时间可点“详细信息”查看。")
+        return self.store.redact("\n".join(lines)), keyboard
+
+    def _status_details(self, user: int) -> str:
+        current_model = self.store.get_model(user) or self.settings.model
+        model_info = f" [模型：{current_model}]" if current_model else ""
+        effort = self.store.get_effort(user)
+        effort_info = f"\n⚡ 思考强度：{effort.capitalize()}" if effort else ""
+        mode = self.store.get_mode(user)
+        mode_name = "推演规划 (Plan)" if mode == "plan" else ("落地编辑 (Accept-Edits)" if mode == "accept-edits" else mode)
+        mode_info = f"\n📋 执行模式：{mode_name or '跟随 agy 设置（不保证自动编辑）'}"
+        permission_info = (
+            f"\n🔐 工具自动审批：{'开启' if self.settings.skip_permissions else '关闭（无交互任务可能被拒绝）'}"
+            f"\n📁 工作目录：{self.settings.workspace}"
+            f"\n📝 额外可写目录（配置值）：{', '.join(map(str, self.settings.write_paths)) or '未配置'}"
+            f"\n🖥️ 主机权限（配置值）：{'完整 Root 权限' if self.settings.host_access == 'full' else '受限目录模式'}"
+            "\n💡 实际权限以主机与 systemd 当前设置为准。"
+        )
+        conv = self.store.get_conversation(user)
+        conv_info = ""
+        if conv and conv.get("conversation_id"):
+            cid = conv["conversation_id"]
+            short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+            turns = conv.get("num_turns", 1)
+            conv_info = f"\n🧠 记忆会话：`{short_cid}` (第 {turns} 轮)"
+        disk_info = ""
+        try:
+            import shutil
+            usage = shutil.disk_usage(self.settings.workspace)
+            free_gb = usage.free / (1024 ** 3)
+            disk_info = f"\n💾 工作空间可用磁盘：{free_gb:.1f} GB"
+        except Exception:
+            pass
+        if self.slot and self.slot.user == user:
+            job_model = f"[{self.slot.model}] " if self.slot.model else ""
+            text = f"⏳ 当前任务：{job_model}" + (
+                "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
+            )
+        elif self.runner.blocked:
+            text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
+        else:
+            text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
+        started = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(self._started_at))
+        text += (f"\n🔖 部署版本：{self._deployment_version}"
+                 f"\n🕒 服务启动：{started}（服务器时间）")
+        text += conv_info + effort_info + mode_info + disk_info + permission_info
+        if self.model_check_task is not None and not self.model_check_task.done():
+            text += ("\n🔎 模型检测：正在取消并清理" if self.model_check_cancelling
+                     else f"\n🔎 模型检测：{self.model_check_progress}")
+        return text
 
     def _restart_pending(self) -> bool:
         return self.restart_task is not None and not self.restart_task.done()
@@ -717,31 +846,36 @@ class Bridge:
         return (isinstance(result, dict) and result.get("outcome") != "success"
                 and result.get("category") in {"model", "entitlement"})
 
-    async def _refresh_model_health(self, chat_id: int) -> None:
+    async def _refresh_model_health(self, chat_id: int, model: str | None = None) -> None:
         results: dict[str, dict] = {}
         try:
-            models = tuple(model for model in await self.runner.list_models()
-                           if not is_retired_model(model))
-            results = {model: {"outcome": "error", "category": "model"}
-                       for model in OFFICIAL_MODEL_IDS if model not in models}
-            for index, model in enumerate(models, 1):
-                self.model_check_progress = f"{index}/{len(models)}：{model}"
+            if model is None:
+                models = tuple(item for item in await self.runner.list_models()
+                               if not is_retired_model(item))
+                results = {item: {"outcome": "error", "category": "model", "checked_at": time.time()}
+                           for item in OFFICIAL_MODEL_IDS if item not in models}
+            else:
+                models = (model,)
+                results = dict(self._model_health().get("models", {}))
+            for index, target in enumerate(models, 1):
+                self.model_check_progress = f"{index}/{len(models)}：{target}"
                 try:
                     result = await asyncio.wait_for(
-                        self.runner.run(MODEL_PROBE_PROMPT, asyncio.Event(), model=model), timeout=45,
+                        self.runner.run(MODEL_PROBE_PROMPT, asyncio.Event(), model=target), timeout=45,
                     )
-                    results[model] = {"outcome": result.outcome if result.outcome in {
+                    results[target] = {"outcome": result.outcome if result.outcome in {
                         "success", "error", "timed_out", "invalid"
-                    } else "error", "category": result.category or "unknown"}
+                    } else "error", "category": result.category or "unknown", "checked_at": time.time()}
                 except asyncio.TimeoutError:
-                    results[model] = {"outcome": "timed_out", "category": "network"}
+                    results[target] = {"outcome": "timed_out", "category": "network", "checked_at": time.time()}
                 if self.runner.blocked:
                     raise RuntimeError("Model probe cleanup failed")
             self.store.set_model_health(results)
-            available = sum(item["outcome"] == "success" for item in results.values())
+            available = sum(results[item]["outcome"] == "success" for item in models)
+            heading = "当前模型检测完成" if model is not None else "模型可用性检测完成"
             self.queue_reply(
                 chat_id,
-                f"✅ 模型可用性检测完成：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
+                f"✅ {heading}：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
                 "发送 /model 查看模型；账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。",
             )
         except asyncio.CancelledError:
@@ -763,6 +897,8 @@ class Bridge:
             self.model_check_user = None
             self.model_check_progress = ""
             self.model_check_cancelling = False
+            self.model_check_id = ""
+            self.model_check_started_at = 0.0
 
     def _cancel_model_health(self) -> None:
         if (self.model_check_task is not None and not self.model_check_task.done()
@@ -770,7 +906,13 @@ class Bridge:
             self.model_check_cancelling = True
             self.model_check_task.cancel()
 
-    def _start_model_health_refresh(self, chat_id: int) -> None:
+    def _start_model_health_refresh(self, chat_id: int, model: str | None = None) -> None:
+        if self.runner.blocked:
+            self.queue_reply(chat_id, "⚠️ 新任务已暂停，请先检查服务器状态。")
+            return
+        if model is not None and (not MODEL_RE.fullmatch(model) or is_retired_model(model)):
+            self.queue_reply(chat_id, "⚠️ 请先选择有效的具体模型，再检测当前模型。")
+            return
         if self._restart_pending():
             self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。")
             return
@@ -784,9 +926,16 @@ class Bridge:
             return
         self.model_check_user = chat_id
         self.model_check_cancelling = False
-        self.model_check_progress = "正在读取模型目录"
-        self.queue_reply(chat_id, "🔎 正在逐个验证官方模型，请稍候；/status 查看进度，/cancel 取消检测。检测提示要求不用工具、不读写工作目录。")
-        self.model_check_task = asyncio.create_task(self._refresh_model_health(chat_id))
+        self.model_check_progress = "正在准备检测当前模型" if model is not None else "正在读取模型目录"
+        self.model_check_id = uuid.uuid4().hex[:12]
+        self.model_check_started_at = time.monotonic()
+        scope = "当前模型" if model is not None else "全部模型"
+        self.queue_reply(chat_id, f"🔎 正在检测{scope}，会消耗模型额度。\n/status 查看进度，/cancel 取消检测。检测提示要求不用工具、不读写工作目录。",
+                         reply_markup={"inline_keyboard": [[
+                             {"text": "查看进度", "callback_data": "status:summary"},
+                             {"text": "取消检测", "callback_data": f"probe:cancel:{self.model_check_id}"},
+                         ]]})
+        self.model_check_task = asyncio.create_task(self._refresh_model_health(chat_id, model))
         self.model_check_task.add_done_callback(self._model_check_finished)
 
     def _is_allowed(self, user: int) -> bool:
@@ -827,6 +976,7 @@ class Bridge:
         return True
 
     def _release_job(self, job: Job) -> None:
+        self._forget_correction(job)
         handoff = job.steer_task
         if self.slot is job and not (handoff is not None and not handoff.done()):
             self.slot = None
@@ -862,6 +1012,7 @@ class Bridge:
 
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
         try:
+            job.phase = "starting"
             model_info = f"（模型：{job.model}）" if job.model else ""
             effort_info = f"\n⚡ 思考强度：{job.effort.capitalize()}" if job.effort else ""
             mode_name = "推演规划 (Plan)" if job.mode == "plan" else ("落地编辑 (Accept-Edits)" if job.mode == "accept-edits" else job.mode)
@@ -922,6 +1073,7 @@ class Bridge:
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
+            job.phase = "running"
             job.progress_task = asyncio.create_task(self._refresh_progress(job))
             job.typing_task = asyncio.create_task(self._typing_heartbeat(job))
             result = await self._run_task(job, prompt)
@@ -956,6 +1108,7 @@ class Bridge:
                 self._mark_model_capacity_unavailable(fallback_from)
                 result = await self._run_task(job, prompt)
 
+            job.phase = "saving"
             # Persist the execution evidence before optional accounting/context
             # writes: their failure must not leave only a stale running record.
             record = self.store.save(
@@ -994,6 +1147,7 @@ class Bridge:
                     warnings.append("任务结果已保存，但累计用量更新失败，本次统计可能缺失。")
             if warnings:
                 record["metadata_warning"] = " ".join(warnings)
+            job.phase = "sending"
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
             if job.progress_task:
                 job.progress_task.cancel()
@@ -1057,7 +1211,8 @@ class Bridge:
     def _mark_model_capacity_unavailable(self, model: str) -> None:
         health = self._model_health()
         models = dict(health.get("models", {}))
-        models[model] = {"outcome": "error", "category": "capacity"}
+        models[model] = {"outcome": "error", "category": "capacity",
+                         "checked_at": models.get(model, {}).get("checked_at", 0.0)}
         self.store.set_model_health(models)
 
     async def _typing_heartbeat(self, job: Job) -> None:
@@ -1157,10 +1312,7 @@ class Bridge:
             if self.slot is not job:
                 self.queue_reply(job.chat, "⚠️ 任务位置已变化，未启动修正任务；请检查 /status。")
                 return
-            prompt = (
-                "这是对刚才已取消任务的修正。请以“最新修正”为准，不要沿用已取消任务的未完成结论。\n\n"
-                f"原任务：\n{job.original_prompt}\n\n最新修正：\n{correction}"
-            )
+            prompt = correction_prompt(job, correction)
             if len(prompt) > self.settings.max_prompt:
                 self.queue_reply(job.chat, "⚠️ 原任务和修正合并后过长；请重新发送一条精简后的完整任务。")
                 return
@@ -1322,9 +1474,19 @@ class Bridge:
             if failed:
                 notices.append(f"{label}：{model_health_text(health[target])}")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([{"text": "检测当前模型", "callback_data": "probe:current"},
+                     {"text": "检测全部", "callback_data": "probe:all"}])
         rows.append([{"text": "恢复默认", "callback_data": "model:default"},
                      {"text": "关闭", "callback_data": "selector:close"}])
         text = f"选择模型\n当前：{self._model_label(current)}"
+        stamp = health.get(current, {}).get("checked_at", 0)
+        if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0:
+            age = max(0, int(time.time() - stamp))
+            checked = ("刚刚" if age < 60 else f"{age // 60} 分钟前" if age < 3600
+                       else f"{age // 3600} 小时前" if age < 86400 else record_time_label(stamp))
+        else:
+            checked = "未检测"
+        text += f"\n当前模型上次检测：{checked}\n检测会消耗模型额度，不更改选定模型。"
         if notices:
             text += "\n\n上次检测（不代表套餐无权限）：\n" + "\n".join(notices)
         return text, {"inline_keyboard": rows}
@@ -1368,6 +1530,35 @@ class Bridge:
         except (TelegramError, AttributeError):
             return False
 
+    def _forget_correction(self, job: Job) -> None:
+        job.pending_correction = ""
+        job.correction_token = ""
+        job.correction_expires = 0.0
+
+    def _offer_correction(self, user: int, text: str) -> bool:
+        job = self.slot
+        if (job is None or job.user != user or job.has_attachment or job.attachments
+                or job.cancel.is_set() or job.steered or job.steer_task is not None
+                or job.phase in {"saving", "sending"} or not job.original_prompt):
+            return False
+        if not text.strip() or "\x00" in text or len(correction_prompt(job, text)) > self.settings.max_prompt:
+            self.queue_reply(user, "⚠️ 补充与原任务合并后过长或格式无效。当前任务未改变，请精简补充内容。")
+            return True
+        job.pending_correction = text
+        job.correction_token = uuid.uuid4().hex[:12]
+        job.correction_expires = time.monotonic() + CORRECTION_TTL_SECONDS
+        prefix = f"correction:{{}}:{job.job_id}:{job.correction_token}"
+        self.queue_reply(user,
+                         "💬 收到一条待确认补充，当前任务仍在运行。\n"
+                         "点击“作为修正”会先停止并清理当前任务，再按原需求和这段补充执行。\n"
+                         f"补充预览：{self.store.redact(task_title(text))}\n"
+                         "仅最新一条待确认补充有效，5 分钟后失效；不会自动执行。",
+                         reply_markup={"inline_keyboard": [[
+                             {"text": "作为修正", "callback_data": prefix.format("apply")},
+                             {"text": "忽略补充", "callback_data": prefix.format("dismiss")},
+                         ]]})
+        return True
+
     async def handle_callback(self, cq: dict) -> None:
         cq_id = str(cq.get("id") or "")
         sender = cq.get("from") or {}
@@ -1381,6 +1572,61 @@ class Bridge:
                 or chat.get("type") != "private" or type(chat_id) is not int or chat_id != user):
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="⚠️ 无操作权限", show_alert=True)
+            return
+
+        if data in {"status:summary", "status:details"}:
+            text, keyboard = self._status_card(user, data == "status:details")
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id)
+            if not await self._collapse_selector(chat_id, message, text, keyboard):
+                self.queue_reply(chat_id, text, reply_markup=keyboard)
+            return
+
+        if data in {"probe:current", "probe:all"}:
+            current = self.store.get_model(user) or self.settings.model or ""
+            if data == "probe:current" and not current:
+                self.queue_reply(chat_id, "💡 请先在 /model 选择具体模型，再检测当前模型；默认模型由 CLI 决定。")
+            else:
+                self._start_model_health_refresh(chat_id, current if data == "probe:current" else None)
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id)
+            return
+
+        if data.startswith("probe:cancel:"):
+            valid = (bool(self.model_check_id) and self.model_check_task is not None and not self.model_check_task.done()
+                     and data == f"probe:cancel:{self.model_check_id}"
+                     and user in {self.model_check_user, self.settings.owner_id})
+            if valid:
+                self._cancel_model_health()
+                self.queue_reply(chat_id, "🛑 已请求取消检测，正在等待清理完成。")
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="已请求取消" if valid else "检测已结束、按钮已失效或无取消权限")
+            return
+
+        if data.startswith("correction:"):
+            parts = data.split(":")
+            job = self.slot
+            valid = (len(parts) == 4 and parts[1] in {"apply", "dismiss"} and job is not None
+                     and job.user == user and parts[2] == job.job_id and parts[3] == job.correction_token
+                     and bool(job.pending_correction) and time.monotonic() < job.correction_expires
+                     and not job.cancel.is_set() and not job.steered and job.steer_task is None
+                     and job.phase not in {"saving", "sending"} and not self.runner.blocked
+                     and not self._restart_pending())
+            if not valid:
+                if cq_id and hasattr(self.api, "answer_callback_query"):
+                    await self.api.answer_callback_query(cq_id, text="补充已失效，请确认当前任务后重新发送。", show_alert=True)
+                return
+            correction = job.pending_correction
+            self._forget_correction(job)
+            # Reserve the correction through the ordinary /steer path before
+            # awaiting any Telegram acknowledgement, so double taps cannot replay.
+            if parts[1] == "apply":
+                await self.handle({"message": {"chat": chat, "from": sender, "text": "/steer " + correction}})
+            text = "⚡ 已提交修正，正在等待清理和交接。" if parts[1] == "apply" else "已忽略这条补充，当前任务未改变。"
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="已提交修正" if parts[1] == "apply" else "已忽略补充")
+            if not await self._collapse_selector(chat_id, message, text, {"inline_keyboard": []}):
+                self.queue_reply(chat_id, text)
             return
 
         if data.startswith("cancel:"):
@@ -1718,52 +1964,9 @@ class Bridge:
             )
             return
         if command == "/status":
-            current_model = self.store.get_model(user) or self.settings.model
-            model_info = f" [模型：{current_model}]" if current_model else ""
-            effort = self.store.get_effort(user)
-            effort_info = f"\n⚡ 思考强度：{effort.capitalize()}" if effort else ""
-            mode = self.store.get_mode(user)
-            mode_name = "推演规划 (Plan)" if mode == "plan" else ("落地编辑 (Accept-Edits)" if mode == "accept-edits" else mode)
-            mode_info = f"\n📋 执行模式：{mode_name or '跟随 agy 设置（不保证自动编辑）'}"
-            permission_info = (
-                f"\n🔐 工具自动审批：{'开启' if self.settings.skip_permissions else '关闭（无交互任务可能被拒绝）'}"
-                f"\n📁 工作目录：{self.settings.workspace}"
-                f"\n📝 额外可写目录（配置值）：{', '.join(map(str, self.settings.write_paths)) or '未配置'}"
-                f"\n🖥️ 主机权限（配置值）：{'完整 Root 权限' if self.settings.host_access == 'full' else '受限目录模式'}"
-                "\n💡 实际权限以主机与 systemd 当前设置为准。"
-            )
-            conv = self.store.get_conversation(user)
-            conv_info = ""
-            if conv and conv.get("conversation_id"):
-                cid = conv["conversation_id"]
-                short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
-                turns = conv.get("num_turns", 1)
-                conv_info = f"\n🧠 记忆会话：`{short_cid}` (第 {turns} 轮)"
-            disk_info = ""
-            try:
-                import shutil
-                usage = shutil.disk_usage(self.settings.workspace)
-                free_gb = usage.free / (1024 ** 3)
-                disk_info = f"\n💾 工作空间可用磁盘：{free_gb:.1f} GB"
-            except Exception:
-                pass
-            if self.slot and self.slot.user == user:
-                job_model = f"[{self.slot.model}] " if self.slot.model else ""
-                text = f"⏳ 当前任务：{job_model}" + (
-                    "正在取消并清理。" if self.slot.cancel.is_set() else "运行或回传中。"
-                )
-            elif self.runner.blocked:
-                text = "⚠️ 已暂停新任务：进程清理或结果保存发生异常，请检查并重启服务。"
-            else:
-                text = f"ℹ️ 你当前没有任务{model_info}。" + ("\n⚠️ 工作目录正被其他白名单用户的任务占用。" if self.slot else "")
-            started = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(self._started_at))
-            text += (f"\n🔖 部署版本：{self._deployment_version}"
-                     f"\n🕒 服务启动：{started}（服务器时间）")
-            text += conv_info + effort_info + mode_info + disk_info + permission_info
-            if self.model_check_task is not None and not self.model_check_task.done():
-                text += ("\n🔎 模型检测：正在取消并清理" if self.model_check_cancelling
-                         else f"\n🔎 模型检测：{self.model_check_progress}")
-            self.queue_reply(chat_id, text)
+            details = text.split(maxsplit=1)[1:] == ["details"]
+            summary, keyboard = self._status_card(user, details)
+            self.queue_reply(chat_id, summary, reply_markup=keyboard)
             return
         if command == "/cancel":
             job = self.slot
@@ -1818,6 +2021,13 @@ class Bridge:
             if not job.original_prompt:
                 self.queue_reply(chat_id, "⚠️ 当前任务缺少可安全重用的原始内容。请取消后重新发送完整任务。")
                 return
+            if job.phase in {"saving", "sending"}:
+                self.queue_reply(chat_id, "ℹ️ 当前任务已完成，正在保存或发送结果；请等待结束后发送新需求。")
+                return
+            if len(correction_prompt(job, correction)) > self.settings.max_prompt:
+                self.queue_reply(chat_id, "⚠️ 原任务与修正合并后过长，当前任务未改变；请精简修正内容。")
+                return
+            self._forget_correction(job)
             job.steered = True
             job.cancel.set()
             job.activity = "正在停止当前任务并应用你的修正"
@@ -2090,6 +2300,8 @@ class Bridge:
             self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
             return
         if self.slot is not None or self.pending_album is not None:
+            if not items and self._offer_correction(user, text):
+                return
             self.queue_reply(chat_id, "⚠️ 工作目录已有任务，请等待完成，或由任务发起者发送 /cancel。")
             return
 
@@ -2127,6 +2339,7 @@ class Bridge:
 
     async def _prepare_and_work(self, job: Job, text: str, items: list[tuple[dict, bool]]) -> None:
         """Download outside polling; retain the slot until all writes and cleanup finish."""
+        job.phase = "receiving" if items else "preparing"
         chat_id = job.chat
         accepted = False
         try:

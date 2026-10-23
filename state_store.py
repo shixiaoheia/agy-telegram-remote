@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import stat
@@ -164,7 +165,8 @@ class Store:
         if not isinstance(value, dict) or not isinstance(value.get("models"), dict):
             return {"checked_at": 0.0, "models": {}}
         checked_at = value.get("checked_at")
-        if not isinstance(checked_at, (int, float)) or checked_at < 0:
+        if (type(checked_at) not in {int, float} or not 0 <= checked_at <= 253402300799
+                or not math.isfinite(checked_at)):
             return {"checked_at": 0.0, "models": {}}
         models: dict[str, dict] = {}
         for model, result in value["models"].items():
@@ -176,6 +178,9 @@ class Store:
                     "outcome": result["outcome"],
                     "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
                 }
+                stamp = result.get("checked_at", checked_at)
+                models[model]["checked_at"] = (float(stamp) if type(stamp) in {int, float}
+                                               and 0 <= stamp <= 253402300799 and math.isfinite(stamp) else 0.0)
         return {"checked_at": float(checked_at), "models": models}
 
     def set_model_health(self, models: dict[str, dict]) -> None:
@@ -192,6 +197,11 @@ class Store:
                 "outcome": result["outcome"],
                 "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
             }
+            stamp = result.get("checked_at", time.time())
+            if (type(stamp) not in {int, float} or not 0 <= stamp <= 253402300799
+                    or not math.isfinite(stamp)):
+                raise ValueError("Invalid model health timestamp")
+            clean[model]["checked_at"] = float(stamp)
         atomic_json(self._model_health_path(), {"checked_at": time.time(), "models": clean})
 
     def _effort_path(self, user: int) -> Path:

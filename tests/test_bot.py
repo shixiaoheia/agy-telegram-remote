@@ -581,7 +581,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_command_show_current_and_examples(self):
         await self.handle(update("/model"))
         msg = self.api.messages[-1][1]
-        self.assertEqual(msg, "选择模型\n当前：默认（由 agy 决定）")
+        self.assertEqual(msg, "选择模型\n当前：默认（由 agy 决定）\n当前模型上次检测：未检测\n检测会消耗模型额度，不更改选定模型。")
         self.assertNotIn("gemini-", msg)
         self.assertEqual(self.runner.calls, 0)
 
@@ -656,7 +656,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("agy auth login", message)
 
     async def test_status_explains_execution_permissions(self):
-        await self.handle(update("/status"))
+        await self.handle(update("/status details"))
         message = self.api.messages[-1][1]
         self.assertIn("工具自动审批", message)
         self.assertIn("额外可写目录", message)
@@ -769,7 +769,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("仅白名单私聊可使用", message)
 
     async def test_status_includes_workspace_disk_space(self):
-        await self.handle(update("/status"))
+        await self.handle(update("/status details"))
         msg = self.api.messages[-1][1]
         self.assertIn("工作空间可用磁盘", msg)
         self.assertIn("GB", msg)
