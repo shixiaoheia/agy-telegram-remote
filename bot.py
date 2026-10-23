@@ -666,6 +666,9 @@ class Bridge:
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
         self.model_check_task: asyncio.Task | None = None
+        self.model_check_user: int | None = None
+        self.model_check_progress = ""
+        self.model_check_cancelling = False
         self.pending_album: dict | None = None
         self.album_task: asyncio.Task | None = None
         self.restart_task: asyncio.Task | None = None
@@ -717,7 +720,8 @@ class Bridge:
                            if not is_retired_model(model))
             results = {model: {"outcome": "error", "category": "model"}
                        for model in OFFICIAL_MODEL_IDS if model not in models}
-            for model in models:
+            for index, model in enumerate(models, 1):
+                self.model_check_progress = f"{index}/{len(models)}：{model}"
                 try:
                     result = await asyncio.wait_for(
                         self.runner.run(MODEL_PROBE_PROMPT, asyncio.Event(), model=model), timeout=45,
@@ -736,24 +740,50 @@ class Bridge:
                 f"✅ 模型可用性检测完成：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
                 "发送 /model 查看模型；账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。",
             )
+        except asyncio.CancelledError:
+            if self.runner.blocked:
+                self.queue_reply(chat_id, "⚠️ 模型检测清理未确认完成，已暂停新任务；请检查服务器。")
+            else:
+                self.queue_reply(chat_id, "🛑 模型检测已取消并完成清理，保留上次完整检测结果。")
+            raise
         except Exception as error:
             LOG.warning("model_health_check_failed type=%s", type(error).__name__)
             self.queue_reply(chat_id, "⚠️ 模型目录或可用性检测未完成，保留上次检测结果；请检查 agy 版本和授权后重试。")
         finally:
+            if self.model_check_task is asyncio.current_task():
+                self._model_check_finished(self.model_check_task)
+
+    def _model_check_finished(self, task: asyncio.Task) -> None:
+        if self.model_check_task is task:
             self.model_check_task = None
+            self.model_check_user = None
+            self.model_check_progress = ""
+            self.model_check_cancelling = False
+
+    def _cancel_model_health(self) -> None:
+        if (self.model_check_task is not None and not self.model_check_task.done()
+                and not self.model_check_cancelling):
+            self.model_check_cancelling = True
+            self.model_check_task.cancel()
 
     def _start_model_health_refresh(self, chat_id: int) -> None:
         if self._restart_pending():
             self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。")
             return
-        if self.slot is not None:
+        if (self.slot is not None or self.pending_album is not None
+                or (self.album_task is not None and not self.album_task.done())
+                or any(not task.done() for task in self.steer_tasks)):
             self.queue_reply(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。")
             return
         if self.model_check_task and not self.model_check_task.done():
             self.queue_reply(chat_id, "⏳ 模型可用性检测正在进行，请稍候。")
             return
-        self.queue_reply(chat_id, "🔎 正在逐个验证官方模型（不使用工具、不读写工作目录），请稍候…")
+        self.model_check_user = chat_id
+        self.model_check_cancelling = False
+        self.model_check_progress = "正在读取模型目录"
+        self.queue_reply(chat_id, "🔎 正在逐个验证官方模型，请稍候；/status 查看进度，/cancel 取消检测。检测提示要求不用工具、不读写工作目录。")
         self.model_check_task = asyncio.create_task(self._refresh_model_health(chat_id))
+        self.model_check_task.add_done_callback(self._model_check_finished)
 
     def _is_allowed(self, user: int) -> bool:
         return user in self.settings.allowed or user in self.store.allowed
@@ -1005,23 +1035,11 @@ class Bridge:
                 job.activity = "正在继续处理任务"
             else:
                 job.activity = activity
-        try:
-            return await self.runner.run(
-                prompt, job.cancel, model=job.model or None,
-                conversation_id=job.conversation_id or None,
-                effort=job.effort or None, mode=job.mode or None, progress=progress,
-            )
-        except TypeError:
-            try:
-                return await self.runner.run(
-                    prompt, job.cancel, model=job.model or None,
-                    conversation_id=job.conversation_id or None,
-                )
-            except TypeError:
-                try:
-                    return await self.runner.run(prompt, job.cancel, model=job.model or None)
-                except TypeError:
-                    return await self.runner.run(prompt, job.cancel)
+        return await self.runner.run(
+            prompt, job.cancel, model=job.model or None,
+            conversation_id=job.conversation_id or None,
+            effort=job.effort or None, mode=job.mode or None, progress=progress,
+        )
 
     def _mark_model_capacity_unavailable(self, model: str) -> None:
         health = self._model_health()
@@ -1713,11 +1731,20 @@ class Bridge:
             text += (f"\n🔖 部署版本：{self._deployment_version}"
                      f"\n🕒 服务启动：{started}（服务器时间）")
             text += conv_info + effort_info + mode_info + disk_info + permission_info
+            if self.model_check_task is not None and not self.model_check_task.done():
+                text += ("\n🔎 模型检测：正在取消并清理" if self.model_check_cancelling
+                         else f"\n🔎 模型检测：{self.model_check_progress}")
             self.queue_reply(chat_id, text)
             return
         if command == "/cancel":
             job = self.slot
-            if job is not None and job.user == user:
+            if self.model_check_task is not None and not self.model_check_task.done():
+                if user not in {self.model_check_user, self.settings.owner_id}:
+                    self.queue_reply(chat_id, "⚠️ 仅检测发起者或主管理员可以取消模型检测。")
+                    return
+                self._cancel_model_health()
+                self.queue_reply(chat_id, "🛑 已请求取消模型检测，正在等待进程清理完成；完成前不会接收新任务。")
+            elif job is not None and job.user == user:
                 job.cancel.set()
                 self.queue_reply(chat_id, "🛑 已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
             elif self.pending_album is not None and self.pending_album["user"] == user:
@@ -2262,6 +2289,11 @@ class Bridge:
                     backoff = min(30.0, backoff * 2)
         finally:
             self.stop.set()
+            if self.model_check_task is not None:
+                check_task = self.model_check_task
+                self._cancel_model_health()
+                await asyncio.gather(check_task, return_exceptions=True)
+                self._model_check_finished(check_task)
             if self.restart_task is not None:
                 self.restart_task.cancel()
                 await asyncio.gather(self.restart_task, return_exceptions=True)
