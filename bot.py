@@ -23,6 +23,7 @@ from agy_runner import Result, Runner
 from settings import ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model, resolve_model, Settings
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
+from telegram_formatting import html_chunks, plain_html_text, render_markdown_html
 
 LOG = logging.getLogger("agy_remote")
 LABELS = {
@@ -115,191 +116,6 @@ def clean_model_reply(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-INLINE_MARKDOWN = re.compile(
-    r"\[([^\]\n]+)]\((https?://[^\s)]+)\)|`([^`\n]+)`|\*\*([^*\n]+)\*\*|__([^_\n]+)__|"
-    r"~~([^~\n]+)~~|(?<!\w)\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_"
-)
-
-
-def render_inline_markdown(text: str) -> str:
-    """Render the small, safe Markdown subset supported by Telegram HTML."""
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    result: list[str] = []
-    cursor = 0
-    for match in INLINE_MARKDOWN.finditer(text):
-        result.append(html.escape(text[cursor:match.start()]))
-        link, href, code, bold1, bold2, strike, italic1, italic2 = match.groups()
-        if link is not None:
-            result.append(f'<a href="{html.escape(href, quote=True)}">{html.escape(link)}</a>')
-        elif code is not None:
-            result.append(f"<code>{html.escape(code)}</code>")
-        elif bold1 is not None or bold2 is not None:
-            result.append(f"<b>{html.escape(bold1 if bold1 is not None else bold2)}</b>")
-        elif strike is not None:
-            result.append(f"<s>{html.escape(strike)}</s>")
-        else:
-            result.append(f"<i>{html.escape(italic1 if italic1 is not None else italic2)}</i>")
-        cursor = match.end()
-    result.append(html.escape(text[cursor:]))
-    return "".join(result)
-
-
-MERMAID_START = re.compile(
-    r"^\s*(?:flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|mindmap|timeline)\b",
-    re.IGNORECASE,
-)
-
-
-def table_cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
-def is_table_separator(line: str) -> bool:
-    cells = table_cells(line)
-    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
-
-
-ADMONITION_LABELS = {
-    "NOTE": "📝 说明", "TIP": "💡 提示", "IMPORTANT": "❗ 重要",
-    "WARNING": "⚠️ 警告", "CAUTION": "🚨 注意",
-}
-
-
-def render_markdown_html(text: str) -> str:
-    """Convert common model Markdown to Telegram's conservative HTML subset."""
-    lines: list[str] = []
-    raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    code_lines: list[str] = []
-    code_language = ""
-    in_code_block = False
-    index = 0
-    while index < len(raw_lines):
-        raw_line = raw_lines[index]
-        if (raw_line.strip().startswith("|") and raw_line.strip().endswith("|")
-                and index + 1 < len(raw_lines) and is_table_separator(raw_lines[index + 1])):
-            headers = table_cells(raw_line)
-            index += 2
-            while (index < len(raw_lines) and raw_lines[index].strip().startswith("|")
-                   and raw_lines[index].strip().endswith("|")):
-                cells = table_cells(raw_lines[index])
-                fields = [
-                    f"<b>{render_inline_markdown(header)}</b>：{render_inline_markdown(value)}"
-                    for header, value in zip(headers, cells)
-                ]
-                lines.append("\n".join(fields))
-                index += 1
-            continue
-        if MERMAID_START.match(raw_line):
-            diagram = [raw_line]
-            index += 1
-            while index < len(raw_lines) and raw_lines[index].strip():
-                diagram.append(raw_lines[index])
-                index += 1
-            lines.append(f"<pre><code>{html.escape(chr(10).join(diagram))}</code></pre>")
-            continue
-        fence = re.match(r"^\s*```([A-Za-z0-9_+-]{0,32})\s*$", raw_line)
-        if fence:
-            if in_code_block:
-                language = f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
-                lines.append(f"<pre><code{language}>{html.escape(chr(10).join(code_lines))}</code></pre>")
-                code_lines = []
-                code_language = ""
-                in_code_block = False
-            else:
-                code_language = fence.group(1)
-                in_code_block = True
-            index += 1
-            continue
-        if in_code_block:
-            code_lines.append(raw_line)
-            index += 1
-            continue
-        heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", raw_line)
-        bullet = re.match(r"^(\s*)[-*+]\s+(.+)$", raw_line)
-        numbered = re.match(r"^(\s*)(\d{1,3})[.)]\s+(.+)$", raw_line)
-        quote = re.match(r"^\s*>\s?(.*)$", raw_line)
-        if heading:
-            lines.append(f"<b>{render_inline_markdown(heading.group(1))}</b>")
-        elif bullet:
-            indent = "　" * min(3, len(bullet.group(1).expandtabs(2)) // 2)
-            lines.append(f"{indent}• {render_inline_markdown(bullet.group(2))}")
-        elif numbered:
-            indent = "　" * min(3, len(numbered.group(1).expandtabs(2)) // 2)
-            lines.append(f"{indent}{numbered.group(2)}. {render_inline_markdown(numbered.group(3))}")
-        elif quote:
-            quoted = quote.group(1).strip()
-            admonition = re.match(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)]\s*(.*)$", quoted, re.IGNORECASE)
-            if admonition:
-                label = ADMONITION_LABELS[admonition.group(1).upper()]
-                detail = admonition.group(2)
-                lines.append(f"<b>{label}</b>" + (f"：{render_inline_markdown(detail)}" if detail else ""))
-            else:
-                lines.append(f"│ {render_inline_markdown(quote.group(1))}")
-        elif raw_line.strip() in {"---", "***", "___"}:
-            lines.append("")
-        else:
-            lines.append(render_inline_markdown(raw_line))
-        index += 1
-    if in_code_block:
-        language = f' class="language-{html.escape(code_language, quote=True)}"' if code_language else ""
-        lines.append(f"<pre><code{language}>{html.escape(chr(10).join(code_lines))}</code></pre>")
-    return "\n".join(lines).strip()
-
-
-HTML_TAG = re.compile(r"<(\/)?(b|i|s|code|pre|a)(?:\s+[^>]*)?>", re.IGNORECASE)
-
-
-def html_chunks(text: str, units: int = 3400) -> list[str]:
-    """Split generated Telegram HTML without breaking tags or formatting."""
-    if len(text.encode("utf-16-le")) // 2 <= units:
-        return [text]
-    chunks: list[str] = []
-    current: list[str] = []
-    current_units = 0
-    open_tags: list[tuple[str, str]] = []
-
-    def close_tags() -> str:
-        return "".join(f"</{name}>" for name, _opening in reversed(open_tags))
-
-    def flush() -> None:
-        nonlocal current, current_units
-        if current:
-            chunks.append("".join(current) + close_tags())
-        current = [opening for _name, opening in open_tags]
-        current_units = sum(len(opening.encode("utf-16-le")) // 2 for opening in current)
-
-    position = 0
-    for match in HTML_TAG.finditer(text):
-        for is_tag, piece in ((False, text[position:match.start()]), (True, match.group(0))):
-            if not piece:
-                continue
-            if is_tag:
-                closing, name = match.group(1), match.group(2).lower()
-                current.append(piece)
-                current_units += len(piece.encode("utf-16-le")) // 2
-                if closing and open_tags and open_tags[-1][0] == name:
-                    open_tags.pop()
-                elif not closing:
-                    open_tags.append((name, piece))
-                continue
-            for char in piece:
-                char_units = 2 if ord(char) > 0xFFFF else 1
-                reserve = len(close_tags().encode("utf-16-le")) // 2
-                if current and current_units + char_units + reserve > units:
-                    flush()
-                current.append(char)
-                current_units += char_units
-        position = match.end()
-    for char in text[position:]:
-        char_units = 2 if ord(char) > 0xFFFF else 1
-        reserve = len(close_tags().encode("utf-16-le")) // 2
-        if current and current_units + char_units + reserve > units:
-            flush()
-        current.append(char)
-        current_units += char_units
-    if current:
-        chunks.append("".join(current) + close_tags())
-    return chunks
 
 
 @dataclass
@@ -970,7 +786,7 @@ class Bridge:
                 # never replay pages that Telegram has already accepted.
                 if error.code != 400:
                     return False
-                plain = html.unescape(re.sub(r"<[^>]+>", "", chunk))
+                plain = plain_html_text(chunk)
                 if not await self.send_text(chat, plain + suffix):
                     return False
         return True
