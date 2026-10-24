@@ -119,6 +119,43 @@ def clean_model_reply(text: str) -> str:
 
 
 @dataclass
+class ControlCard:
+    chat: int
+    text: str = ""
+    markup: dict = field(default_factory=lambda: {"inline_keyboard": []})
+    message_id: int | None = None
+    revision: int = 0
+    queued: bool = False
+    closed: bool = False
+    uncertain: bool = False
+
+
+@dataclass
+class ResetConfirmation:
+    token: str
+    context: tuple
+    card: ControlCard
+    expires: float
+    timer: asyncio.TimerHandle | None = None
+
+
+def control_html(text: str) -> str:
+    """Style control text without interpreting arbitrary Markdown or HTML."""
+    lines = [line for line in text.splitlines() if not re.fullmatch(r"━+", line)]
+    if not lines:
+        return ""
+    def inline(value: str) -> str:
+        parts = re.split(r"(`[^`\n]+`)", value)
+        return "".join("<code>" + html.escape(part[1:-1]) + "</code>"
+                       if part.startswith("`") and part.endswith("`") and len(part) > 2
+                       else html.escape(part) for part in parts)
+    title = "".join(part if part.startswith("<code>") else "<b>" + part + "</b>"
+                    for part in re.split(r"(<code>.*?</code>)", inline(lines[0])) if part)
+    body = "\n".join(inline(line) for line in lines[1:]).strip()
+    return title + ("\n\n" + body if body else "")
+
+
+@dataclass
 class Job:
     user: int
     chat: int
@@ -138,6 +175,8 @@ class Job:
     pending_correction: str = ""
     correction_token: str = ""
     correction_expires: float = 0.0
+    correction_card: ControlCard | None = None
+    correction_timer: asyncio.TimerHandle | None = None
     attachment_dir: Path | None = None
     attachments: list[Path] = field(default_factory=list)
     attachment_feedback: str = ""
@@ -607,6 +646,11 @@ class Bridge:
         self.model_check_cancelling = False
         self.model_check_id = ""
         self.model_check_started_at = 0.0
+        self.model_check_card: ControlCard | None = None
+        self.reset_confirmations: dict[int, ResetConfirmation] = {}
+        self._pending_results: set[tuple] = set()
+        self._recent_results: dict[tuple, float] = {}
+        self._selector_fallbacks: dict[tuple, float] = {}
         self.pending_album: dict | None = None
         self.album_task: asyncio.Task | None = None
         self.restart_task: asyncio.Task | None = None
@@ -619,7 +663,7 @@ class Bridge:
             {"text": "🔄 刷新状态", "callback_data": "status:details" if details else "status:summary"},
         ]]}
         if details:
-            return self.store.redact(self._status_details(user)), keyboard
+            return control_html(self.store.redact(self._status_details(user))), keyboard
         lines = ["📋 当前状态"]
         job = self.slot
         current = self.store.get_model(user) or self.settings.model or ""
@@ -749,6 +793,7 @@ class Bridge:
                 results = dict(self._model_health().get("models", {}))
             for index, target in enumerate(models, 1):
                 self.model_check_progress = f"{index}/{len(models)}：{target}"
+                self._update_probe_card()
                 try:
                     result = await asyncio.wait_for(
                         self.runner.run(MODEL_PROBE_PROMPT, asyncio.Event(), model=target), timeout=45,
@@ -763,37 +808,65 @@ class Bridge:
             self.store.set_model_health(results)
             available = sum(results[item]["outcome"] == "success" for item in models)
             heading = "当前模型检测完成" if model is not None else "模型可用性检测完成"
-            self.queue_reply(
-                chat_id,
-                f"✅ {heading}：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
-                "发送 /model 查看模型；账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。",
-            )
+            icon = "✅" if available == len(models) and available > 0 else "⚠️"
+            failures = [f"• {display_model(item)}：{model_health_text(results[item])}"
+                        for item in models if results[item]["outcome"] != "success"]
+            self._finish_probe_card(
+                f"{icon} {heading}：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
+                + ("\n".join(failures[:12]) + "\n" if failures else "")
+                + (f"另有 {len(failures) - 12} 个未通过，可在模型菜单查看状态。\n" if len(failures) > 12 else "")
+                + "账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。")
         except asyncio.CancelledError:
             if self.runner.blocked:
-                self.queue_reply(chat_id, "⚠️ 模型检测清理未确认完成，已暂停新任务；请检查服务器。")
+                self._finish_probe_card("⚠️ 模型检测清理未确认完成，已暂停新任务；请检查服务器。")
             else:
-                self.queue_reply(chat_id, "🛑 模型检测已取消并完成清理，保留上次完整检测结果。")
+                self._finish_probe_card("🛑 模型检测已取消并完成清理，保留上次完整检测结果。")
             raise
         except Exception as error:
             LOG.warning("model_health_check_failed type=%s", type(error).__name__)
-            self.queue_reply(chat_id, "⚠️ 模型目录或可用性检测未完成，保留上次检测结果；请检查 agy 版本和授权后重试。")
+            self._finish_probe_card("⚠️ 模型目录或可用性检测未完成，保留上次检测结果；请检查 agy 版本和授权后重试。")
         finally:
             if self.model_check_task is asyncio.current_task():
                 self._model_check_finished(self.model_check_task)
 
     def _model_check_finished(self, task: asyncio.Task) -> None:
         if self.model_check_task is task:
+            if self.model_check_card is not None and not self.model_check_card.closed:
+                self._finish_probe_card("🛑 模型检测已结束，保留上次完整检测结果。")
             self.model_check_task = None
             self.model_check_user = None
             self.model_check_progress = ""
             self.model_check_cancelling = False
             self.model_check_id = ""
             self.model_check_started_at = 0.0
+            self.model_check_card = None
+
+    def _update_probe_card(self) -> None:
+        card = self.model_check_card
+        if card is None or card.closed:
+            return
+        elapsed = max(0, int(time.monotonic() - self.model_check_started_at))
+        state = "正在取消并清理" if self.model_check_cancelling else self.model_check_progress
+        self.queue_card(card, f"🔎 模型可用性检测\n{state}\n⏱ 已运行 {elapsed}s\n"
+                        "会消耗模型额度；检测提示要求不用工具、不读写工作目录。", {
+                            "inline_keyboard": [[
+                                {"text": "🔄 刷新进度", "callback_data": f"probe:progress:{self.model_check_id}"},
+                                {"text": "🛑 取消检测", "callback_data": f"probe:cancel:{self.model_check_id}"},
+                            ]]})
+
+    def _finish_probe_card(self, text: str) -> None:
+        if self.model_check_card is not None:
+            self.model_check_card.closed = True
+            self.queue_card(self.model_check_card, text, {"inline_keyboard": [[
+                {"text": "⬅️ 返回模型", "callback_data": "selector:models"},
+                {"text": "✖️ 关闭", "callback_data": "selector:close"},
+            ]]})
 
     def _cancel_model_health(self) -> None:
         if (self.model_check_task is not None and not self.model_check_task.done()
                 and not self.model_check_cancelling):
             self.model_check_cancelling = True
+            self._update_probe_card()
             self.model_check_task.cancel()
 
     def _start_model_health_refresh(self, chat_id: int, model: str | None = None) -> None:
@@ -819,12 +892,8 @@ class Bridge:
         self.model_check_progress = "正在准备检测当前模型" if model is not None else "正在读取模型目录"
         self.model_check_id = uuid.uuid4().hex[:12]
         self.model_check_started_at = time.monotonic()
-        scope = "当前模型" if model is not None else "全部模型"
-        self.queue_reply(chat_id, f"🔎 正在检测{scope}，会消耗模型额度。\n/status 查看进度，/cancel 取消检测。检测提示要求不用工具、不读写工作目录。",
-                         reply_markup={"inline_keyboard": [[
-                             {"text": "⏳ 查看进度", "callback_data": "status:summary"},
-                             {"text": "🛑 取消检测", "callback_data": f"probe:cancel:{self.model_check_id}"},
-                         ]]})
+        self.model_check_card = ControlCard(chat_id)
+        self._update_probe_card()
         self.model_check_task = asyncio.create_task(self._refresh_model_health(chat_id, model))
         self.model_check_task.add_done_callback(self._model_check_finished)
 
@@ -893,33 +962,97 @@ class Bridge:
         if self.slot is job and not (handoff is not None and not handoff.done()):
             self.slot = None
 
-    def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None,
-                    html_mode: bool = False) -> None:
-        # Control replies must never hold up update ingestion or cancellation.
-        if self.stop.is_set():
+    def queue_control(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
+        return self.queue_reply(chat, control_html(text), reply_markup, html_mode=True)
+
+    def queue_card(self, card: ControlCard, text: str, markup: dict | None = None) -> None:
+        card.text, card.markup = text, markup if markup is not None else {"inline_keyboard": []}
+        card.revision += 1
+        if card.queued or self.stop.is_set():
             return
         try:
-            self.replies.put_nowait((chat, text, reply_markup, html_mode))
+            self.replies.put_nowait(card)
         except asyncio.QueueFull:
             return
+        card.queued = True
         if self.reply_worker is None or self.reply_worker.done():
             self.reply_worker = asyncio.create_task(self._send_replies())
+
+    async def _send_card(self, card: ControlCard) -> None:
+        if card.uncertain:
+            card.queued = False
+            return
+        revision = card.revision
+        text, markup = control_html(self.store.redact(card.text)), card.markup
+        try:
+            if card.message_id is None:
+                result = await self.api.send(card.chat, text, reply_markup=markup, parse_mode="HTML")
+                if isinstance(result, dict) and type(result.get("message_id")) is int:
+                    card.message_id = result["message_id"]
+            else:
+                await self.api.edit(card.chat, card.message_id, text, reply_markup=markup, parse_mode="HTML")
+        except TelegramError as error:
+            # Never duplicate a card after an ambiguous network result.
+            LOG.warning("control_card_delivery_failed code=%s", error.code)
+            if card.message_id is None:
+                card.uncertain = True
+        finally:
+            card.queued = False
+            if revision != card.revision:
+                self.queue_card(card, card.text, card.markup)
+
+    def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None,
+                    html_mode: bool = False, *, result_key: tuple | None = None) -> bool:
+        # Control replies must never hold up update ingestion or cancellation.
+        if self.stop.is_set():
+            return False
+        now = time.monotonic()
+        if result_key is not None:
+            if result_key in self._pending_results or now < self._recent_results.get(result_key, 0):
+                return False
+        try:
+            self.replies.put_nowait((chat, text, reply_markup, html_mode, result_key))
+        except asyncio.QueueFull:
+            return False
+        if result_key is not None:
+            self._pending_results.add(result_key)
+        if self.reply_worker is None or self.reply_worker.done():
+            self.reply_worker = asyncio.create_task(self._send_replies())
+        return True
 
     async def _send_replies(self) -> None:
         while not self.replies.empty():
             item = self.replies.get_nowait()
-            if len(item) == 4:
+            if isinstance(item, ControlCard):
+                try:
+                    await self._send_card(item)
+                finally:
+                    self.replies.task_done()
+                continue
+            result_key = None
+            if len(item) == 5:
+                chat, text, reply_markup, html_mode, result_key = item
+            elif len(item) == 4:
                 chat, text, reply_markup, html_mode = item
             else:
                 chat, text = item
                 reply_markup = None
                 html_mode = False
+            delivered = False
             try:
                 if html_mode:
-                    await self.send_html(chat, text, reply_markup=reply_markup)
+                    delivered = await self.send_html(chat, text, reply_markup=reply_markup)
                 else:
-                    await self.send_text(chat, text, reply_markup=reply_markup)
+                    delivered = await self.send_text(chat, text, reply_markup=reply_markup)
             finally:
+                if result_key is not None:
+                    self._pending_results.discard(result_key)
+                    if delivered:
+                        self._recent_results = {key: until for key, until in self._recent_results.items()
+                                                if until > time.monotonic()}
+                        if len(self._recent_results) >= 128:
+                            self._recent_results.pop(next(iter(self._recent_results)))
+                        self._recent_results[result_key] = time.monotonic() + 2
                 self.replies.task_done()
 
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
@@ -1433,18 +1566,76 @@ class Bridge:
         self.queue_reply(chat_id, text, reply_markup=keyboard)
 
     async def _collapse_selector(self, chat_id: int, message: dict, text: str,
-                                 reply_markup: dict | None = None) -> bool:
+                                 reply_markup: dict | None = None, *, html_mode: bool = False) -> bool:
         message_id = message.get("message_id")
         if type(message_id) is not int or message_id <= 0:
             return False
         try:
             await self.api.edit(chat_id, message_id, text,
-                                reply_markup=reply_markup if reply_markup is not None else {"inline_keyboard": []})
+                                reply_markup=reply_markup if reply_markup is not None else {"inline_keyboard": []},
+                                **({"parse_mode": "HTML"} if html_mode else {}))
             return True
-        except (TelegramError, AttributeError):
-            return False
+        except TelegramError as error:
+            if error.not_modified:
+                return True
+        except AttributeError:
+            pass
+        key = (chat_id, message_id, text, repr(reply_markup))
+        now = time.monotonic()
+        if now < self._selector_fallbacks.get(key, 0):
+            return True
+        self._selector_fallbacks = {key: until for key, until in self._selector_fallbacks.items() if until > now}
+        if len(self._selector_fallbacks) >= 128:
+            self._selector_fallbacks.pop(next(iter(self._selector_fallbacks)))
+        self._selector_fallbacks[key] = now + 30
+        return False
 
-    def _forget_correction(self, job: Job) -> None:
+    def _reset_context(self, user: int) -> tuple:
+        conversation = self.store.get_conversation(user) or {}
+        job = self.slot if self.slot is not None and self.slot.user == user else None
+        return (conversation.get("conversation_id"), conversation.get("num_turns"), job.job_id if job else None)
+
+    def _reset_conversation(self, user: int) -> str:
+        if self.slot is not None and self.slot.user == user:
+            self.slot.reset_after = True
+            return "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。"
+        self.store.reset_conversation(user)
+        return "🧠 对话记忆已重置！\n已清空当前上下文，下一条消息将开启全新对话。\n历史结果与累计用量仍保留。"
+
+    def _close_reset_confirmation(self, user: int, text: str) -> None:
+        pending = self.reset_confirmations.pop(user, None)
+        if pending is not None:
+            if pending.timer is not None:
+                pending.timer.cancel()
+            pending.card.closed = True
+            self.queue_card(pending.card, text)
+
+    def _offer_reset_confirmation(self, user: int) -> None:
+        previous = self.reset_confirmations.get(user)
+        card = previous.card if previous else ControlCard(user)
+        if previous and previous.timer:
+            previous.timer.cancel()
+        token = uuid.uuid4().hex[:12]
+        pending = ResetConfirmation(token, self._reset_context(user), card, time.monotonic() + 90)
+        pending.timer = asyncio.get_running_loop().call_later(
+            90, self._close_reset_confirmation, user, "⌛ 新建对话确认已过期，当前对话未改变。")
+        self.reset_confirmations[user] = pending
+        self.queue_card(card, "🧠 确认新建对话？\n"
+                        "将清空当前对话记忆，历史结果和累计用量仍保留。\n"
+                        "如果有任务运行，会在该任务结束后重置。\n90 秒内确认生效。", {
+                            "inline_keyboard": [[
+                                {"text": "🧠 确认新建", "callback_data": f"dialog:confirm:{token}"},
+                                {"text": "↩️ 保留当前对话", "callback_data": f"dialog:dismiss:{token}"},
+                            ]]})
+
+    def _forget_correction(self, job: Job, reason: str = "ℹ️ 任务已结束，这条补充未执行。") -> None:
+        if job.correction_timer is not None:
+            job.correction_timer.cancel()
+            job.correction_timer = None
+        if job.correction_card is not None:
+            job.correction_card.closed = True
+            self.queue_card(job.correction_card, reason)
+            job.correction_card = None
         job.pending_correction = ""
         job.correction_token = ""
         job.correction_expires = 0.0
@@ -1461,13 +1652,19 @@ class Bridge:
         job.pending_correction = text
         job.correction_token = uuid.uuid4().hex[:12]
         job.correction_expires = time.monotonic() + CORRECTION_TTL_SECONDS
+        if job.correction_timer is not None:
+            job.correction_timer.cancel()
+        job.correction_timer = asyncio.get_running_loop().call_later(
+            CORRECTION_TTL_SECONDS, self._forget_correction, job, "⌛ 补充已过期，当前任务未改变。")
+        if job.correction_card is None:
+            job.correction_card = ControlCard(user)
         prefix = f"correction:{{}}:{job.job_id}:{job.correction_token}"
-        self.queue_reply(user,
+        self.queue_card(job.correction_card,
                          "💬 收到一条待确认补充，当前任务仍在运行。\n"
                          "点击“作为修正”会先停止并清理当前任务，再按原需求和这段补充执行。\n"
                          f"补充预览：{self.store.redact(task_title(text))}\n"
                          "仅最新一条待确认补充有效，5 分钟后失效；不会自动执行。",
-                         reply_markup={"inline_keyboard": [[
+                         {"inline_keyboard": [[
                              {"text": "✏️ 作为修正", "callback_data": prefix.format("apply")},
                              {"text": "✖️ 忽略补充", "callback_data": prefix.format("dismiss")},
                          ]]})
@@ -1492,8 +1689,37 @@ class Bridge:
             text, keyboard = self._status_card(user, data == "status:details")
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id)
-            if not await self._collapse_selector(chat_id, message, text, keyboard):
-                self.queue_reply(chat_id, text, reply_markup=keyboard)
+            if not await self._collapse_selector(chat_id, message, text, keyboard, html_mode=data == "status:details"):
+                self.queue_reply(chat_id, text, reply_markup=keyboard, html_mode=data == "status:details")
+            return
+
+        if data.startswith("dialog:"):
+            parts = data.split(":")
+            pending = self.reset_confirmations.get(user)
+            valid = (len(parts) == 3 and parts[1] in {"confirm", "dismiss"} and pending is not None
+                     and parts[2] == pending.token and time.monotonic() < pending.expires)
+            notice = "确认已失效，请重新点击“新建对话”。"
+            if valid and parts[1] == "dismiss":
+                self._close_reset_confirmation(user, "↩️ 已保留当前对话，没有清空记忆。")
+                notice = "已保留当前对话"
+            elif valid and pending.context != self._reset_context(user):
+                self._close_reset_confirmation(user, "ℹ️ 当前对话已发生变化，请重新点击“新建对话”后确认。")
+                notice = "对话已变化，请重新确认"
+            elif valid:
+                # Invalidate before any await so repeated taps cannot reset twice.
+                self._close_reset_confirmation(user, self._reset_conversation(user))
+                notice = "已确认新建对话"
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text=notice)
+            return
+
+        if data.startswith("probe:progress:"):
+            valid = (self.model_check_task is not None and not self.model_check_task.done()
+                     and data == f"probe:progress:{self.model_check_id}" and user == self.model_check_user)
+            if valid:
+                self._update_probe_card()
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text="进度已刷新" if valid else "检测已结束")
             return
 
         if data in {"probe:current", "probe:all"}:
@@ -1512,7 +1738,6 @@ class Bridge:
                      and user in {self.model_check_user, self.settings.owner_id})
             if valid:
                 self._cancel_model_health()
-                self.queue_reply(chat_id, "🛑 已请求取消检测，正在等待清理完成。")
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="已请求取消" if valid else "检测已结束、按钮已失效或无取消权限")
             return
@@ -1531,16 +1756,14 @@ class Bridge:
                     await self.api.answer_callback_query(cq_id, text="补充已失效，请确认当前任务后重新发送。", show_alert=True)
                 return
             correction = job.pending_correction
-            self._forget_correction(job)
+            text = "⚡ 已提交修正，正在等待清理和交接。" if parts[1] == "apply" else "已忽略这条补充，当前任务未改变。"
+            self._forget_correction(job, text)
             # Reserve the correction through the ordinary /steer path before
             # awaiting any Telegram acknowledgement, so double taps cannot replay.
             if parts[1] == "apply":
                 await self.handle({"message": {"chat": chat, "from": sender, "text": "/steer " + correction}})
-            text = "⚡ 已提交修正，正在等待清理和交接。" if parts[1] == "apply" else "已忽略这条补充，当前任务未改变。"
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="已提交修正" if parts[1] == "apply" else "已忽略补充")
-            if not await self._collapse_selector(chat_id, message, text, {"inline_keyboard": []}):
-                self.queue_reply(chat_id, text)
             return
 
         if data.startswith("cancel:"):
@@ -1565,12 +1788,15 @@ class Bridge:
                         cq_id, text="无法读取任务历史，请检查服务器状态。", show_alert=True)
                 self.queue_reply(chat_id, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。")
                 return
+            opened = False
+            if record:
+                opened = self.queue_reply(chat_id, describe_html(record), html_mode=True,
+                                          reply_markup=self._result_buttons(record["job_id"]),
+                                          result_key=(user, record["job_id"]))
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(
-                    cq_id, text="📖 正在打开任务结果" if record else "该历史记录不存在或已过期")
-            if record:
-                self.queue_reply(chat_id, describe_html(record), html_mode=True,
-                                 reply_markup=self._result_buttons(record["job_id"]))
+                    cq_id, text=("📖 正在打开任务结果" if opened else "⏳ 结果正在打开或刚刚已发送")
+                    if record else "该历史记录不存在或已过期")
             return
 
         if data in {"tasks:history", "tasks:new"}:
@@ -1578,10 +1804,10 @@ class Bridge:
                 await self.api.answer_callback_query(cq_id)
             # Reuse the existing user-scoped command semantics, including deferred
             # /new during a running task. These buttons never launch a model job.
-            await self.handle({"message": {
-                "chat": chat, "from": sender,
-                "text": "/history" if data == "tasks:history" else "/new",
-            }})
+            if data == "tasks:new":
+                self._offer_reset_confirmation(user)
+            else:
+                await self.handle({"message": {"chat": chat, "from": sender, "text": "/history"}})
             return
 
         if data in {"selector:models", "selector:close"}:
@@ -1817,7 +2043,7 @@ class Bridge:
             )
             return
         if command == "/help":
-            self.queue_reply(
+            self.queue_control(
                 chat_id,
                 "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
                 "💬 直接发送文字：向 AI 助手提问或分派任务\n\n"
@@ -1845,15 +2071,8 @@ class Bridge:
             )
             return
         if command in {"/new", "/reset"}:
-            if self.slot is not None and self.slot.user == user:
-                self.slot.reset_after = True
-                self.queue_reply(chat_id, "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。")
-            else:
-                self.store.reset_conversation(user)
-                self.queue_reply(
-                    chat_id,
-                    "🧠 对话记忆已重置！\n━━━━━━━━━━━━━━━━━━━━\n已清空当前上下文，下一条消息将开启全新对话。",
-                )
+            self._close_reset_confirmation(user, "🧠 已通过命令新建对话。")
+            self.queue_control(chat_id, self._reset_conversation(user))
             return
         if command == "/usage":
             usage = self.store.get_usage(user)
@@ -1864,7 +2083,7 @@ class Bridge:
                 short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
                 turns = conv.get("num_turns", 1)
                 conv_info = f"`{short_cid}`（已连续对话 {turns} 轮）"
-            self.queue_reply(
+            self.queue_control(
                 chat_id,
                 f"📊 Token 用量统计报告\n━━━━━━━━━━━━━━━━━━━━\n"
                 f"💬 当前会话：{conv_info}\n\n"
@@ -1881,7 +2100,7 @@ class Bridge:
         if command == "/status":
             details = text.split(maxsplit=1)[1:] == ["details"]
             summary, keyboard = self._status_card(user, details)
-            self.queue_reply(chat_id, summary, reply_markup=keyboard)
+            self.queue_reply(chat_id, summary, reply_markup=keyboard, html_mode=details)
             return
         if command == "/cancel":
             job = self.slot
@@ -1909,7 +2128,8 @@ class Bridge:
                 if record:
                     job_id = record.get("job_id", "")
                     keyboard = self._result_buttons(job_id) if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id) else None
-                    self.queue_reply(chat_id, describe_html(record), html_mode=True, reply_markup=keyboard)
+                    self.queue_reply(chat_id, describe_html(record), html_mode=True, reply_markup=keyboard,
+                                     result_key=(user, record.get("job_id", "last")))
                     return
                 text = "ℹ️ 没有可取回的结果，或记录已过保留期。"
             except (OSError, ValueError):
@@ -1944,7 +2164,7 @@ class Bridge:
             if len(correction_prompt(job, correction)) > self.settings.max_prompt:
                 self.queue_reply(chat_id, "⚠️ 原任务与修正合并后过长，当前任务未改变；请精简修正内容。")
                 return
-            self._forget_correction(job)
+            self._forget_correction(job, "⚡ 已提交修正，正在等待清理和交接。")
             job.steered = True
             job.cancel.set()
             job.activity = "正在停止当前任务并应用你的修正"
@@ -2054,44 +2274,44 @@ class Bridge:
                     "• ➕ 添加用户：/whitelist add <数字ID>",
                     "• 🗑️ 移除用户：/whitelist remove <数字ID>",
                 ])
-                self.queue_reply(chat_id, "\n".join(lines))
+                self.queue_control(chat_id, "\n".join(lines))
                 return
 
             if user != admin_id:
-                self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可管理动态白名单。")
+                self.queue_control(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可管理动态白名单。")
                 return
 
             if subcmd == "add":
                 if not target_str.isdigit() or not (5 <= len(target_str) <= 16):
-                    self.queue_reply(chat_id, "⚠️ 请输入合法的 Telegram 数字用户 ID（5-16 位正整数）。\n例如：/whitelist add 123456789")
+                    self.queue_control(chat_id, "⚠️ 请输入合法的 Telegram 数字用户 ID（5-16 位正整数）。\n例如：/whitelist add 123456789")
                     return
                 target_id = int(target_str)
                 if target_id in self.settings.allowed:
-                    self.queue_reply(chat_id, f"ℹ️ 用户 `{target_id}` 已在 config.env 基础配置中，无需重复添加。")
+                    self.queue_control(chat_id, f"ℹ️ 用户 `{target_id}` 已在 config.env 基础配置中，无需重复添加。")
                     return
                 ok = self.store.add_whitelist(target_id)
                 if ok:
-                    self.queue_reply(chat_id, f"✅ 已成功添加用户 `{target_id}` 到授权白名单！该用户现在可以私聊使用此 Bot。")
+                    self.queue_control(chat_id, f"✅ 已成功添加用户 `{target_id}` 到授权白名单！该用户现在可以私聊使用此 Bot。")
                 else:
-                    self.queue_reply(chat_id, f"ℹ️ 用户 `{target_id}` 已经在动态白名单中了。")
+                    self.queue_control(chat_id, f"ℹ️ 用户 `{target_id}` 已经在动态白名单中了。")
                 return
 
             if subcmd in {"remove", "del", "delete", "rm"}:
                 if not target_str.isdigit():
-                    self.queue_reply(chat_id, "⚠️ 请指定要移除的 Telegram 数字用户 ID。\n例如：/whitelist remove 123456789")
+                    self.queue_control(chat_id, "⚠️ 请指定要移除的 Telegram 数字用户 ID。\n例如：/whitelist remove 123456789")
                     return
                 target_id = int(target_str)
                 if target_id in self.settings.allowed:
-                    self.queue_reply(chat_id, f"⚠️ 用户 `{target_id}` 属于 config.env 基础配置白名单，无法通过指令移除。")
+                    self.queue_control(chat_id, f"⚠️ 用户 `{target_id}` 属于 config.env 基础配置白名单，无法通过指令移除。")
                     return
                 ok = self.store.remove_whitelist(target_id)
                 if ok:
-                    self.queue_reply(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`。")
+                    self.queue_control(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`。")
                 else:
-                    self.queue_reply(chat_id, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。")
+                    self.queue_control(chat_id, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。")
                 return
 
-            self.queue_reply(chat_id, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>")
+            self.queue_control(chat_id, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>")
             return
         if command == "/mode":
             parts = text.split(maxsplit=1)
@@ -2143,10 +2363,10 @@ class Bridge:
                 try:
                     candidate.relative_to(workspace.resolve())
                 except ValueError:
-                    self.queue_reply(chat_id, "⚠️ 路径不合法：严禁越权访问工作空间以外的目录。")
+                    self.queue_control(chat_id, "⚠️ 路径不合法：严禁越权访问工作空间以外的目录。")
                     return
                 if not candidate.exists() or not candidate.is_dir():
-                    self.queue_reply(chat_id, f"⚠️ 子目录 `{subpath}` 不存在或并非目录。")
+                    self.queue_control(chat_id, f"⚠️ 子目录 `{subpath}` 不存在或并非目录。")
                     return
                 target_dir = candidate
 
@@ -2182,9 +2402,9 @@ class Bridge:
                     lines.append(f"📊 目录总计 {total_count} 个项目")
                 if target_dir == workspace and any(e[1] for e in entries):
                     lines.append("💡 发送 /ls <子目录> 可展开查看指定子目录。")
-                self.queue_reply(chat_id, "\n".join(lines))
+                self.queue_control(chat_id, "\n".join(lines))
             except Exception:
-                self.queue_reply(chat_id, "⚠️ 无法读取工作空间目录，请检查服务器权限。")
+                self.queue_control(chat_id, "⚠️ 无法读取工作空间目录，请检查服务器权限。")
             return
         if command:
             self.queue_reply(chat_id, "⚠️ 不支持这个控制命令。发送 /help 查看可用指令。")
@@ -2475,6 +2695,10 @@ class Bridge:
                 await job.worker
             if self.steer_tasks:
                 await asyncio.gather(*tuple(self.steer_tasks), return_exceptions=True)
+            for pending in self.reset_confirmations.values():
+                if pending.timer is not None:
+                    pending.timer.cancel()
+            self.reset_confirmations.clear()
 
 
 async def start(settings: Settings, ready_file: Path | None) -> None:

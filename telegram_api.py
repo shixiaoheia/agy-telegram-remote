@@ -14,10 +14,11 @@ from urllib.request import Request, urlopen
 
 
 class TelegramError(Exception):
-    def __init__(self, code: int = 0, retry_after: int = 0):
+    def __init__(self, code: int = 0, retry_after: int = 0, *, not_modified: bool = False):
         super().__init__(f"Telegram API error ({code or 'network/protocol'})")
         self.code = code
         self.retry_after = retry_after
+        self.not_modified = not_modified is True and code == 400
 
 
 class TelegramAPI:
@@ -56,6 +57,12 @@ class TelegramAPI:
                 raise TelegramError(
                     code if type(code) is int else 0,
                     min(retry, 86400) if type(retry) is int and retry > 0 else 0,
+                    # Retain only this fixed classification, never raw descriptions
+                    # which can contain credentials or token-bearing URLs.
+                    not_modified=(method == "editMessageText" and code == 400
+                                  and isinstance(value.get("description"), str)
+                                  and value["description"].lower().startswith(
+                                      "bad request: message is not modified")),
                 )
             if http_code or "result" not in value:
                 raise TelegramError(http_code)
