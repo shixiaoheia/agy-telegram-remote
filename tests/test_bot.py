@@ -14,6 +14,7 @@ from agy_runner import Result
 from bot import Bridge, Job, describe, describe_html
 from state_store import Store
 from telegram_api import TelegramError
+from telegram_formatting import plain_html_text
 from settings import OFFICIAL_MODELS
 
 def update(text, user=12345, chat_type="private", update_id=1):
@@ -1355,7 +1356,8 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         # Admin user adds 88888
         await self.bridge.handle(update("/whitelist add 88888", user=12345))
         await self.bridge.reply_worker
-        self.assertIn("已成功添加用户 `88888`", self.api.messages[-1][1])
+        self.assertIn("已成功添加用户 88888", plain_html_text(self.api.messages[-1][1]))
+        self.assertIn("<code>88888</code>", self.api.messages[-1][1])
         self.assertTrue(self.bridge._is_allowed(88888))
 
         # Dynamically added user can interact with bot
@@ -1431,13 +1433,14 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         # 3. Owner (99999) views /whitelist with crown mark
         await bridge.handle(update("/whitelist", user=99999))
         await bridge.reply_worker
-        self.assertIn("• ID: `99999` 👑 (主管理员)", self.api.messages[-1][1])
-        self.assertIn("• ID: `11111`\n", self.api.messages[-1][1])
+        self.assertIn("• ID: 99999 👑 (主管理员)", plain_html_text(self.api.messages[-1][1]))
+        self.assertIn("• ID: 11111\n", plain_html_text(self.api.messages[-1][1]))
+        self.assertIn("<code>99999</code>", self.api.messages[-1][1])
 
         # 4. Owner (99999) successfully adds to whitelist
         await bridge.handle(update("/whitelist add 77777", user=99999))
         await bridge.reply_worker
-        self.assertIn("已成功添加用户 `77777`", self.api.messages[-1][1])
+        self.assertIn("已成功添加用户 77777", plain_html_text(self.api.messages[-1][1]))
         self.assertTrue(bridge._is_allowed(77777))
 
     async def test_polling_and_init_requests_callback_queries(self):

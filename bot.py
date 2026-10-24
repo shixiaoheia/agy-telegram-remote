@@ -637,7 +637,7 @@ class Bridge:
         self.stop = asyncio.Event()
         self.offset = store.offset()
         self._last_maintenance = 0.0
-        self.replies: asyncio.Queue[tuple] = asyncio.Queue(maxsize=32)
+        self.replies: asyncio.Queue[tuple | ControlCard] = asyncio.Queue(maxsize=32)
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
         self.model_check_task: asyncio.Task | None = None
@@ -2083,18 +2083,17 @@ class Bridge:
                 short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
                 turns = conv.get("num_turns", 1)
                 conv_info = f"`{short_cid}`（已连续对话 {turns} 轮）"
-            self.queue_control(
+            report = control_html(f"📊 Token 用量统计报告\n💬 当前会话：{conv_info}")
+            self.queue_reply(
                 chat_id,
-                f"📊 Token 用量统计报告\n━━━━━━━━━━━━━━━━━━━━\n"
-                f"💬 当前会话：{conv_info}\n\n"
-                f"📈 历史累计资源消耗：\n"
+                report + "\n\n<blockquote>📈 历史累计资源消耗：\n"
                 f"• 💬 累计对话轮次：{usage.get('total_turns', 0)} 轮\n"
                 f"• 📥 输入 Token：{usage.get('total_input_tokens', 0):,}\n"
                 f"• 📤 输出 Token：{usage.get('total_output_tokens', 0):,}\n"
                 f"• 🧠 思考 Token：{usage.get('total_thinking_tokens', 0):,}\n"
                 f"• 📊 总计 Token：{(usage.get('total_input_tokens', 0) + usage.get('total_output_tokens', 0)):,}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"💡 发送 /new 或 /reset 可重置当前会话上下文。",
+                "</blockquote>\n💡 发送 /new 或 /reset 可重置当前会话上下文。",
+                html_mode=True,
             )
             return
         if command == "/status":

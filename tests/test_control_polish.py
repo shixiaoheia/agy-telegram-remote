@@ -143,6 +143,8 @@ class ControlPolishTests(unittest.IsolatedAsyncioTestCase):
             validate(self.api.messages[-1][1])
             self.assertNotIn("`", self.api.messages[-1][1])
             self.assertEqual(self.api.parse_modes[-1], "HTML")
+            if text == "/usage":
+                self.assertIn("<blockquote>", self.api.messages[-1][1])
 
     async def test_card_finishing_during_send_updates_same_message(self):
         self.api.accept_gate = asyncio.Event()
