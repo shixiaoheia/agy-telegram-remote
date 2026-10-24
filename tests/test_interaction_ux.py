@@ -247,7 +247,7 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
         await self._drain()
         self.assertEqual(self.runner.calls, len(OFFICIAL_MODELS))
         self.assertIsNone(self.store.get_model(12345))
-        self.assertTrue(any("会消耗模型额度" in message[1] for message in self.api.messages))
+        self.assertTrue(any("会消耗模型额度" in message[1] for message in self.api.sent_messages))
 
     async def test_model_card_shows_per_model_age_and_detection_actions(self):
         now = time.time()

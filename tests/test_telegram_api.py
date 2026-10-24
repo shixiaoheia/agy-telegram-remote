@@ -92,6 +92,23 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context.exception.code, 401)
         self.assertNotIn(DUMMY_TOKEN, str(context.exception))
 
+    async def test_not_modified_is_classified_without_retaining_description(self):
+        self.responses.append((400, {"ok": False, "error_code": 400,
+            "description": "Bad Request: message is not modified: credential " + DUMMY_TOKEN}))
+        with self.assertRaises(TelegramError) as caught:
+            await self.api.edit(12345, 1, "same")
+        self.assertTrue(caught.exception.not_modified)
+        self.assertNotIn(DUMMY_TOKEN, repr(caught.exception.__dict__))
+
+    async def test_other_errors_are_not_successful_noop_edits(self):
+        for method, code, description in (("sendMessage", 400, "Bad Request: message is not modified"),
+                                           ("editMessageText", 400, "Bad Request: message to edit not found"),
+                                           ("editMessageText", 500, "Bad Request: message is not modified")):
+            self.responses.append((code, {"ok": False, "error_code": code, "description": description}))
+            with self.assertRaises(TelegramError) as caught:
+                await self.api.call(method)
+            self.assertFalse(caught.exception.not_modified)
+
     async def test_rate_limit_retries_are_bounded(self):
         self.responses.extend([
             (429, {"ok": False, "error_code": 429, "parameters": {"retry_after": 1}})

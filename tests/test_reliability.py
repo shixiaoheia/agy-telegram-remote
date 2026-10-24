@@ -358,6 +358,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_conversation(12345, "existing-conversation")
         await self.bridge.handle(callback_update("tasks:new"))
         await self.bridge.reply_worker
+        self.assertIsNotNone(self.store.get_conversation(12345))
+        action = self.api.messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
+        await self.bridge.handle(callback_update(action))
+        await self.bridge.reply_worker
         self.assertIsNone(self.store.get_conversation(12345))
         self.assertEqual(self.runner.calls, 1)
 
@@ -399,6 +403,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         await self.runner.started.wait()
         job = self.bridge.slot
         await self.bridge.handle(callback_update("tasks:new"))
+        self.assertFalse(job.reset_after)
+        await self.bridge.reply_worker
+        action = self.api.messages[-1][2]["inline_keyboard"][0][0]["callback_data"]
+        await self.bridge.handle(callback_update(action))
         self.assertTrue(job.reset_after)
         self.assertIsNotNone(self.store.get_conversation(12345))
         self.runner.finish.set()
