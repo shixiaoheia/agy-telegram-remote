@@ -2087,7 +2087,7 @@ class Bridge:
             self.queue_reply(
                 chat_id,
                 report + "\n\n<blockquote>📈 历史累计资源消耗：\n"
-                f"• 💬 累计对话轮次：{usage.get('total_turns', 0)} 轮\n"
+                f"• 💬 累计对话轮次：{html.escape(str(usage.get('total_turns', 0)))} 轮\n"
                 f"• 📥 输入 Token：{usage.get('total_input_tokens', 0):,}\n"
                 f"• 📤 输出 Token：{usage.get('total_output_tokens', 0):,}\n"
                 f"• 🧠 思考 Token：{usage.get('total_thinking_tokens', 0):,}\n"

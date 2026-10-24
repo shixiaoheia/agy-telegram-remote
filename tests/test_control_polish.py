@@ -1,6 +1,7 @@
 """Control-card lifecycle, repeated taps and explicit conversation reset."""
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -88,9 +89,10 @@ class ControlPolishTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(callback_update(action))
         await self.drain()
         self.assertEqual(self.api.sent_count, 1)
-        self.bridge._recent_results.clear()
-        await self.bridge.handle(callback_update(action))
-        await self.drain()
+        later = time.monotonic() + 3
+        with patch("bot.time.monotonic", return_value=later):
+            await self.bridge.handle(callback_update(action))
+            await self.drain()
         self.assertEqual(self.api.sent_count, 2)
 
     async def test_failed_result_delivery_releases_duplicate_guard(self):
@@ -157,6 +159,13 @@ class ControlPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.sent_count, 1)
         self.assertIn("检测完成", self.api.messages[0][1])
         self.assertEqual(self.api.messages[0][2]["inline_keyboard"], [])
+
+    async def test_usage_card_does_not_interpret_text_from_saved_counters(self):
+        with patch.object(self.store, "get_usage", return_value={"total_turns": "<b>literal</b>"}):
+            await self.bridge.handle(update("/usage"))
+            await self.drain()
+        validate(self.api.messages[-1][1])
+        self.assertIn("&lt;b&gt;literal&lt;/b&gt;", self.api.messages[-1][1])
 
     async def test_ambiguous_initial_card_send_is_never_replayed(self):
         self.api.fail_at.add(1)
