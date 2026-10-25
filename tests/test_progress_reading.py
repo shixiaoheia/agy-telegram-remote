@@ -237,3 +237,21 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(job.progress_expanded)
         self.assertFalse(job.progress_requested.is_set())
         self.assertIn("已结束", self.api.answered_callbacks[-1][1])
+
+    async def test_simultaneous_read_request_and_worker_cancel_never_lose_cancellation(self):
+        for _ in range(20):
+            job = Job(12345, 12345, phase="running", status_message_id=1, progress_expanded=True)
+            self.bridge.slot = job
+            task = asyncio.create_task(self.bridge._refresh_progress(job))
+            try:
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                job.progress_requested.set()
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=.5)
+                self.assertIn(task, done, "a read request swallowed worker cancellation")
+                self.assertTrue(task.cancelled())
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                self.bridge.slot = None
