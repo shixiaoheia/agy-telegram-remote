@@ -1306,13 +1306,18 @@ class Bridge:
                 requested = job.progress_requested.is_set()
                 job.progress_requested.clear()
             else:
+                waiter = asyncio.create_task(job.progress_requested.wait())
                 try:
-                    await asyncio.wait_for(job.progress_requested.wait(),
-                                           None if job.progress_expanded else delay)
-                    requested = True
-                    job.progress_requested.clear()
-                except asyncio.TimeoutError:
-                    requested = False
+                    # Explicitly own the waiter. Some older Python wait_for
+                    # implementations can lose cancellation when the inner
+                    # event completes in the same loop turn.
+                    done, _ = await asyncio.wait({waiter}, timeout=None if job.progress_expanded else delay)
+                    requested = bool(done)
+                    if requested:
+                        job.progress_requested.clear()
+                finally:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
             if self.stop.is_set() or job.cancel.is_set():
                 return
             if job.phase in {"saving", "sending"}:
