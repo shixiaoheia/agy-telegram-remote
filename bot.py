@@ -170,6 +170,8 @@ class Job:
     status_message_id: int | None = None
     result_started: bool = False
     progress_task: asyncio.Task | None = None
+    progress_expanded: bool = False
+    progress_requested: asyncio.Event = field(default_factory=asyncio.Event)
     activity: str = "正在准备任务"
     phase: str = "preparing"
     pending_correction: str = ""
@@ -1060,9 +1062,7 @@ class Bridge:
             job.phase = "starting"
             job.activity = "正在启动模型"
             accept_msg = self._progress_text(job)
-            cancel_markup = {"inline_keyboard": [[{
-                "text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"
-            }]]}
+            cancel_markup = self._progress_buttons(job)
             try:
                 accept_started = time.monotonic()
                 sent = await self.api.send(job.chat, accept_msg, reply_markup=cancel_markup, parse_mode="HTML")
@@ -1268,9 +1268,12 @@ class Bridge:
         state = "🛑 正在取消并清理" if job.cancel.is_set() else "⏳ 任务执行中"
         activity = "正在清理资源" if job.cancel.is_set() else ui_excerpt(job.activity, 90)
         trace = [ui_excerpt(step, 160) for step in job.execution_steps[-6:]]
+        if not job.progress_expanded:
+            trace = trace[-1:]
         if trace:
-            attribute = " expandable" if len(trace) > 2 else ""
-            trace_block = (f"<blockquote{attribute}><b>执行过程</b>\n"
+            # A repeatedly edited native expandable quote loses the client's
+            # reading state. Our buttons own expansion; this quote never folds.
+            trace_block = ("<blockquote><b>执行过程</b>\n"
                            + html.escape("\n".join(trace)) + "</blockquote>")
         else:
             trace_block = "<blockquote><b>执行过程</b>\n等待首个步骤…</blockquote>"
@@ -1278,21 +1281,52 @@ class Bridge:
                 + f"\n\n<b>{state}</b>\n"
                 + f"阶段：{html.escape(activity)}\n"
                 + f"🤖 {html.escape(display_model(job.model, job.effort))} · ⏱ 已运行：{elapsed}s\n\n"
-                + trace_block)
+                + trace_block
+                + ("\n📖 阅读中：内容保持不动，任务继续执行；点“刷新过程”查看最新进度。"
+                   if job.progress_expanded else ""))
         return self.store.redact(text)
+
+    def _progress_buttons(self, job: Job) -> dict:
+        return {"inline_keyboard": [
+            [{"text": "📥 收起过程" if job.progress_expanded else "📋 展开过程",
+              "callback_data": f"progress:{'collapse' if job.progress_expanded else 'expand'}:{job.job_id}"},
+             {"text": "🔄 刷新过程" if job.progress_expanded else "🔄 刷新进度",
+              "callback_data": f"progress:refresh:{job.job_id}"}],
+            [{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}],
+        ]}
 
     async def _refresh_progress(self, job: Job) -> None:
         delay = PROGRESS_UPDATE_SECONDS
+        retrying = False
         while not self.stop.is_set() and not job.cancel.is_set():
-            await asyncio.sleep(delay)
+            if retrying:
+                # A manual click must not bypass Telegram's rate-limit delay.
+                await asyncio.sleep(delay)
+                retrying = False
+                requested = job.progress_requested.is_set()
+                job.progress_requested.clear()
+            else:
+                try:
+                    await asyncio.wait_for(job.progress_requested.wait(),
+                                           None if job.progress_expanded else delay)
+                    requested = True
+                    job.progress_requested.clear()
+                except asyncio.TimeoutError:
+                    requested = False
             if self.stop.is_set() or job.cancel.is_set():
                 return
+            if job.phase in {"saving", "sending"}:
+                return
+            if job.progress_expanded and not requested:
+                continue
             if job.status_message_id is None or self.slot is not job:
                 continue
             try:
-                edit = asyncio.create_task(self.api.edit(job.chat, job.status_message_id, self._progress_text(job), {
-                    "inline_keyboard": [[{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}]]
-                }, parse_mode="HTML"))
+                # All automatic and requested edits have one writer. A button
+                # never races a pending HTTP edit, or the final result below.
+                edit = asyncio.create_task(self.api.edit(job.chat, job.status_message_id,
+                                                        self._progress_text(job), self._progress_buttons(job),
+                                                        parse_mode="HTML"))
                 try:
                     await asyncio.shield(edit)
                 except asyncio.CancelledError:
@@ -1302,12 +1336,18 @@ class Bridge:
                     raise
                 delay = PROGRESS_UPDATE_SECONDS
             except TelegramError as error:
+                if error.not_modified:
+                    delay = PROGRESS_UPDATE_SECONDS
+                    continue
                 if error.code == 429:
                     delay = max(PROGRESS_UPDATE_SECONDS, error.retry_after)
                 elif error.code == 0 or 500 <= error.code < 600:
                     delay = min(30, delay * 2)
                 else:
                     return
+                retrying = True
+                if requested:
+                    job.progress_requested.set()
             except AttributeError:
                 return
 
@@ -1683,6 +1723,27 @@ class Bridge:
                 or chat.get("type") != "private" or type(chat_id) is not int or chat_id != user):
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 await self.api.answer_callback_query(cq_id, text="⚠️ 无操作权限", show_alert=True)
+            return
+
+        if data.startswith("progress:"):
+            parts = data.split(":")
+            job = self.slot
+            valid = (len(parts) == 3 and parts[1] in {"expand", "collapse", "refresh"}
+                     and job is not None and job.user == user and parts[2] == job.job_id
+                     and type(message.get("message_id")) is int
+                     and message["message_id"] == job.status_message_id
+                     and job.phase in {"starting", "running"} and not job.cancel.is_set()
+                     and not self.stop.is_set())
+            notice = "任务已结束或这张进度卡已失效。"
+            if valid:
+                if parts[1] != "refresh":
+                    job.progress_expanded = parts[1] == "expand"
+                job.progress_requested.set()
+                notice = {"expand": "正在展开过程，任务继续执行",
+                          "collapse": "正在收起过程并恢复自动刷新",
+                          "refresh": "正在刷新，保持当前展开状态"}[parts[1]]
+            if cq_id and hasattr(self.api, "answer_callback_query"):
+                await self.api.answer_callback_query(cq_id, text=notice)
             return
 
         if data in {"status:summary", "status:details"}:
