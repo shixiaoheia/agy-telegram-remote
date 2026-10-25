@@ -547,6 +547,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_progress_recovers_from_network_and_server_errors(self):
         job = Job(12345, 12345, status_message_id=1)
         self.bridge.slot = job
+        job.progress_requested.set()
 
         # End only after the recovered edit, without introducing real timer waits.
         calls = 0
@@ -561,17 +562,18 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.api.edit = AsyncMock(side_effect=edit)
         with patch("bot.asyncio.sleep", new_callable=AsyncMock) as sleep:
             await self.bridge._refresh_progress(job)
-        self.assertEqual([c.args[0] for c in sleep.await_args_list], [5, 10, 20])
+        self.assertEqual([c.args[0] for c in sleep.await_args_list], [10, 20])
         self.assertEqual(self.api.edit.await_count, 3)
         self.assertEqual(self.runner.calls, 0)
 
     async def test_progress_respects_429_and_stops_for_deleted_card(self):
         job = Job(12345, 12345, status_message_id=1)
         self.bridge.slot = job
+        job.progress_requested.set()
         self.api.edit = AsyncMock(side_effect=[TelegramError(429, 17), TelegramError(400)])
         with patch("bot.asyncio.sleep", new_callable=AsyncMock) as sleep:
             await self.bridge._refresh_progress(job)
-        self.assertEqual([c.args[0] for c in sleep.await_args_list], [5, 17])
+        self.assertEqual([c.args[0] for c in sleep.await_args_list], [17])
         self.assertEqual(self.api.edit.await_count, 2)
 
     async def test_stopping_progress_waits_for_inflight_edit(self):

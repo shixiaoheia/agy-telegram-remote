@@ -833,7 +833,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.runner.started.wait()
         text, keyboard = self.api.messages[0][1:]
         self.assertNotIn(self.bridge.slot.job_id, text)
-        self.assertEqual(keyboard["inline_keyboard"][0][0]["text"], "🛑 取消任务")
+        self.assertEqual(keyboard["inline_keyboard"][-1][0]["text"], "🛑 取消任务")
         job = self.bridge.slot
         await self.handle(callback_update(f"cancel:{job.job_id}"))
         self.assertTrue(job.cancel.is_set())

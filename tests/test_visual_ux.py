@@ -133,7 +133,7 @@ class VisualCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('which task &lt;now&gt;?', first[1])
         self.assertIn('⏳ 任务执行中', first[1])
         self.assertIn('等待首个步骤', first[1])
-        self.assertEqual(first[2]['inline_keyboard'][0][0]['callback_data'], f'cancel:{self.bridge.slot.job_id}')
+        self.assertEqual(first[2]['inline_keyboard'][-1][0]['callback_data'], f'cancel:{self.bridge.slot.job_id}')
         self.assertEqual(self.api.parse_modes[0], 'HTML')
         validate(first[1])
 
@@ -141,7 +141,8 @@ class VisualCardTests(unittest.IsolatedAsyncioTestCase):
         job = Job(12345, 12345, history_title='task', activity='<tool>' + 'a' * 300,
                   execution_steps=['step ' + str(i) + self.settings.token for i in range(10)])
         rendered = self.bridge._progress_text(job)
-        self.assertIn('<blockquote expandable>', rendered)
+        self.assertNotIn('expandable', rendered)
+        self.assertNotIn('step 8', rendered)
         self.assertNotIn(self.settings.token, rendered)
         self.assertNotIn('step 0', rendered)
         self.assertIn('step 9', rendered)
