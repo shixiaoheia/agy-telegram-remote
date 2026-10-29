@@ -91,6 +91,7 @@ class ProxyNodeTests(unittest.TestCase):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200)
+                self.send_header("Content-Length", "8")
                 self.end_headers()
                 self.wfile.write(b"proxy-ok")
 
@@ -122,16 +123,17 @@ class ProxyNodeTests(unittest.TestCase):
                     processes.append(subprocess.Popen([os.environ["AGY_TEST_SING_BOX"], "run", "-c", str(path)],
                                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
                 deadline = time.monotonic() + 10
-                while True:
-                    if any(proc.poll() is not None for proc in processes):
-                        self.fail("Local proxy process exited")
-                    try:
-                        with socket.create_connection(("127.0.0.1", proxy_port), timeout=0.2):
-                            break
-                    except OSError:
-                        if time.monotonic() >= deadline:
-                            self.fail("Local proxy did not start")
-                        time.sleep(0.05)
+                for listen_port in (server_port, proxy_port):
+                    while True:
+                        if any(proc.poll() is not None for proc in processes):
+                            self.fail("Local proxy process exited")
+                        try:
+                            with socket.create_connection(("127.0.0.1", listen_port), timeout=0.2):
+                                break
+                        except OSError:
+                            if time.monotonic() >= deadline:
+                                self.fail("Local proxy did not start")
+                            time.sleep(0.05)
                 connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
                 try:
                     connection.request("GET", f"http://127.0.0.1:{http_server.server_port}/test")

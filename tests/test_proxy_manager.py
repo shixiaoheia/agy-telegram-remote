@@ -106,3 +106,28 @@ class ProxyManagerTests(unittest.TestCase):
                 manager.apply({"outbounds": []}, 32123)
         self.assertEqual(files, old)
         self.assertGreaterEqual(calls.count(("systemctl", "start", manager.SERVICE)), 2)
+
+    def test_new_service_disabled_before_rollback_removes_unit(self):
+        events = []
+
+        def fake_run(*args, **kwargs):
+            events.append(args)
+            if args == ("systemctl", "enable", "--now", manager.PROXY_SERVICE):
+                raise subprocess.CalledProcessError(1, args)
+            return subprocess.CompletedProcess(args, 0)
+
+        def fake_unlink(path, missing_ok=False):
+            events.append(("unlink", path))
+
+        with patch.object(manager, "secure_dir"), \
+             patch.object(manager, "read_managed", return_value=None), \
+             patch.object(manager, "atomic_write"), \
+             patch.object(manager, "active", return_value=False), \
+             patch.object(manager, "enabled", return_value=False), \
+             patch.object(manager, "run", side_effect=fake_run), \
+             patch.object(Path, "exists", return_value=True), \
+             patch.object(Path, "unlink", autospec=True, side_effect=fake_unlink):
+            with self.assertRaises(subprocess.CalledProcessError):
+                manager.apply({"outbounds": []}, 32123)
+        self.assertLess(events.index(("systemctl", "disable", manager.PROXY_SERVICE)),
+                        events.index(("unlink", manager.UNIT)))

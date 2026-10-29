@@ -134,7 +134,7 @@ def parse_node(link: str) -> dict:
         try:
             parsed = urlsplit(link)
             port = _port(parsed.port)
-            pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)
+            pairs = parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True) if parsed.query else []
         except ValueError as exc:
             raise NodeError("节点链接格式无效。") from exc
         kind = parsed.scheme.lower()

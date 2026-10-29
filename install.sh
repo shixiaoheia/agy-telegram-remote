@@ -436,7 +436,7 @@ uninstall() {
   local proxy_unit=/etc/systemd/system/agy-telegram-proxy.service
   local proxy_drop=/etc/systemd/system/agy-telegram-remote.service.d/90-agy-managed-proxy.conf
   local proxy_engine=/opt/agy-telegram-remote-proxy
-  [[ ! -L "$proxy_unit" && ! -L "$proxy_drop" && ! -L "$proxy_engine" ]] \
+  [[ ! -L "$proxy_unit" && ! -L "$(dirname -- "$proxy_drop")" && ! -L "$proxy_drop" && ! -L "$proxy_engine" ]] \
     || fail '代理相关路径是符号链接，请人工检查。'
   if [[ -f "$proxy_unit" ]] && head -n 1 "$proxy_unit" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.'; then
     [[ "$(stat -c %u "$proxy_unit")" == 0 ]] || fail '代理服务文件不受 root 管理。'

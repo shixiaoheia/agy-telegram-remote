@@ -311,15 +311,21 @@ def apply(config: dict, port: int) -> None:
                 failures.append(True)
 
         if changed:
-            attempt(lambda: run("systemctl", "stop", SERVICE))
-            attempt(lambda: run("systemctl", "stop", PROXY_SERVICE))
+            if old_bot_active:
+                attempt(lambda: run("systemctl", "stop", SERVICE))
+            attempt(lambda: run("systemctl", "stop", PROXY_SERVICE, check=False))
+            # Remove links while the new unit still exists; after deleting it,
+            # systemctl may be unable to disable an otherwise dangling link.
+            if not old_proxy_enabled and UNIT.exists():
+                attempt(lambda: run("systemctl", "disable", PROXY_SERVICE))
             for path, value in before.items():
                 if value is None:
                     attempt(lambda p=path: p.unlink(missing_ok=True))
                 else:
                     attempt(lambda p=path, v=value: atomic_write(p, v, 0o600 if p in (CONFIG, ENV) else 0o644))
             attempt(lambda: run("systemctl", "daemon-reload"))
-            attempt(lambda: run("systemctl", "enable" if old_proxy_enabled else "disable", PROXY_SERVICE))
+            if old_proxy_enabled:
+                attempt(lambda: run("systemctl", "enable", PROXY_SERVICE))
             if old_proxy_active:
                 attempt(lambda: run("systemctl", "start", PROXY_SERVICE))
         if old_bot_active:
