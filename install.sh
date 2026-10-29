@@ -29,6 +29,7 @@ REAUTH=0
 RECONFIGURE=0
 MODE=menu
 PURGE=0
+NEW_PROXY=0
 TRANSACTION=0
 COMMITTED=0
 SWITCHED=0
@@ -65,6 +66,7 @@ usage() {
   bash install.sh --ref COMMIT_OR_BRANCH   安装/升级指定不可变 Git 提交 SHA 或分支（推荐生产使用 Commit SHA）
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
   bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 y 确认）
+  bash install.sh --proxy                  添加或更换本项目代理节点
   bash install.sh --help                   显示此帮助说明
 EOF
 }
@@ -75,6 +77,11 @@ choose_operation() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 管理菜单'
   echo '============================================='
+  echo '地区提示：Antigravity 仅在 Google 支持的国家或地区提供。'
+  echo '例如美国、日本、新加坡在官方名单中；香港目前未列入。'
+  echo '完整名单及账号所属地区说明：https://antigravity.google/docs/faq'
+  echo '网络出口和账号资格都可能影响使用，代理不能保证开通资格。'
+  echo
   if [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
     echo '检测到已有安装；更新将保留现有配置。'
     echo '  1) 安装或修复（沿用现有配置）'
@@ -85,22 +92,24 @@ choose_operation() {
     echo '  2) 更新（使用同一部署流程）'
   fi
   echo '  3) 彻底卸载（查看清理范围并确认）'
+  echo '  4) 添加或更换代理节点'
   echo '  0) 退出'
   echo
   while true; do
-    printf '请输入选项 [0/1/2/3]： '
+    printf '请输入选项 [0/1/2/3/4]： '
     if IFS= read -r choice; then
       case "$choice" in
         1) MODE=install; return 0 ;;
         # 安装和更新走同一套原子部署流程；更新会自动保留现有配置。
         2) MODE=install; return 0 ;;
         3) MODE=uninstall; PURGE=1; return 0 ;;
+        4) MODE=proxy; return 0 ;;
         0)
           MODE="exit"
           echo '已退出，未开始任何安装或卸载操作。'
           return 0
           ;;
-        *) echo '请输入 1、2、3 或 0，然后回车。' ;;
+        *) echo '请输入 1、2、3、4 或 0，然后回车。' ;;
       esac
     else
       rc=$?
@@ -113,6 +122,48 @@ choose_operation() {
       fail "无法读取菜单选项（read 返回 $rc）。"
     fi
   done
+}
+
+choose_initial_proxy() {
+  local answer
+  echo '如当前网络需要代理，可输入自己的节点链接。节点仅供本项目使用。'
+  echo '首次下载项目和代理核心仍需要能访问 GitHub。'
+  while true; do
+    if ! IFS= read -r -p '现在配置代理节点？[y/n]： ' answer; then echo; return 1; fi
+    case "$answer" in
+      y|Y) NEW_PROXY=1; return 0 ;;
+      n|N) NEW_PROXY=0; return 0 ;;
+      *) echo '请输入 y 或 n。' ;;
+    esac
+  done
+}
+
+load_managed_proxy() {
+  local env_file="$CONFIG_DIR/proxy.env" port
+  [[ -e "$env_file" || -L "$env_file" ]] || return 0
+  [[ -f "$env_file" && ! -L "$env_file" && "$(stat -c %u "$env_file")" == 0 ]] \
+    || fail '代理环境文件不安全。'
+  port="$(/usr/bin/python3 -I - "$env_file" <<'PY'
+import os, re, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd, 'rb') as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_nlink != 1 or st.st_mode & 0o077 or st.st_size > 4096:
+        sys.exit(1)
+    text = f.read(4097).decode('ascii')
+m = re.fullmatch(r'HTTP_PROXY=http://127\.0\.0\.1:([0-9]{1,5})\nHTTPS_PROXY=http://127\.0\.0\.1:\1\nhttp_proxy=http://127\.0\.0\.1:\1\nhttps_proxy=http://127\.0\.0\.1:\1\nNO_PROXY=localhost,127\.0\.0\.1,::1\nno_proxy=localhost,127\.0\.0\.1,::1\nALL_PROXY=\nall_proxy=\n', text)
+if not m or not 1 <= int(m.group(1)) <= 65535:
+    sys.exit(1)
+print(m.group(1))
+PY
+)" || fail '代理环境文件无效，请检查后重试。'
+  if ! systemctl is-active --quiet agy-telegram-proxy.service; then
+    systemctl start agy-telegram-proxy.service || fail '本项目代理服务未能启动，请先检查或更换节点。'
+  fi
+  export HTTP_PROXY="http://127.0.0.1:$port" HTTPS_PROXY="http://127.0.0.1:$port"
+  export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY"
+  export NO_PROXY='localhost,127.0.0.1,::1' no_proxy='localhost,127.0.0.1,::1'
+  export ALL_PROXY='' all_proxy=''
 }
 
 supported_os() {
@@ -381,7 +432,37 @@ validate_release_files() {
 }
 
 uninstall() {
-  local answer managed_agy='' directory configured_input=''
+  local answer managed_agy='' directory configured_input='' managed_proxy=0 managed_engine=0 managed_drop=0
+  local proxy_unit=/etc/systemd/system/agy-telegram-proxy.service
+  local proxy_drop=/etc/systemd/system/agy-telegram-remote.service.d/90-agy-managed-proxy.conf
+  local proxy_engine=/opt/agy-telegram-remote-proxy
+  [[ ! -L "$proxy_unit" && ! -L "$(dirname -- "$proxy_drop")" && ! -L "$proxy_drop" && ! -L "$proxy_engine" ]] \
+    || fail '代理相关路径是符号链接，请人工检查。'
+  if [[ -f "$proxy_unit" ]] && head -n 1 "$proxy_unit" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.'; then
+    [[ "$(stat -c %u "$proxy_unit")" == 0 ]] || fail '代理服务文件不受 root 管理。'
+    managed_proxy=1
+  fi
+  if [[ -f "$proxy_drop" ]] && head -n 1 "$proxy_drop" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.'; then
+    [[ "$(stat -c %u "$proxy_drop")" == 0 ]] || fail '代理服务配置不受 root 管理。'
+    managed_drop=1
+  fi
+  if [[ "$managed_proxy" == 1 && -e "$proxy_drop" && "$managed_drop" == 0 ]]; then
+    fail '代理服务配置并非本项目管理，请人工检查。'
+  fi
+  if [[ -d "$proxy_engine" ]]; then
+    [[ ! -L "$proxy_engine/.agy-managed" ]] || fail '代理核心标记是符号链接。'
+    if [[ -f "$proxy_engine/.agy-managed" && "$(stat -c %u "$proxy_engine")" == 0 \
+          && "$(stat -c %u "$proxy_engine/.agy-managed")" == 0 ]] \
+          && [[ "$(cat "$proxy_engine/.agy-managed")" == 'agy-telegram-proxy-v1' ]]; then
+      local engine_perms marker_perms
+      engine_perms="$(stat -c %a "$proxy_engine")"
+      marker_perms="$(stat -c %a "$proxy_engine/.agy-managed")"
+      (( (8#$engine_perms & 0022) == 0 && (8#$marker_perms & 0077) == 0 )) \
+        || fail '代理核心目录或标记权限不安全。'
+      managed_engine=1
+    fi
+    [[ "$managed_proxy" == 0 || "$managed_engine" == 1 ]] || fail '代理核心目录并非本项目管理。'
+  fi
   if [[ "$PURGE" == 1 ]]; then
     configured_input="$(find_input_dir)" || fail '未能安全确认附件清理范围；未停止服务。'
     if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
@@ -389,6 +470,7 @@ uninstall() {
       [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
     fi
     echo '将删除服务、程序、配置、任务记录、备份、运行文件和 Bot 临时附件。'
+    [[ "$managed_proxy" == 0 ]] || echo '还将删除本项目管理的代理服务、节点凭据及代理核心。'
     if [[ -n "$managed_agy" ]]; then
       echo '还将删除本安装器安装的 agy 和对应的 Google 登录资料。'
     else
@@ -425,6 +507,19 @@ uninstall() {
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     fail '服务未能停止；未移除服务文件。'
   fi
+  if [[ "$managed_proxy" == 1 ]]; then
+    systemctl disable --now agy-telegram-proxy.service >/dev/null 2>&1 || true
+    if systemctl is-active --quiet agy-telegram-proxy.service 2>/dev/null; then
+      fail '代理服务未能停止，请人工检查。'
+    fi
+    if [[ "$PURGE" == 1 ]]; then
+      rm -f -- "$proxy_unit"
+    fi
+  fi
+  if [[ "$PURGE" == 1 ]]; then
+    [[ "$managed_drop" == 0 ]] || rm -f -- "$proxy_drop"
+    [[ "$managed_engine" == 0 ]] || rm -rf -- "$proxy_engine"
+  fi
   rm -f -- "$UNIT"
   systemctl daemon-reload
   if [[ "$PURGE" == 0 ]]; then
@@ -459,6 +554,7 @@ main() {
         ;;
       --reauth) REAUTH=1; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
+      --proxy) MODE=proxy ;;
       --purge) PURGE=1 ;;
       --ref)
         (( $# >= 2 )) || fail '--ref 缺少值。'
@@ -500,6 +596,34 @@ main() {
     uninstall
     return
   fi
+  if [[ "$MODE" == proxy ]]; then
+    [[ -L "$APP" ]] || fail '请先安装或更新到支持代理节点的版本。'
+    local proxy_release
+    proxy_release="$(readlink -f -- "$APP")"
+    [[ "$proxy_release" == "$RELEASES/"* && -d "$proxy_release" \
+       && "$(stat -c %u "$proxy_release")" == 0 \
+       && -f "$proxy_release/proxy_manager.py" && ! -L "$proxy_release/proxy_manager.py" \
+       && -f "$proxy_release/proxy_node.py" && ! -L "$proxy_release/proxy_node.py" \
+       && "$(stat -c %u "$proxy_release/proxy_manager.py")" == 0 \
+       && "$(stat -c %u "$proxy_release/proxy_node.py")" == 0 ]] \
+      || fail '请先更新到支持代理节点的版本。'
+    local proxy_perms
+    for proxy_perms in "$(stat -c %a "$proxy_release")" \
+      "$(stat -c %a "$proxy_release/proxy_manager.py")" "$(stat -c %a "$proxy_release/proxy_node.py")"; do
+      (( (8#$proxy_perms & 0022) == 0 )) || fail '代理程序可被非 root 修改，已停止。'
+    done
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null && ! confirm_service_stop; then
+      echo '已取消更换节点，原服务保持运行。'
+      return 0
+    fi
+    /usr/bin/python3 -E -s -B "$proxy_release/proxy_manager.py"
+    return
+  fi
+
+  load_managed_proxy
+  if [[ ! -e "$CONFIG" && ! -L "$APP" && ! -f "$APP/.env" && ! -f "$CONFIG_DIR/proxy.env" ]]; then
+    choose_initial_proxy || fail '已取消安装。'
+  fi
 
   trap on_exit EXIT
   trap 'exit 130' INT
@@ -507,6 +631,8 @@ main() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 极简一键安装向导'
   echo '============================================='
+  echo '地区提示：美国、日本、新加坡等在 Antigravity 官方支持名单内；香港目前未列入。'
+  echo '请查看 https://antigravity.google/docs/faq 了解完整名单及账号资格。'
   echo '👑 运行模式：个人 VPS 极简 Root 模式（运行账户: root，工作目录: /root）'
   echo '⚡ 特性支持：默认开启自动审批（无头运行不挂起），仅供信任的白名单用户使用。'
   echo '📦 正在准备系统依赖与核心运行环境……'
@@ -548,6 +674,16 @@ main() {
   find "$STAGE" -type f -exec chmod 0644 {} +
   validate_release_files "$STAGE"
   echo "采用提交：$commit"
+
+  if [[ "$NEW_PROXY" == 1 ]]; then
+    [[ -f "$STAGE/proxy_manager.py" && -f "$STAGE/proxy_node.py" ]] \
+      || fail '所选版本不支持代理节点。'
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      fail '检测到同名服务正在运行，请先检查已有安装，再通过菜单更换节点。'
+    fi
+    /usr/bin/python3 -E -s -B "$STAGE/proxy_manager.py" || fail '节点配置未完成，安装已停止。'
+    load_managed_proxy
+  fi
 
   CANDIDATE="$(mktemp "$CONFIG_DIR/.candidate-XXXXXXXX")"
   chown root:root "$CANDIDATE"; chmod 0600 "$CANDIDATE"
