@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import os
 import re
 import signal
 import sys
 import time
+import warnings
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
 
 from agy_runner import Runner, SMOKE_PROMPT
-from settings import (ConfigError, KEYS, Settings, check_no_symlink, merged_config,
-                      parse_env, read_private_text, serialize_env)
+from settings import (ConfigError, KEYS, TOKEN_RE, Settings, check_no_symlink, merged_config,
+                      parse_allowed_ids, parse_env, read_private_text, serialize_env)
 from state_store import read_json
 from telegram_api import TelegramAPI, TelegramError
 
@@ -78,7 +80,16 @@ def prepare_config(args: argparse.Namespace) -> int:
         print("请输入 Telegram Bot Token：")
         if old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN"):
             print("（已有 Token，直接回车保留。）")
-        token = input("> ").strip()
+        while True:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", getpass.GetPassWarning)
+                    token = getpass.getpass("> ", stream=sys.stdout).strip()
+            except getpass.GetPassWarning:
+                raise ConfigError("无法安全隐藏 Token 输入，请使用交互式终端重试。") from None
+            if TOKEN_RE.fullmatch(token or old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN", "")):
+                break
+            print("Token 格式不正确，请从 BotFather 完整复制后重试。输入不会显示在屏幕上。")
     else:
         print("自动保留已有 Telegram Bot Token。")
     print("\n步骤 2/3：Telegram 数字 ID")
@@ -86,7 +97,13 @@ def prepare_config(args: argparse.Namespace) -> int:
         print("请输入 Telegram 数字 ID（多个 ID 用逗号分隔）：")
         if old.get("ALLOWED_USER_IDS"):
             print("直接回车保留已有白名单。")
-        ids = input("> ").strip()
+        while True:
+            ids = input("> ").strip()
+            try:
+                parse_allowed_ids(ids or old.get("ALLOWED_USER_IDS", ""))
+                break
+            except ConfigError as error:
+                print(f"{error} 请检查后重新输入。")
     else:
         print("自动保留已有白名单。")
     home = getattr(args, "home", "/root") or "/root"
@@ -131,6 +148,15 @@ async def smoke(settings: Settings, allow_root: bool = True) -> int:
         print(result.detail)
     if result.text and result.text.strip() != "AGY ready.":
         print(result.text.strip())
+    advice = {
+        "auth": "请检查 Google 授权，必要时重新授权。",
+        "quota": "可能是额度或限流问题，请检查额度并稍后重试。",
+        "network": "可能是网络问题，请检查服务器网络、DNS 和代理后重试。",
+        "capacity": "模型容量可能暂时不足，请稍后重试。",
+        "location": "账号或服务器出口所在地区可能不受支持，请检查地区设置。",
+        "permission": "工具权限可能不足，请检查当前权限配置。",
+    }.get(result.category, "请查看上方自检信息并检查模型、网络和服务日志。")
+    print("建议：" + advice)
     if result.category == "auth":
         return 10
     return {"quota": 12, "network": 13, "permission": 14}.get(result.category, 15)
@@ -150,6 +176,12 @@ async def check_token(settings: Settings) -> int:
             return 16
     except TelegramError as error:
         print(f"Telegram 检查失败，代码 {error.code or '网络/协议'}；未输出 Token。")
+        if error.code in (401, 404):
+            print("建议：检查 Bot Token 是否完整、有效；如需修改，使用 --reconfigure。")
+        elif error.code == 429:
+            print("建议：Telegram 暂时限流，请稍后重试。")
+        else:
+            print("建议：检查服务器到 Telegram 的网络、代理和服务状态，稍后重试。")
         return 17
     print("TELEGRAM_CHECK_OK")
     return 0

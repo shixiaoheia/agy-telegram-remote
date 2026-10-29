@@ -86,6 +86,19 @@ class ConfigError(ValueError):
     """Messages must not contain configuration values or secrets."""
 
 
+def parse_allowed_ids(value: str) -> list[int]:
+    ids = value.split(",")
+    if not 1 <= len(ids) <= 32 or any(not re.fullmatch(r"[0-9]+", x.strip()) for x in ids):
+        raise ConfigError("白名单必须包含 1..32 个以逗号分隔的数字用户 ID。")
+    try:
+        parsed = [int(x.strip()) for x in ids]
+    except ValueError:
+        raise ConfigError("Telegram 数字 ID 超出范围。") from None
+    if any(not 0 < uid < 2**53 for uid in parsed):
+        raise ConfigError("Telegram 数字 ID 超出范围。")
+    return parsed
+
+
 def read_private_text(path: Path, limit: int = 65536) -> str:
     """Reject symlinks, non-regular files and oversized inputs before reading."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -200,14 +213,9 @@ class Settings:
         token = values.get("TELEGRAM_BOT_TOKEN", "")
         if not TOKEN_RE.fullmatch(token):
             raise ConfigError("Telegram Bot Token 格式不正确。")
-        ids = values.get("ALLOWED_USER_IDS", "").split(",")
-        if not 1 <= len(ids) <= 32 or any(not re.fullmatch(r"[0-9]+", x.strip()) for x in ids):
-            raise ConfigError("白名单必须包含 1..32 个以逗号分隔的数字用户 ID。")
-        parsed_ids = [int(x.strip()) for x in ids]
+        parsed_ids = parse_allowed_ids(values.get("ALLOWED_USER_IDS", ""))
         allowed = frozenset(parsed_ids)
         owner_id = parsed_ids[0]
-        if any(not 0 < uid < 2**53 for uid in allowed):
-            raise ConfigError("Telegram 数字 ID 超出范围。")
         permission = values["AGY_SKIP_PERMISSIONS"].strip().lower()
         host_access = values["AGY_HOST_ACCESS"].strip().lower()
         if host_access not in {"restricted", "full"}:

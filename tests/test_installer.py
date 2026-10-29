@@ -12,9 +12,10 @@ try:
 except ImportError:
     from common import ROOT, config_values, settings_at
 from agy_runner import Result, SMOKE_PROMPT, build_command
-from manage import (auth_login, classify_auth_error, main, oauth_environment,
+from manage import (auth_login, check_token, classify_auth_error, main, oauth_environment,
                     redact_auth_data, service_unit, smoke)
 from settings import ConfigError, Settings, parse_env
+from telegram_api import TelegramError
 
 class InstallerTests(unittest.TestCase):
     def test_full_host_access_unit_and_config_round_trip(self):
@@ -284,7 +285,8 @@ if confirm_service_stop; then exit 9; fi
                 dest.write_text("unchanged")
                 argv = ["manage.py", "prepare-config", "--output", str(dest), "--write-paths", str(path)]
                 with self.subTest(path=path), patch("sys.argv", argv), \
-                     patch("builtins.input", side_effect=[config_values()["TELEGRAM_BOT_TOKEN"], "12345"]), \
+                     patch("manage.getpass.getpass", return_value=config_values()["TELEGRAM_BOT_TOKEN"]), \
+                     patch("builtins.input", return_value="12345"), \
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(main(), 21)
                 self.assertEqual(dest.read_text(), "unchanged")
@@ -319,11 +321,13 @@ if confirm_service_stop; then exit 9; fi
             dest.touch()
             argv = ["manage.py", "prepare-config", "--output", str(dest),
                     "--home", "/root"]
-            inputs = iter([config_values()["TELEGRAM_BOT_TOKEN"], "12345"])
-            with patch("sys.argv", argv), patch("builtins.input", side_effect=inputs) as inp, \
+            with patch("sys.argv", argv), \
+                 patch("manage.getpass.getpass", return_value=config_values()["TELEGRAM_BOT_TOKEN"]) as secret, \
+                 patch("builtins.input", return_value="12345") as inp, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
-            self.assertEqual(inp.call_count, 2)
+            self.assertEqual(secret.call_count, 1)
+            self.assertEqual(inp.call_count, 1)
             self.assertTrue(Settings.load(dest).skip_permissions)
 
     def test_prepare_config_preserves_old_settings(self):
@@ -357,10 +361,12 @@ if confirm_service_stop; then exit 9; fi
             dest.touch()
             argv = ["manage.py", "prepare-config", "--old", str(old),
                     "--output", str(dest), "--reconfigure"]
-            with patch("sys.argv", argv), patch("builtins.input", side_effect=["", "67890"]) as prompt, \
+            with patch("sys.argv", argv), patch("manage.getpass.getpass", return_value="") as secret, \
+                    patch("builtins.input", return_value="67890") as prompt, \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
-            self.assertEqual(prompt.call_count, 2)
+            self.assertEqual(secret.call_count, 1)
+            self.assertEqual(prompt.call_count, 1)
             value = Settings.load(dest)
             self.assertEqual(value.allowed, frozenset({67890}))
             self.assertEqual(value.token, config_values()["TELEGRAM_BOT_TOKEN"])
@@ -378,6 +384,51 @@ if confirm_service_stop; then exit 9; fi
                 self.assertEqual(main(), 0)
             self.assertEqual(prompt.call_count, 1)
             self.assertEqual(Settings.load(dest).token, config_values()["TELEGRAM_BOT_TOKEN"])
+
+    def test_invalid_token_and_id_retry_without_revealing_token(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest = Path(temp) / "candidate"
+            dest.touch()
+            argv = ["manage.py", "prepare-config", "--output", str(dest)]
+            output = io.StringIO()
+            with patch("sys.argv", argv), \
+                    patch("manage.getpass.getpass", side_effect=["bad", config_values()["TELEGRAM_BOT_TOKEN"]]) as secret, \
+                    patch("builtins.input", side_effect=["invalid", "0", "12345"]) as ids, \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            self.assertEqual(secret.call_count, 2)
+            self.assertEqual(ids.call_count, 3)
+            self.assertNotIn(config_values()["TELEGRAM_BOT_TOKEN"], output.getvalue())
+            self.assertIn("Token 格式不正确", output.getvalue())
+            self.assertIn("数字 ID 超出范围", output.getvalue())
+            self.assertEqual(Settings.load(dest).allowed, frozenset({12345}))
+
+    def test_no_echo_fallback_aborts_without_writing_candidate(self):
+        import getpass
+        with tempfile.TemporaryDirectory() as temp:
+            dest = Path(temp) / "candidate"
+            dest.write_text("unchanged")
+            argv = ["manage.py", "prepare-config", "--output", str(dest)]
+            errors = io.StringIO()
+            with patch("sys.argv", argv), patch("manage.getpass.getpass", side_effect=getpass.GetPassWarning), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                self.assertEqual(main(), 21)
+            self.assertEqual(dest.read_text(), "unchanged")
+            self.assertIn("无法安全隐藏", errors.getvalue())
+
+    def test_service_status_reports_only_observed_state(self):
+        script = r'''
+source "$1"
+systemctl() { [[ "$2" != bad ]] || return 1; echo "$2"; }
+SERVICE="$2"
+report_service_state
+'''
+        for state, expected in (("active", "运行中"), ("failed", "启动失败"),
+                                ("inactive", "未运行"), ("bad", "无法确认")):
+            with self.subTest(state=state):
+                result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), state],
+                                        capture_output=True, text=True)
+                self.assertIn(expected, result.stderr)
 
     def test_rollback_restores_files_in_temporary_directory(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -570,6 +621,22 @@ bash "$1" --help
             self.assertIn("用法：", result.stdout)
 
 class SmokeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_telegram_failure_has_specific_safe_next_steps(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config = settings_at(Path(temp))
+            for code, expected in ((401, "Bot Token"), (429, "限流"), (0, "网络")):
+                class FakeAPI:
+                    def __init__(self, token):
+                        pass
+                    async def call(self, method):
+                        raise TelegramError(code)
+                out = io.StringIO()
+                with self.subTest(code=code), patch("manage.TelegramAPI", FakeAPI), \
+                        contextlib.redirect_stdout(out):
+                    self.assertEqual(await check_token(config), 17)
+                self.assertIn(expected, out.getvalue())
+                self.assertNotIn(config.token, out.getvalue())
+
     async def test_smoke_uses_same_runner_and_requires_exact_reply(self):
         with tempfile.TemporaryDirectory() as temp:
             config = settings_at(Path(temp))

@@ -77,12 +77,14 @@ choose_operation() {
   echo '============================================='
   if [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
     echo '检测到已有安装；更新将保留现有配置。'
+    echo '  1) 安装或修复（沿用现有配置）'
+    echo '  2) 更新到最新版本（推荐，保留现有配置）'
   else
     echo '未检测到已有安装；首次使用请选择安装。'
+    echo '  1) 安装（推荐，首次配置）'
+    echo '  2) 更新（使用同一部署流程）'
   fi
-  echo '  1) 安装'
-  echo '  2) 更新'
-  echo '  3) 彻底卸载（清除本项目全部组件）'
+  echo '  3) 彻底卸载（查看清理范围并确认）'
   echo '  0) 退出'
   echo
   while true; do
@@ -183,6 +185,20 @@ as_user() {
     "$@"
 }
 
+report_service_state() {
+  local state
+  if ! state="$(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null)"; then
+    state='unknown'
+  fi
+  case "$state" in
+    active) echo '当前服务状态：运行中。' >&2 ;;
+    inactive) echo '当前服务状态：未运行。' >&2 ;;
+    failed) echo '当前服务状态：启动失败，请查看服务日志。' >&2 ;;
+    *) echo '当前服务状态：无法确认，请检查 systemctl 状态。' >&2 ;;
+  esac
+  echo "查看状态：systemctl status $SERVICE --no-pager；查看日志：journalctl -u $SERVICE -n 100 --no-pager" >&2
+}
+
 rollback() {
   echo '部署未通过验证，正在恢复旧配置、旧服务和旧程序入口……' >&2
   systemctl stop "$SERVICE" >/dev/null 2>&1 || true
@@ -225,6 +241,7 @@ rollback() {
     systemctl restart "$SERVICE" || echo '旧服务恢复启动失败，请人工检查。' >&2
   fi
   echo '已尝试回退；依赖安装、Google 登录及已经发生的任务修改不会被撤销。' >&2
+  report_service_state
 }
 
 write_commit_record() {
@@ -250,6 +267,9 @@ on_exit() {
   if [[ "$TRANSACTION" == 1 && "$COMMITTED" == 0 ]]; then
     rollback
     (( rc != 0 )) || rc=1
+  elif (( rc != 0 )) && [[ "$COMMITTED" == 0 ]]; then
+    echo '尚未进入服务切换阶段；安装器未停止旧服务。' >&2
+    report_service_state
   fi
   if [[ -n "$CANDIDATE" && -f "$CANDIDATE" ]]; then
     rm -f -- "$CANDIDATE"
