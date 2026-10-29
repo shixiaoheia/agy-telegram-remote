@@ -99,7 +99,10 @@ class Store:
             value = value.replace(self.token, "[BOT_TOKEN_REDACTED]")
         return value
 
-    def save(self, user: int, value: dict) -> dict:
+    def prepare_record(self, user: int, value: dict) -> dict:
+        """Bound and redact a record before any durable or temporary retention."""
+        if type(user) is not int or user <= 0:
+            raise ValueError("Invalid user ID")
         record = dict(value)
         record["user_id"] = user
         record["updated_at"] = time.time()
@@ -126,6 +129,10 @@ class Store:
             "session_tokens", "session_token_reminder", "model_fallback_from",
             "title", "metadata_warning", "attachment_summary", "execution_summary",
         ) if key in record}
+        return record
+
+    def save(self, user: int, value: dict) -> dict:
+        record = self.prepare_record(user, value)
         atomic_json(self._path(user), record)
         return record
 

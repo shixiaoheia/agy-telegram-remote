@@ -1,5 +1,6 @@
 import asyncio
 import json
+import socket
 import threading
 import tempfile
 import unittest
@@ -77,6 +78,40 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(self.connections[0], self.connections[1])
 
+    async def test_remote_idle_close_is_detected_before_next_send(self):
+        closed = threading.Event()
+        methods = []
+        class ClosingHandler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+            def log_message(self, *_):
+                pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                methods.append(self.path.rsplit('/', 1)[-1])
+                raw = json.dumps({'ok': True, 'result': True}).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_WR)
+                self.close_connection = True
+                closed.set()
+        server = ThreadingHTTPServer(('127.0.0.1', 0), ClosingHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        api = TelegramAPI(DUMMY_TOKEN, base_url=f'http://127.0.0.1:{server.server_port}', request_timeout=2)
+        try:
+            await api.call('getMe')
+            self.assertTrue(await asyncio.to_thread(closed.wait, 2))
+            await api.call('sendMessage', chat_id=12345, text='fixture')
+            self.assertEqual(methods, ['getMe', 'sendMessage'])
+        finally:
+            api.close()
+            await asyncio.to_thread(server.shutdown)
+            server.server_close()
+            thread.join(timeout=2)
+
     async def test_explicit_429_retries_only_delivery(self):
         self.responses.extend([
             (429, {"ok": False, "error_code": 429, "parameters": {"retry_after": 1}}),
@@ -93,6 +128,30 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
             await self.api.send(12345, "hello")
         self.assertEqual(len(self.requests), 1)
         self.assertNotIn(DUMMY_TOKEN, str(context.exception))
+
+    async def test_post_accepted_before_disconnect_is_not_replayed(self):
+        attempts = []
+        class DroppingHandler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_POST(self):
+                self.rfile.read(int(self.headers['Content-Length']))
+                attempts.append(self.path.rsplit('/', 1)[-1])
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.close_connection = True
+        server = ThreadingHTTPServer(('127.0.0.1', 0), DroppingHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        api = TelegramAPI(DUMMY_TOKEN, base_url=f'http://127.0.0.1:{server.server_port}', request_timeout=2)
+        try:
+            with self.assertRaises(TelegramError):
+                await api.send(12345, 'fixture')
+            self.assertEqual(attempts, ['sendMessage'])
+        finally:
+            api.close()
+            await asyncio.to_thread(server.shutdown)
+            server.server_close()
+            thread.join(timeout=2)
 
     async def test_fatal_telegram_error_is_sanitized(self):
         self.responses.append((401, {"ok": False, "error_code": 401,

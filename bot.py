@@ -22,8 +22,8 @@ from pathlib import Path
 
 from agy_runner import Result, Runner
 from command_handlers import CommandHandlers
-from settings import (CAPACITY_FALLBACKS, CAPACITY_RESUME_MODELS, ConfigError, MODEL_RE,
-                      OFFICIAL_MODELS, is_retired_model, resolve_model, Settings)
+from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
+                      resolve_model, Settings)
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 from telegram_formatting import html_chunks, plain_html_text, render_markdown_html
@@ -47,6 +47,7 @@ CATEGORY_HELP = {
     "location": "Google 拒绝当前地区的 API 调用：请检查服务器出口和 Google 账号所属地区是否受支持；刷新模型或重新授权不能保证解决地区限制。",
     "auth": "需要重新授权：请在服务器运行 agy auth login，完成 Google 登录后再试。",
     "quota": "账号额度或限流：请稍后再试，或检查当前 Google 账号额度。",
+    "capacity": "模型容量暂时不足：请先核对已执行的操作，再决定是否重新提交；本次没有自动重跑。",
     "model": "模型不可用或参数不兼容：发送 /model refresh 重新检测可用模型。",
     "entitlement": "当前账号或套餐没有此模型权限：请选择已可用模型；更换账号或套餐后可用 /model refresh 重新检测。",
     "permission": "工具审批被拒绝：请检查 /status 中的自动审批设置与 agy 权限规则；需要编辑时使用 /mode code。",
@@ -71,12 +72,6 @@ TYPING_HEARTBEAT_SECONDS = 4
 PROGRESS_UPDATE_SECONDS = 5
 RESTART_DELAY_SECONDS = 0.8
 CORRECTION_TTL_SECONDS = 300
-CAPACITY_RESUME_PROMPT = (
-    "The immediately preceding task was interrupted by a temporary upstream capacity error. "
-    "Continue the same task from this conversation. Review the completed steps first; do not repeat "
-    "commands, edits, or other actions that have already completed. Perform only work still needed, "
-    "then provide the final answer to the original user request."
-)
 SAFE_DOCUMENT_SUFFIXES = frozenset({
     ".txt", ".log", ".md", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
     ".py", ".js", ".ts", ".tsx", ".jsx", ".sh", ".bash", ".zsh", ".ps1", ".html", ".css",
@@ -127,6 +122,15 @@ class ControlCard:
     queued: bool = False
     closed: bool = False
     uncertain: bool = False
+
+
+@dataclass
+class SelectorEdit:
+    chat: int
+    message: dict
+    text: str
+    markup: dict | None = None
+    html_mode: bool = False
 
 
 @dataclass
@@ -638,7 +642,7 @@ class Bridge(CommandHandlers):
         self.stop = asyncio.Event()
         self.offset = store.offset()
         self._last_maintenance = 0.0
-        self.replies: asyncio.Queue[tuple | ControlCard] = asyncio.Queue(maxsize=32)
+        self.replies: asyncio.Queue[tuple | ControlCard | SelectorEdit] = asyncio.Queue(maxsize=32)
         self.reply_worker: asyncio.Task | None = None
         self._next_id_reply = 0.0
         self.model_check_task: asyncio.Task | None = None
@@ -659,6 +663,22 @@ class Bridge(CommandHandlers):
         self.callback_tasks: set[asyncio.Task] = set()
         self.waiting_jobs: deque[tuple[int, int, str]] = deque()
         self.queue_task: asyncio.Task | None = None
+        self.queue_paused = False
+        # At most one bounded result per authorized user; never sent before saving.
+        self.unsaved_results: dict[int, dict] = {}
+
+    def _recover_unsaved(self, user: int) -> bool:
+        record = self.unsaved_results.get(user)
+        if record is None:
+            return True
+        try:
+            saved = self.store.save(user, record)
+            self.store.save_history(user, record.get("title", ""), saved)
+        except (OSError, ValueError) as error:
+            LOG.warning("result_recovery_failed type=%s", type(error).__name__)
+            return False
+        del self.unsaved_results[user]
+        return True
 
     def _answer_callback(self, callback_id: str, **kwargs) -> None:
         if len(self.callback_tasks) >= 64 or self.stop.is_set():
@@ -859,6 +879,7 @@ class Bridge(CommandHandlers):
             self.model_check_id = ""
             self.model_check_started_at = 0.0
             self.model_check_card = None
+            self._wake_queue()
 
     def _update_probe_card(self) -> None:
         card = self.model_check_card
@@ -899,6 +920,7 @@ class Bridge(CommandHandlers):
             self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。")
             return
         if (self.slot is not None or self.pending_album is not None
+                or (self.waiting_jobs and not self.queue_paused)
                 or (self.album_task is not None and not self.album_task.done())
                 or any(not task.done() for task in self.steer_tasks)):
             self.queue_reply(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。")
@@ -983,8 +1005,9 @@ class Bridge(CommandHandlers):
             self._wake_queue()
 
     def _wake_queue(self) -> None:
-        if (not self.waiting_jobs or self.stop.is_set() or self.runner.blocked
+        if (not self.waiting_jobs or self.queue_paused or self.stop.is_set() or self.runner.blocked
                 or self.slot is not None or self.pending_album is not None
+                or (self.album_task is not None and not self.album_task.done())
                 or self._restart_pending() or any(not task.done() for task in self.steer_tasks)
                 or (self.model_check_task is not None and not self.model_check_task.done())
                 or (self.queue_task is not None and not self.queue_task.done())):
@@ -993,18 +1016,43 @@ class Bridge(CommandHandlers):
 
     async def _start_queued(self) -> None:
         while self.waiting_jobs and not self.stop.is_set() and not self.runner.blocked:
-            if self.slot is not None or self.pending_album is not None or self._restart_pending():
+            if (self.slot is not None or self.pending_album is not None or self._restart_pending()
+                    or (self.album_task is not None and not self.album_task.done())
+                    or (self.model_check_task is not None and not self.model_check_task.done())
+                    or any(not task.done() for task in self.steer_tasks)):
                 return
-            user, chat, text = self.waiting_jobs.popleft()
+            item = self.waiting_jobs[0]
+            user, chat, text = item
             if not self._is_allowed(user):
+                self.waiting_jobs.popleft()
                 continue
-            await self.handle({"message": {"from": {"id": user},
-                "chat": {"id": chat, "type": "private"}, "text": text}}, from_queue=True)
-            if self.slot is not None:
+            try:
+                await self.handle({"message": {"from": {"id": user},
+                    "chat": {"id": chat, "type": "private"}, "text": text}}, from_queue=True)
+            except Exception as error:
+                LOG.warning("queue_start_failed type=%s", type(error).__name__)
+            if self.slot is not None and self.slot.user == user:
+                if self.waiting_jobs and self.waiting_jobs[0] is item:
+                    self.waiting_jobs.popleft()
                 return
+            self.queue_paused = True
+            self.queue_reply(chat, "⚠️ 等待任务未能启动，仍保留在队列中。请检查模型和存储后发送 /queue resume，或使用 /queue cancel 取消。")
+            return
 
     def queue_control(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
         return self.queue_reply(chat, control_html(text), reply_markup, html_mode=True)
+
+    def queue_selector_edit(self, chat: int, message: dict, text: str,
+                            markup: dict | None = None, *, html_mode: bool = False) -> bool:
+        if self.stop.is_set():
+            return False
+        try:
+            self.replies.put_nowait(SelectorEdit(chat, message, text, markup, html_mode))
+        except asyncio.QueueFull:
+            return False
+        if self.reply_worker is None or self.reply_worker.done():
+            self.reply_worker = asyncio.create_task(self._send_replies())
+        return True
 
     def queue_card(self, card: ControlCard, text: str, markup: dict | None = None) -> None:
         card.text, card.markup = text, markup if markup is not None else {"inline_keyboard": []}
@@ -1064,6 +1112,19 @@ class Bridge(CommandHandlers):
     async def _send_replies(self) -> None:
         while not self.replies.empty():
             item = self.replies.get_nowait()
+            if isinstance(item, SelectorEdit):
+                try:
+                    if not await self._collapse_selector(item.chat, item.message, item.text,
+                                                         item.markup, html_mode=item.html_mode):
+                        if item.html_mode:
+                            await self.send_html(item.chat, item.text, reply_markup=item.markup)
+                        else:
+                            await self.send_text(item.chat, item.text, reply_markup=item.markup)
+                except Exception as error:
+                    LOG.warning("selector_edit_failed type=%s", type(error).__name__)
+                finally:
+                    self.replies.task_done()
+                continue
             if isinstance(item, ControlCard):
                 try:
                     await self._send_card(item)
@@ -1144,41 +1205,11 @@ class Bridge(CommandHandlers):
             job.typing_task = asyncio.create_task(self._typing_heartbeat(job))
             result = await self._run_task(job, prompt)
             fallback_from = ""
-            is_capacity_error = (
-                result.outcome == "error"
-                and (result.category == "capacity" or "no capacity available" in result.detail.lower())
-            )
-            # Keep 3.8 High selected. agy can resume its returned conversation
-            # so a transient capacity error does not restart the original task.
-            if (job.model in CAPACITY_RESUME_MODELS and not job.cancel.is_set()
-                    and is_capacity_error and result.conversation_id):
-                job.conversation_id = result.conversation_id
-                job.activity = "3.8 High 暂时无容量，正在恢复同一任务"
-                job.execution_steps.append("⚠️ 3.8 High 暂时无容量，正在恢复同一任务")
-                del job.execution_steps[:-6]
-                result = await self._run_task(job, CAPACITY_RESUME_PROMPT)
-            fallback = CAPACITY_FALLBACKS.get(job.model)
-            tool_has_run = job.tool_started or any("💻" in step or "🛠️" in step for step in job.execution_steps)
-            if (fallback and not job.cancel.is_set() and result.outcome == "error"
-                    and not tool_has_run
-                    and (result.category == "capacity" or "no capacity available" in result.detail.lower())):
-                # Only a pre-tool capacity rejection may be retried safely.
-                # A completed tool step may have modified user state already.
-                fallback_from = job.model
-                job.model = fallback
-                job.effort = ""
-                job.activity = f"{fallback_from} 暂无容量，正在自动切换至 {fallback}"
-                job.execution_steps.append(f"⚠️ 原模型暂无容量，已自动切换至 {fallback}")
-                del job.execution_steps[:-6]
-                self.store.set_model(job.user, fallback)
-                self._mark_model_capacity_unavailable(fallback_from)
-                result = await self._run_task(job, prompt)
 
             job.phase = "saving"
             # Persist the execution evidence before optional accounting/context
             # writes: their failure must not leave only a stale running record.
-            record = self.store.save(
-                job.user, result.to_dict() | {
+            result_data = result.to_dict() | {
                     "job_id": job.job_id, "delivery": "pending",
                     "model": job.model or getattr(result, "model", ""),
                     "effort": job.effort or getattr(result, "effort", ""),
@@ -1188,8 +1219,28 @@ class Bridge(CommandHandlers):
                     "attachment_summary": job.attachment_feedback,
                     "execution_summary": "\n".join(job.execution_steps[-6:]),
                 }
-            )
-            self.store.save_history(job.user, job.history_title, record)
+            try:
+                record = self.store.save(job.user, result_data)
+            except (OSError, ValueError) as error:
+                # Preserve a bounded, redacted private copy in memory only.
+                # /last persists it before delivery; it cannot survive restart.
+                self.unsaved_results[job.user] = self.store.prepare_record(job.user, result_data | {
+                    "delivery": "failed_or_partial",
+                    "metadata_warning": "结果曾因存储异常暂存在内存中，恢复后已保存；本次会话和用量记录可能缺失。",
+                })
+                LOG.warning("result_save_failed id=%s type=%s", job.job_id, type(error).__name__)
+                await self.send_text(job.chat, "⚠️ 任务已结束，但结果保存失败，暂时保存在服务内存中，尚未发送。请修复服务器存储后发送 /last 保存并取回；服务重启会丢失这份临时结果。不要重复执行原任务。")
+                return
+            try:
+                self.store.save_history(job.user, job.history_title, record)
+            except (OSError, ValueError) as error:
+                self.unsaved_results[job.user] = self.store.prepare_record(job.user, record | {
+                    "delivery": "failed_or_partial",
+                    "metadata_warning": "结果已保存，历史记录曾写入失败，恢复后已补存；会话和用量可能缺失。",
+                })
+                LOG.warning("result_history_save_failed id=%s type=%s", job.job_id, type(error).__name__)
+                await self.send_text(job.chat, "⚠️ 结果已保存，但历史记录保存失败。请修复服务器存储后发送 /last 取回并补存历史；不要重复执行任务。")
+                return
             warnings = []
             if result.outcome == "success" and getattr(result, "conversation_id", None):
                 try:
@@ -1277,13 +1328,6 @@ class Bridge(CommandHandlers):
             conversation_id=job.conversation_id or None,
             effort=job.effort or None, mode=job.mode or None, progress=progress,
         )
-
-    def _mark_model_capacity_unavailable(self, model: str) -> None:
-        health = self._model_health()
-        models = dict(health.get("models", {}))
-        models[model] = {"outcome": "error", "category": "capacity",
-                         "checked_at": models.get(model, {}).get("checked_at", 0.0)}
-        self.store.set_model_health(models)
 
     async def _typing_heartbeat(self, job: Job) -> None:
         """Keep Telegram's native typing indicator alive while a task is running."""
@@ -1429,6 +1473,9 @@ class Bridge(CommandHandlers):
                 await asyncio.gather(job.worker, return_exceptions=True)
             if self.stop.is_set() or self.runner.blocked:
                 self.queue_reply(job.chat, "⚠️ 原任务已停止，但服务当前不能安全重启修正任务。请检查 /status 后重试。")
+                return
+            if job.user in self.unsaved_results and not self._recover_unsaved(job.user):
+                self.queue_reply(job.chat, "⚠️ 原任务的结果尚未保存，修正任务没有启动。请修复存储并发送 /last 取回，再决定是否重新提交修正。")
                 return
             if job.steer_cancelled:
                 self.queue_reply(job.chat, "🛑 已取消修正任务，没有重新执行。")
@@ -1788,8 +1835,7 @@ class Bridge(CommandHandlers):
             text, keyboard = self._status_card(user, data == "status:details")
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id)
-            if not await self._collapse_selector(chat_id, message, text, keyboard, html_mode=data == "status:details"):
-                self.queue_reply(chat_id, text, reply_markup=keyboard, html_mode=data == "status:details")
+            self.queue_selector_edit(chat_id, message, text, keyboard, html_mode=data == "status:details")
             return
 
         if data.startswith("dialog:"):
@@ -1917,8 +1963,7 @@ class Bridge(CommandHandlers):
             else:
                 current = self.store.get_model(user) or self.settings.model or ""
                 text, keyboard = f"已关闭选择\n当前：{self._model_label(current)}", {"inline_keyboard": []}
-            if not await self._collapse_selector(chat_id, message, text, keyboard):
-                self.queue_reply(chat_id, text, reply_markup=keyboard)
+            self.queue_selector_edit(chat_id, message, text, keyboard)
             return
 
         if data.startswith(("model:", "choose:")):
@@ -1936,8 +1981,7 @@ class Bridge(CommandHandlers):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id)
                 picker, keyboard = self._effort_picker(user, resolved, model=resolved)
-                if not await self._collapse_selector(chat_id, message, picker, keyboard):
-                    self.queue_reply(chat_id, picker, reply_markup=keyboard)
+                self.queue_selector_edit(chat_id, message, picker, keyboard)
                 return
             if not reset and self._model_is_known_unavailable(resolved):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -1951,16 +1995,14 @@ class Bridge(CommandHandlers):
                 self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
             if not reset and supports_effort(resolved):
                 picker, keyboard = self._effort_picker(user, resolved)
-                if not await self._collapse_selector(chat_id, message, picker, keyboard):
-                    self.queue_reply(chat_id, picker, reply_markup=keyboard)
+                self.queue_selector_edit(chat_id, message, picker, keyboard)
                 return
             text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
             keyboard = {"inline_keyboard": [[
                 {"text": "🤖 更换模型", "callback_data": "selector:models"},
                 {"text": "✖️ 关闭", "callback_data": "selector:close"},
             ]]}
-            if not await self._collapse_selector(chat_id, message, text, keyboard):
-                self.queue_reply(chat_id, text, reply_markup=keyboard)
+            self.queue_selector_edit(chat_id, message, text, keyboard)
             return
 
         if data.startswith("effort:"):
@@ -1983,8 +2025,7 @@ class Bridge(CommandHandlers):
                     collapsed = f"✅ 已切换至：{variant}｜思考强度：{effort_label(None, variant)}"
                     if cq_id and hasattr(self.api, "answer_callback_query"):
                         self._answer_callback(cq_id, text=f"🎯 已切换至 {variant}")
-                    if not await self._collapse_selector(chat_id, message, collapsed):
-                        self.queue_reply(chat_id, collapsed)
+                    self.queue_selector_edit(chat_id, message, collapsed)
                     return
                 if selected_variant_effort(model):
                     if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -1995,24 +2036,21 @@ class Bridge(CommandHandlers):
                 collapsed = f"✅ 已切换至：{model}｜思考强度：模型内置"
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="该模型使用内置思考强度")
-                if not await self._collapse_selector(chat_id, message, collapsed):
-                    self.queue_reply(chat_id, collapsed)
+                self.queue_selector_edit(chat_id, message, collapsed)
                 return
             if target in {"default", "reset", "clear"}:
                 self.store.set_effort(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🔄 已恢复默认思考强度")
                 collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：默认"
-                if not await self._collapse_selector(chat_id, message, collapsed):
-                    self.queue_reply(chat_id, collapsed)
+                self.queue_selector_edit(chat_id, message, collapsed)
                 return
             if target in {"low", "medium", "high"}:
                 self.store.set_effort(user, target)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text=f"🎯 已设置思考强度为: {target.capitalize()}")
                 collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：{effort_label(target, model)}"
-                if not await self._collapse_selector(chat_id, message, collapsed):
-                    self.queue_reply(chat_id, collapsed)
+                self.queue_selector_edit(chat_id, message, collapsed)
                 return
 
         if data.startswith("mode:"):
@@ -2021,8 +2059,7 @@ class Bridge(CommandHandlers):
                 self.store.set_mode(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🔄 已恢复默认执行模式")
-                if not await self._collapse_selector(chat_id, message, "已恢复默认执行模式\n后续任务跟随 agy 设置"):
-                    self.queue_reply(chat_id, "已恢复默认执行模式\n后续任务跟随 agy 设置")
+                self.queue_selector_edit(chat_id, message, "已恢复默认执行模式\n后续任务跟随 agy 设置")
                 return
             if target in {"plan", "accept-edits"}:
                 self.store.set_mode(user, target)
@@ -2030,8 +2067,7 @@ class Bridge(CommandHandlers):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text=f"🎯 已切换为: {name}")
                 text = f"已切换模式：{name}\n后续任务生效"
-                if not await self._collapse_selector(chat_id, message, text):
-                    self.queue_reply(chat_id, text)
+                self.queue_selector_edit(chat_id, message, text)
                 return
 
     async def _flush_album(self) -> None:
@@ -2051,6 +2087,7 @@ class Bridge(CommandHandlers):
         finally:
             if self.album_task is asyncio.current_task():
                 self.album_task = None
+                self._wake_queue()
 
     def _buffer_album(self, update: dict, user: int, group_id: str,
                       attachment: dict, is_photo: bool, caption: str) -> None:
@@ -2128,7 +2165,7 @@ class Bridge(CommandHandlers):
             return
         group_id = message.get("media_group_id")
         if (album_items is None and isinstance(group_id, str) and group_id
-                and (has_photo or has_document) and self.slot is None):
+                and (has_photo or has_document) and self.slot is None and not self.waiting_jobs):
             item = (max((entry for entry in photo_list if isinstance(entry, dict)),
                         key=lambda entry: entry.get("file_size", 0)
                         if type(entry.get("file_size")) is int else 0, default=None)
@@ -2168,6 +2205,11 @@ class Bridge(CommandHandlers):
         if self.model_check_task and not self.model_check_task.done():
             self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
             return
+        if user in self.unsaved_results:
+            if not self._recover_unsaved(user):
+                self.queue_reply(chat_id, "⚠️ 上一个结果尚未保存，请修复服务器存储并发送 /last 取回；新任务尚未启动。")
+                return
+            self.queue_reply(chat_id, "✅ 上一个结果已恢复保存，可通过 /history 查看。")
         if self.slot is not None or self.pending_album is not None or (self.waiting_jobs and not from_queue):
             if (not items and not force_queue and self.slot is not None and self.slot.user == user
                     and self._offer_correction(user, text)):
@@ -2180,7 +2222,8 @@ class Bridge(CommandHandlers):
                 self.queue_reply(chat_id, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。")
             else:
                 self.waiting_jobs.append((user, chat_id, text))
-                self.queue_reply(chat_id, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。前一个任务完成清理后开始；/queue cancel 可取消等待。服务重启后队列会丢失。")
+                state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
+                self.queue_reply(chat_id, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后队列会丢失。")
                 self._wake_queue()
             return
 

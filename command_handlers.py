@@ -92,12 +92,25 @@ class CommandHandlers:
     async def _command_queue(self, text, user, chat_id, helpers):
         if text.split(maxsplit=1)[1:] == ["cancel"]:
             before = len(self.waiting_jobs)
+            removed_head = bool(self.waiting_jobs and self.waiting_jobs[0][0] == user)
             self.waiting_jobs = deque(item for item in self.waiting_jobs if item[0] != user)
             self.queue_reply(chat_id, f"🛑 已移除你的 {before - len(self.waiting_jobs)} 个等待任务；正在执行的任务不受影响。")
+            if removed_head:
+                self.queue_paused = False
+                self._wake_queue()
+        elif text.split(maxsplit=1)[1:] == ["resume"]:
+            if self.waiting_jobs and self.waiting_jobs[0][0] == user:
+                self.queue_paused = False
+                self.queue_reply(chat_id, "正在尝试启动你的等待任务。")
+                self._wake_queue()
+            else:
+                self.queue_reply(chat_id, "只有队首任务的发起者可以恢复等待队列。")
         else:
             positions = [str(i) for i, item in enumerate(self.waiting_jobs, 1) if item[0] == user]
             self.queue_reply(chat_id, ("⏳ 你的任务排队位置：" + "、".join(positions) if positions
-                                       else "ℹ️ 你没有等待中的任务。") + "\n/queue add <文字任务> 加入队列；/queue cancel 取消等待。服务重启后队列不会保留。")
+                                       else "ℹ️ 你没有等待中的任务。")
+                             + ("\n⚠️ 队列已暂停，队首发起者检查后可恢复。" if self.queue_paused else "")
+                             + "\n/queue add <文字任务> 加入队列；/queue cancel 取消等待；/queue resume 恢复队首。服务重启后队列不会保留。")
         return
 
     async def _command_cancel(self, text, user, chat_id, helpers):
@@ -123,6 +136,9 @@ class CommandHandlers:
 
     async def _command_last(self, text, user, chat_id, helpers):
         describe_html = helpers.describe_html
+        if not self._recover_unsaved(user):
+            self.queue_reply(chat_id, "⚠️ 结果仍无法保存，暂存在服务内存中；请修复服务器存储后再次发送 /last。服务重启会丢失临时结果，请勿重复执行任务。")
+            return
         try:
             record = self.store.load(user)
             if record:
@@ -250,7 +266,8 @@ class CommandHandlers:
             self.queue_reply(chat_id, "⏳ 重启已安排，请稍候，不需要重复发送。")
             return
         self.queue_reply(chat_id, "🔄 服务将退出并由 systemd 重新启动，请稍后发送 /status 验证。"
-                         + ("注意：等待队列不会保留，请重启后重新提交。" if self.waiting_jobs else ""))
+                         + ("注意：等待队列不会保留，请重启后重新提交。" if self.waiting_jobs else "")
+                         + ("注意：仍有未保存的临时结果，重启后会丢失。" if self.unsaved_results else ""))
 
         self.restart_task = asyncio.create_task(self._do_restart())
         return
