@@ -36,6 +36,7 @@ class ProxyManagerTests(unittest.TestCase):
              patch.object(manager, "enabled", return_value=True), \
              patch.object(manager, "run", side_effect=fake_run), \
              patch.object(manager, "check_connectivity") as check, \
+             patch.object(manager, "wait_listener") as listener, \
              patch.object(manager, "ready", return_value=True), \
              patch.object(manager, "service_proxy_matches", return_value=True):
             manager.apply({"outbounds": []}, 32123)
@@ -43,6 +44,7 @@ class ProxyManagerTests(unittest.TestCase):
         self.assertIn(("systemctl", "start", manager.SERVICE), calls)
         self.assertIn(b"127.0.0.1:32123", files[manager.ENV])
         check.assert_called_once_with(32123)
+        listener.assert_called_once_with(32123)
 
     def test_failed_new_proxy_restores_previous_files_and_services(self):
         paths = (manager.CONFIG, manager.ENV, manager.UNIT, manager.DROP)
@@ -101,6 +103,7 @@ class ProxyManagerTests(unittest.TestCase):
              patch.object(manager, "enabled", return_value=True), \
              patch.object(manager, "run", side_effect=fake_run), \
              patch.object(manager, "check_connectivity"), \
+             patch.object(manager, "wait_listener"), \
              patch.object(manager, "ready", return_value=False), \
              patch.object(manager.time, "sleep"):
             with self.assertRaises(manager.ProxyError):

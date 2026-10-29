@@ -180,6 +180,17 @@ def check_connectivity(port: int) -> None:
             raise ProxyError("节点无法连接 Google 或 Telegram，请检查节点和网络。")
 
 
+def wait_listener(port: int, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+                return
+        except OSError:
+            time.sleep(0.1)
+    raise ProxyError("代理服务未能在本机端口就绪。")
+
+
 def probe(config: dict, port: int) -> None:
     """Check syntax and TLS connectivity without sending bot credentials."""
     fd, name = tempfile.mkstemp(prefix=".proxy-probe-", dir=CONFIG_DIR)
@@ -311,6 +322,9 @@ def apply(config: dict, port: int) -> None:
         run("systemctl", "enable", "--now", PROXY_SERVICE)
         if not active(PROXY_SERVICE):
             raise ProxyError("新节点代理没有正常启动。")
+        wait_listener(port)
+        if not active(PROXY_SERVICE):
+            raise ProxyError("新节点代理已退出。")
         check_connectivity(port)
         if not active(PROXY_SERVICE):
             raise ProxyError("新节点代理已退出。")

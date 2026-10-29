@@ -139,8 +139,13 @@ try:
         raise AssertionError("Unreachable replacement was accepted")
     assert pm.CONFIG.read_bytes() == old_config
     assert pm.active(bot_name) and pm.active(proxy_name)
+    pm.wait_listener(local_port)
     connectivity(local_port)
     print("SYSTEMD_PROXY_SWITCH_AND_ROLLBACK_OK")
+except BaseException:
+    # The isolated fixture contains only invented node credentials.
+    subprocess.run(["journalctl", "-u", proxy_name, "-n", "40", "--no-pager"], check=False)
+    raise
 finally:
     command("systemctl", "stop", bot_name, check=False)
     command("systemctl", "disable", "--now", proxy_name, check=False)
