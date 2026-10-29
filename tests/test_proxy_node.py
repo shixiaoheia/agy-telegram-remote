@@ -2,9 +2,14 @@
 import base64
 import json
 import os
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -80,3 +85,68 @@ class ProxyNodeTests(unittest.TestCase):
                     result = subprocess.run([os.environ["AGY_TEST_SING_BOX"], "check", "-c", str(path)],
                                             capture_output=True, text=True, timeout=20)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(os.environ.get("AGY_TEST_SING_BOX"), "sing-box binary not supplied")
+    def test_local_vless_forwards_http_through_project_proxy(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"proxy-ok")
+
+            def log_message(self, *args):
+                pass
+
+        def unused_port():
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                return sock.getsockname()[1]
+
+        server_port, proxy_port = unused_port(), unused_port()
+        if server_port == proxy_port:
+            self.skipTest("OS allocated the same free port twice")
+        http_server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=http_server.serve_forever, daemon=True)
+        worker.start()
+        processes = []
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                server_config = {"inbounds": [{"type": "vless", "listen": "127.0.0.1",
+                                               "listen_port": server_port, "users": [{"uuid": UUID}]}],
+                                 "outbounds": [{"type": "direct", "tag": "direct"}],
+                                 "route": {"final": "direct"}}
+                client_config = build_config(parse_node(f"vless://{UUID}@127.0.0.1:{server_port}"), proxy_port)
+                for index, config in enumerate((server_config, client_config)):
+                    path = Path(directory) / f"proxy-{index}.json"
+                    path.write_text(json.dumps(config), encoding="utf-8")
+                    processes.append(subprocess.Popen([os.environ["AGY_TEST_SING_BOX"], "run", "-c", str(path)],
+                                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+                deadline = time.monotonic() + 10
+                while True:
+                    if any(proc.poll() is not None for proc in processes):
+                        self.fail("Local proxy process exited")
+                    try:
+                        with socket.create_connection(("127.0.0.1", proxy_port), timeout=0.2):
+                            break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            self.fail("Local proxy did not start")
+                        time.sleep(0.05)
+                connection = http.client.HTTPConnection("127.0.0.1", proxy_port, timeout=10)
+                try:
+                    connection.request("GET", f"http://127.0.0.1:{http_server.server_port}/test")
+                    response = connection.getresponse()
+                    self.assertEqual((response.status, response.read()), (200, b"proxy-ok"))
+                finally:
+                    connection.close()
+        finally:
+            for proc in processes:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            http_server.shutdown()
+            http_server.server_close()
+            worker.join(timeout=5)
