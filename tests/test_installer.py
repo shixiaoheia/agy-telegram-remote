@@ -101,7 +101,8 @@ done
     def test_uninstall_decline_and_eof_leave_service_untouched(self):
         script = r'''
 source "$1"
-UNIT="$2/service"; PURGE=1
+UNIT="$2/service"; PURGE=1; APP_HOME="$2/home"; CONFIG="$2/missing"; APP="$2/app"
+mkdir "$APP_HOME"
 touch "$UNIT"
 systemctl() { echo invoked > invoked; }
 uninstall
@@ -117,10 +118,10 @@ uninstall
     def test_purge_rejects_symlink_before_stopping_service(self):
         script = r'''
 source "$1"
-BASE="$2"; UNIT="$BASE/service"; PURGE=1
+BASE="$2"; UNIT="$BASE/service"; PURGE=1; APP_HOME="$BASE/home"; CONFIG="$BASE/missing"; APP="$BASE/app"
 RELEASES="$BASE/releases"; CONFIG_DIR="$BASE/config"; AGY_MANAGED_MARKER="$CONFIG_DIR/marker"
 STATE_BASE="$BASE/state"; BACKUPS="$BASE/backups"; RUNTIME_DIR="$BASE/runtime"; INPUT_DIR="$BASE/inputs"
-mkdir "$BASE/outside"
+mkdir "$BASE/outside" "$APP_HOME"
 ln -s "$BASE/outside" "$STATE_BASE"
 touch "$UNIT"
 systemctl() { echo invoked > "$BASE/invoked"; }
@@ -133,6 +134,67 @@ echo y | uninstall
             self.assertIn("符号链接", result.stderr)
             self.assertTrue((Path(temp) / "service").exists())
             self.assertFalse((Path(temp) / "invoked").exists())
+
+    def test_purge_custom_workspace_and_preserve_other_files(self):
+        script = r'''
+source "$1"
+BASE="$2"; APP_HOME="$BASE/home"; APP="$BASE/app"; RELEASES="$BASE/releases"
+CONFIG_DIR="$BASE/config"; CONFIG="$CONFIG_DIR/config.env"; STATE_BASE="$BASE/state"
+BACKUPS="$BASE/backups"; UNIT="$BASE/service"; RUNTIME_DIR="$BASE/runtime"
+INPUT_DIR="$APP_HOME/.agy-telegram-inputs"; AGY_MANAGED_MARKER="$CONFIG_DIR/marker"; PURGE=1
+mkdir -p "$CONFIG_DIR" "$INPUT_DIR" "$APP_HOME/project/.agy-telegram-inputs"
+printf "AGY_WORKSPACE='%s'\n" "$APP_HOME/project" > "$CONFIG"
+touch "$INPUT_DIR/default" "$APP_HOME/project/.agy-telegram-inputs/file" "$APP_HOME/project/keep"
+systemctl() { [[ "$1" == is-active ]] && return 3; return 0; }
+echo y | uninstall
+[[ ! -e "$INPUT_DIR" && ! -e "$APP_HOME/project/.agy-telegram-inputs" && -f "$APP_HOME/project/keep" ]]
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("project/.agy-telegram-inputs", result.stdout)
+
+    def test_custom_workspace_symlink_is_rejected_without_side_effects(self):
+        script = r'''
+source "$1"
+BASE="$2"; APP_HOME="$BASE/home"; APP="$BASE/app"; CONFIG="$BASE/config"; UNIT="$BASE/service"; PURGE=1
+mkdir -p "$APP_HOME" "$BASE/outside"
+ln -s "$BASE/outside" "$APP_HOME/project"
+printf 'AGY_WORKSPACE=%s\n' "$APP_HOME/project" > "$CONFIG"
+touch "$UNIT"
+systemctl() { echo called > "$BASE/called"; }
+echo y | uninstall
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertTrue((Path(temp) / "service").exists())
+            self.assertFalse((Path(temp) / "called").exists())
+
+    def test_auth_decision_only_auth_failure_or_explicit_cases(self):
+        script = 'source "$1"; needs_auth "$2" "$3" "$4"'
+        for rc, reauth, installed, expected in [(0, 0, 0, False), (10, 0, 0, True),
+                                                (12, 0, 0, False), (13, 0, 0, False),
+                                                (14, 0, 0, False), (15, 0, 0, False),
+                                                (13, 1, 0, True), (13, 0, 1, True)]:
+            with self.subTest(rc=rc, reauth=reauth, installed=installed):
+                result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"),
+                                         str(rc), str(reauth), str(installed)])
+                self.assertEqual(result.returncode == 0, expected)
+
+    def test_update_stop_confirmation_decline(self):
+        script = r'''
+source "$1"
+systemctl() { echo 0; }
+if confirm_service_stop; then exit 9; fi
+'''
+        result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh")],
+                                input="bad\nn\n", capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("无法确认", result.stdout)
+        self.assertIn("不会自动重跑", result.stdout)
 
     def test_bash_syntax(self):
         subprocess.run(["bash", "-n", str(ROOT / "install.sh")], check=True)

@@ -257,9 +257,101 @@ on_exit() {
   exit "$rc"
 }
 
+find_input_dir() {
+  # Parse configuration as data; never execute an old checkout or source its env file.
+  local source_config=''
+  [[ ! -L "$CONFIG" ]] || fail '配置文件是符号链接，无法安全确认附件目录。'
+  if [[ -f "$CONFIG" ]]; then
+    source_config="$CONFIG"
+  elif [[ ! -L "$APP" && -f "$APP/.env" ]]; then
+    source_config="$APP/.env"
+  fi
+  /usr/bin/python3 -I - "$source_config" "$APP_HOME" <<'PY'
+import os, re, shlex, stat, sys
+from pathlib import Path
+try:
+    config, home_arg = sys.argv[1:]
+    home = Path(home_arg)
+    work = home
+    if config:
+        fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+                raise ValueError('unsafe config')
+            content = stream.read(65537).decode('utf-8-sig')
+        found = []
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith('export '):
+                line = line[7:].lstrip()
+            key, sep, value = line.partition('=')
+            if sep and key.strip() == 'AGY_WORKSPACE':
+                value = value.strip()
+                if value.startswith(("'", '"')):
+                    parts = shlex.split(value, comments=True, posix=True)
+                    if len(parts) != 1:
+                        raise ValueError('bad workspace')
+                    value = parts[0]
+                else:
+                    value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
+                found.append(value)
+        if len(found) > 1:
+            raise ValueError('duplicate workspace')
+        if found:
+            work = Path(found[0])
+    if not re.fullmatch(r'/[A-Za-z0-9._/-]+', str(work)) or '..' in work.parts:
+        raise ValueError('bad workspace')
+    if work != home and home not in work.parents:
+        raise ValueError('workspace outside home')
+    current = home
+    for part in ((), *[(p,) for p in work.relative_to(home).parts], ('.agy-telegram-inputs',)):
+        if part:
+            current = current / part[0]
+        if os.path.lexists(current):
+            info = os.lstat(current)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise ValueError('unsafe directory')
+    print(current)
+except (OSError, UnicodeError, ValueError):
+    print('无法安全识别附件目录，请检查配置和路径后重试。', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+confirm_service_stop() {
+  local pid children answer
+  pid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+  children=''
+  if [[ ! "$pid" =~ ^[1-9][0-9]*$ || ! -r "/proc/$pid/task/$pid/children" ]]; then
+    echo '无法确认服务子进程状态，可能有任务正在运行。'
+  else
+    IFS= read -r children < "/proc/$pid/task/$pid/children" || true
+    if [[ -n "$children" ]]; then
+      echo '检测到服务子进程，可能有任务或模型检测正在运行。'
+    else
+      echo '未检测到服务子进程；仍可能有正在准备或新开始的任务。'
+    fi
+  fi
+  echo '更新将停止服务，中断的任务不会自动重跑，已产生的修改不会撤销。'
+  while true; do
+    if ! IFS= read -r -p '继续更新？[y/n]： ' answer; then echo; return 1; fi
+    case "$answer" in
+      y|Y) return 0 ;;
+      n|N) return 1 ;;
+      *) echo '请输入 y 或 n。' ;;
+    esac
+  done
+}
+
+needs_auth() {
+  [[ "$1" -eq 10 || "$2" == 1 || "$3" == 1 ]]
+}
+
 uninstall() {
-  local answer managed_agy='' directory
+  local answer managed_agy='' directory configured_input=''
   if [[ "$PURGE" == 1 ]]; then
+    configured_input="$(find_input_dir)" || fail '未能安全确认附件清理范围；未停止服务。'
     if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
       IFS= read -r managed_agy < "$AGY_MANAGED_MARKER" || true
       [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
@@ -271,7 +363,8 @@ uninstall() {
       echo '将保留独立安装或来源不明的 agy 与 Google 登录资料。'
     fi
     echo '保留工作目录及用户文件、systemd 自定义配置、系统日志和 BotFather 中的 Bot。'
-    echo '自定义工作目录中的附件缓存可能保留，请在卸载后自行检查。'
+    echo "将清理附件目录：$configured_input"
+    [[ "$configured_input" == "$INPUT_DIR" ]] || echo "也将清理默认附件目录：$INPUT_DIR"
   else
     echo '将移除 systemd 服务；程序、配置、工作目录及 Google 登录会保留。'
   fi
@@ -287,7 +380,7 @@ uninstall() {
   done
   [[ ! -L "$UNIT" ]] || fail "服务文件是链接，请人工检查。"
   if [[ "$PURGE" == 1 ]]; then
-    for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"; do
+    for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR" "$configured_input"; do
       [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
     done
     if [[ -n "$managed_agy" ]]; then
@@ -306,7 +399,7 @@ uninstall() {
     echo '服务已移除，所有程序和数据保留。'
     return
   fi
-  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"
+  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR" "$configured_input"
   if [[ -n "$managed_agy" ]]; then
     rm -f -- "$managed_agy"
     rm -rf -- "$APP_HOME/.gemini/antigravity-cli"
@@ -457,6 +550,14 @@ main() {
   rm -f -- "$test_log"
   as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" check-token --config "$CANDIDATE"
 
+  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    if ! confirm_service_stop; then
+      echo '已取消更新，旧服务保持运行。'
+      rm -rf -- "$STAGE"
+      STAGE=
+      return 0
+    fi
+  fi
   BACKUP="$(mktemp -d "$BACKUPS/deploy-XXXXXXXX")"
   [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/config.env"
   [[ ! -f "$UNIT" ]] || cp -p -- "$UNIT" "$BACKUP/service"
@@ -546,12 +647,12 @@ _ONBOARDING_EOF
       smoke_rc=$?
     fi
   fi
-  if [[ "$smoke_rc" -ne 0 || "$REAUTH" == 1 ]]; then
+  if needs_auth "$smoke_rc" "$REAUTH" "$installed_now"; then
     local auth_rc=0
     local _token_file="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
     # 若已有凭证失效或主动重授，移开旧凭据以确保直接输出全新授权链接
     if [[ -f "$_token_file" ]]; then
-      mv -f -- "$_token_file" "$_token_file.bak.$$" 2>/dev/null || rm -f -- "$_token_file"
+      mv -f -- "$_token_file" "$_token_file.bak.$$" || fail '无法暂存旧授权资料，已停止并保留原文件。'
     fi
     as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
     if [[ "$auth_rc" -ne 0 ]]; then

@@ -169,7 +169,7 @@ GPT-OSS 120B、Claude Opus/Sonnet 4.6、Gemini 3.7/3.6 Flash 已从目录、快�
 curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
 ```
 
-运行 `bash install.sh` 后先选择 `2) 更新`。更新复用已保存的 Bot Token、白名单、模型、权限和路径；仅缺少必要配置或 Google 授权失效时需要交互。需要改 Token 或白名单时使用 `bash install.sh --reconfigure`。脚本会先检查新版本，再替换服务；未完成任务不会自动重跑。需要直接进入更新流程时可使用 `bash install.sh --install`。
+运行 `bash install.sh` 后先选择 `2) 更新`。更新复用已保存的 Bot Token、白名单、模型、权限和路径；仅缺少必要配置或 Google 授权失效时需要交互。需要改 Token 或白名单时使用 `bash install.sh --reconfigure`。脚本会先检查新版本；停止正在运行的服务前，显示任务可能中断的提示并询问是否继续。子进程检查只是即时快照，任务仍可能在检查后开始；未完成任务不会自动重跑。配额、网络或其他非授权自检失败时不会自动重新授权。需要直接进入更新流程时可使用 `bash install.sh --install`。
 
 也可以运行 `bash install.sh --menu` 打开菜单：
 
@@ -192,7 +192,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 - 备份文件与 Bot 接收附件的临时目录；
 - 如果有本安装器的安装标记，还会删除该 `agy` 和它的 Google 登录资料；独立安装或来源不明的 agy 和资料会保留。
 
-为了避免误删你的项目，`/root` 工作目录和里面的代码、文件不会删除。自定义工作目录下的 `.agy-telegram-inputs` 可能保留，请自行检查；自定义 systemd 配置、系统日志和不含凭据的部署锁文件也会保留。BotFather 里创建的 Telegram Bot 也不会被删除；如不再需要，请到 BotFather 手动删除。下载到当前目录的 `install.sh` 需自行删除。
+卸载前会读取配置并显示默认和当前工作目录内的附件缓存路径；路径无法安全确认或含符号链接时停止清理。历史上其他工作目录的缓存不会自动搜索。为了避免误删你的项目，`/root` 工作目录和里面的代码、文件不会删除。自定义 systemd 配置、系统日志和不含凭据的部署锁文件也会保留。BotFather 里创建的 Telegram Bot 也不会被删除；如不再需要，请到 BotFather 手动删除。下载到当前目录的 `install.sh` 需自行删除。
 
 ## 常见问题
 
