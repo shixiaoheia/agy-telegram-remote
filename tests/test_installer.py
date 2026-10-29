@@ -88,15 +88,31 @@ touch "$CONFIG" "$STATE_BASE/state" "$BACKUPS/backup" "$RUNTIME_DIR/ready.json" 
 touch "$APP_HOME/.local/bin/agy" "$APP_HOME/.gemini/antigravity-cli/token" "$APP_HOME/workspace-file"
 echo "$APP_HOME/.local/bin/agy" > "$AGY_MANAGED_MARKER"
 systemctl() { [[ "$1" == is-active ]] && return 3; return 0; }
-{ echo UNINSTALL; echo PURGE; } | uninstall
-for path in "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$UNIT" "$RUNTIME_DIR" "$INPUT_DIR" "$DEPLOY_LOCK_FILE" "$APP_HOME/.local/bin/agy" "$APP_HOME/.gemini/antigravity-cli"; do
+echo y | uninstall
+for path in "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$UNIT" "$RUNTIME_DIR" "$INPUT_DIR" "$APP_HOME/.local/bin/agy" "$APP_HOME/.gemini/antigravity-cli"; do
   [[ ! -e "$path" && ! -L "$path" ]] || exit 9
 done
-[[ -f "$APP_HOME/workspace-file" ]]
+[[ -f "$APP_HOME/workspace-file" && -f "$DEPLOY_LOCK_FILE" ]]
 '''
             result = subprocess.run(["bash", "-c", code, "_", str(ROOT / "install.sh"), str(base)],
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_uninstall_decline_and_eof_leave_service_untouched(self):
+        script = r'''
+source "$1"
+UNIT="$2/service"; PURGE=1
+touch "$UNIT"
+systemctl() { echo invoked > invoked; }
+uninstall
+[[ -f "$UNIT" && ! -e invoked ]]
+'''
+        for response in ("n\n", "invalid\nn\n", ""):
+            with self.subTest(response=response), tempfile.TemporaryDirectory() as temp:
+                result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                        cwd=temp, input=response, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("已取消", result.stdout)
 
     def test_bash_syntax(self):
         subprocess.run(["bash", "-n", str(ROOT / "install.sh")], check=True)

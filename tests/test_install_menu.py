@@ -172,15 +172,15 @@ main "$@"
         self.assertIn("purge=1" if os.geteuid() == 0 else "<--purge>", output)
         self.assertEqual(output.count("[0/1/2/3]"), 1)
 
-    def test_existing_install_updates_without_menu_input(self):
-        rc, output = self.run_main_until_privilege_boundary(existing=True)
+    def test_existing_install_shows_menu_before_update(self):
+        rc, output = self.run_main_until_privilege_boundary(text="2\n", existing=True)
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertNotIn("[0/1/2/3]", output)
+        self.assertIn("[0/1/2/3]", output)
 
-    def test_legacy_install_updates_without_menu_input(self):
-        rc, output = self.run_main_until_privilege_boundary(legacy=True)
+    def test_legacy_install_shows_menu_before_update(self):
+        rc, output = self.run_main_until_privilege_boundary(text="2\n", legacy=True)
         self.assert_mode_at_boundary(rc, output, "install")
-        self.assertNotIn("[0/1/2/3]", output)
+        self.assertIn("[0/1/2/3]", output)
 
     def test_explicit_menu_still_allows_exit_on_existing_install(self):
         rc, output = self.run_main_until_privilege_boundary(("--menu",), text="0\n", existing=True)

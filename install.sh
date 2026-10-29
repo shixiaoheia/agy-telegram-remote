@@ -27,7 +27,6 @@ WRITE_PATHS=
 WRITE_PATHS_SET=0
 REAUTH=0
 RECONFIGURE=0
-SHOW_MENU=0
 MODE=menu
 PURGE=0
 TRANSACTION=0
@@ -52,7 +51,7 @@ usage() {
  Antigravity Telegram Remote 安装与管理脚本
 =============================================
 用法：
-  bash install.sh                         已安装时自动更新；首次运行显示安装菜单
+  bash install.sh                         显示安装、更新与卸载菜单
   bash install.sh --menu                  显示管理菜单（安装、更新、彻底卸载、退出）
   bash install.sh --reconfigure           安装/更新并重新询问 Token 与白名单
   bash install.sh --install               👑 极简 Root 模式安装/更新（直接以 root 运行）
@@ -65,7 +64,7 @@ usage() {
   bash install.sh --reauth                 重新进入 Google 账号授权流程
   bash install.sh --ref COMMIT_OR_BRANCH   安装/升级指定不可变 Git 提交 SHA 或分支（推荐生产使用 Commit SHA）
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
-  bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 PURGE 二次确认）
+  bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 y 确认）
   bash install.sh --help                   显示此帮助说明
 EOF
 }
@@ -76,6 +75,11 @@ choose_operation() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 管理菜单'
   echo '============================================='
+  if [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
+    echo '检测到已有安装；更新将保留现有配置。'
+  else
+    echo '未检测到已有安装；首次使用请选择安装。'
+  fi
   echo '  1) 安装'
   echo '  2) 更新'
   echo '  3) 彻底卸载（清除本项目全部组件）'
@@ -254,11 +258,43 @@ on_exit() {
 }
 
 uninstall() {
-  local answer agy_answer managed_agy=''
-  echo '此操作移除 systemd 服务，默认保留程序、配置、工作目录及 Google 登录。'
-  read -r -p '确认请输入 UNINSTALL： ' answer || exit 0
-  [[ "$answer" == UNINSTALL ]] || exit 0
+  local answer managed_agy='' directory
+  if [[ "$PURGE" == 1 ]]; then
+    if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
+      IFS= read -r managed_agy < "$AGY_MANAGED_MARKER" || true
+      [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
+    fi
+    echo '将删除服务、程序、配置、任务记录、备份、运行文件和 Bot 临时附件。'
+    if [[ -n "$managed_agy" ]]; then
+      echo '还将删除本安装器安装的 agy 和对应的 Google 登录资料。'
+    else
+      echo '将保留独立安装或来源不明的 agy 与 Google 登录资料。'
+    fi
+    echo '保留工作目录及用户文件、systemd 自定义配置、系统日志和 BotFather 中的 Bot。'
+  else
+    echo '将移除 systemd 服务；程序、配置、工作目录及 Google 登录会保留。'
+  fi
+  while true; do
+    if ! IFS= read -r -p '确认继续？[y/n]： ' answer; then
+      echo; echo '已取消，没有卸载任何内容。'; return 0
+    fi
+    case "$answer" in
+      y|Y) break ;;
+      n|N) echo '已取消，没有卸载任何内容。'; return 0 ;;
+      *) echo '请输入 y 或 n。' ;;
+    esac
+  done
   [[ ! -L "$UNIT" ]] || fail "服务文件是链接，请人工检查。"
+  if [[ "$PURGE" == 1 ]]; then
+    for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"; do
+      [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
+    done
+    if [[ -n "$managed_agy" ]]; then
+      for directory in "$APP_HOME/.local" "$APP_HOME/.local/bin" "$managed_agy" "$APP_HOME/.gemini" "$APP_HOME/.gemini/antigravity-cli"; do
+        [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
+      done
+    fi
+  fi
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     fail '服务未能停止；未移除服务文件。'
@@ -269,37 +305,13 @@ uninstall() {
     echo '服务已移除，所有程序和数据保留。'
     return
   fi
-  if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
-    IFS= read -r managed_agy < "$AGY_MANAGED_MARKER" || true
-    [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
-  fi
-  if [[ -z "$managed_agy" && -x "$APP_HOME/.local/bin/agy" ]]; then
-    echo '检测到旧版使用的标准 agy 与 Google 登录资料。它们也可能被你单独使用。'
-    read -r -p '如也要永久删除它们，请输入 ERASE_AGY；直接回车则保留： ' agy_answer || exit 0
-    [[ "$agy_answer" != ERASE_AGY ]] || managed_agy="$APP_HOME/.local/bin/agy"
-  fi
-  echo '彻底清理将删除本项目的服务、程序、配置、任务记录、备份、运行文件和 Bot 临时附件。'
-  if [[ -n "$managed_agy" ]]; then
-    echo '同时删除：本安装器安装的 agy 与对应 Google 登录资料。'
-  else
-    echo '提示：将保留独立安装的 agy 与登录资料。'
-  fi
-  echo '不会删除你的 /root 工作目录或其中的项目文件。'
-  read -r -p '确认永久删除上述数据请输入 PURGE： ' answer || exit 0
-  [[ "$answer" == PURGE ]] || exit 0
-  for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"; do
-    [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
-  done
-  [[ ! -L "$DEPLOY_LOCK_FILE" ]] || fail "拒绝清理符号链接：$DEPLOY_LOCK_FILE"
   rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"
-  rm -f -- "$DEPLOY_LOCK_FILE"
   if [[ -n "$managed_agy" ]]; then
-    [[ ! -L "$managed_agy" ]] || fail "拒绝清理符号链接：$managed_agy"
     rm -f -- "$managed_agy"
     rm -rf -- "$APP_HOME/.gemini/antigravity-cli"
   fi
   systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-  echo '彻底清理完成：本项目组件已删除。不会删除 BotFather 中创建的 Telegram Bot。'
+  echo '清理完成。为保证操作互斥，保留不含凭据的部署锁文件。'
 }
 
 main() {
@@ -308,7 +320,7 @@ main() {
   while (( $# )); do
     case "$1" in
       --help|-h) usage; return ;;
-      --menu) SHOW_MENU=1 ;;
+      --menu) : ;;
       --reconfigure) RECONFIGURE=1; direct_install=1 ;;
       --install|--root) MODE=install; direct_install=1 ;;
       --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
@@ -332,19 +344,14 @@ main() {
     esac
     shift
   done
-  # Explicit modes win; bare invocation upgrades an existing installation.
+  # Explicit modes bypass the menu; bare invocation always displays it.
   if [[ "$MODE" == menu && "$direct_install" == 1 ]]; then
     MODE=install
   fi
   [[ "$MODE" == uninstall || "$PURGE" == 0 ]] || fail '--purge 必须与 --uninstall 一起使用。'
   [[ -t 0 && -t 1 ]] || fail '请在可交互 SSH 终端运行，不要把脚本通过管道传给 bash。'
   if [[ "$MODE" == menu ]]; then
-    if [[ "$SHOW_MENU" == 0 ]] && [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
-      MODE=install
-      echo '检测到已有安装，将自动更新并保留现有配置。'
-    else
-      choose_operation
-    fi
+    choose_operation
   fi
   [[ "$MODE" != exit ]] || return 0
   if [[ "$EUID" -ne 0 ]]; then
