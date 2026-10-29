@@ -243,7 +243,7 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 [Install]
 WantedBy=multi-user.target
 """).encode()
