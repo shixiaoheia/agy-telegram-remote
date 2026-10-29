@@ -266,6 +266,7 @@ class WizardOrderTests(unittest.TestCase):
                 return "12345"
 
             with contextlib.redirect_stdout(output), \
+                    patch("manage.choose_token_hidden", return_value=True), \
                     patch("manage.getpass.getpass", side_effect=prompt_side_effect), \
                     patch("builtins.input", side_effect=prompt_side_effect):
                 self.assertEqual(manage.prepare_config(args), 0)
@@ -285,7 +286,8 @@ class WizardOrderTests(unittest.TestCase):
                 call_count.append(1)
                 raise EOFError
 
-            with patch("sys.argv", argv), patch("manage.getpass.getpass", side_effect=cancel_first), \
+            with patch("sys.argv", argv), patch("manage.choose_token_hidden", return_value=True), \
+                    patch("manage.getpass.getpass", side_effect=cancel_first), \
                     contextlib.redirect_stdout(output), \
                     contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(manage.main(), 20)
@@ -293,7 +295,7 @@ class WizardOrderTests(unittest.TestCase):
             self.assertNotIn("2/3", output.getvalue())
             self.assertEqual(dest.read_text(), "")
 
-    def test_real_terminal_hides_token(self):
+    def check_real_terminal_token_visibility(self, choice, visible):
         with tempfile.TemporaryDirectory() as temp:
             dest = Path(temp) / "candidate"
             dest.touch()
@@ -315,7 +317,9 @@ class WizardOrderTests(unittest.TestCase):
                             except OSError:
                                 break
                     self.assertIn(marker, output)
-                read_until(b"> ")
+                read_until(b"[Y/n]")
+                os.write(master, (choice + "\n").encode())
+                read_until(b"Token> ")
                 os.write(master, (fixture_token + "\n").encode())
                 read_until("步骤 2/3".encode())
                 os.write(master, b"12345\n")
@@ -325,13 +329,22 @@ class WizardOrderTests(unittest.TestCase):
                         output.extend(os.read(master, 65536))
                     except OSError:
                         break
-                self.assertNotIn(fixture_token.encode(), output)
+                if visible:
+                    self.assertIn(fixture_token.encode(), output)
+                else:
+                    self.assertNotIn(fixture_token.encode(), output)
                 self.assertEqual(Settings.load(dest).allowed, frozenset({12345}))
             finally:
                 if proc.poll() is None:
                     proc.kill()
                     proc.wait(timeout=2)
                 os.close(master)
+
+    def test_real_terminal_hides_token_by_default(self):
+        self.check_real_terminal_token_visibility("", False)
+
+    def test_real_terminal_can_show_token(self):
+        self.check_real_terminal_token_visibility("n", True)
 
     def test_only_three_step_headers_remain(self):
         text = (ROOT / "install.sh").read_text() + (ROOT / "manage.py").read_text()

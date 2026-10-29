@@ -66,6 +66,16 @@ WantedBy=multi-user.target
 """
 
 
+def choose_token_hidden() -> bool:
+    while True:
+        choice = input("是否隐藏 Token 输入？[Y/n]：").strip().lower()
+        if choice in ("", "y"):
+            return True
+        if choice == "n":
+            return False
+        print("请输入 y（隐藏）或 n（显示），直接回车默认隐藏。")
+
+
 def prepare_config(args: argparse.Namespace) -> int:
     old: dict[str, str] = {}
     if args.old:
@@ -77,19 +87,24 @@ def prepare_config(args: argparse.Namespace) -> int:
     token = ids = ""
     print("\n步骤 1/3：Telegram Bot Token")
     if reconfigure or not (old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN")):
-        print("请输入 Telegram Bot Token：")
+        hidden = choose_token_hidden()
+        print("请输入 Telegram Bot Token（输入隐藏）：" if hidden else
+              "请输入 Telegram Bot Token（输入会显示在屏幕上）：")
         if old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN"):
             print("（已有 Token，直接回车保留。）")
         while True:
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", getpass.GetPassWarning)
-                    token = getpass.getpass("> ", stream=sys.stdout).strip()
-            except getpass.GetPassWarning:
-                raise ConfigError("无法安全隐藏 Token 输入，请使用交互式终端重试。") from None
+            if hidden:
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", getpass.GetPassWarning)
+                        token = getpass.getpass("Token> ", stream=sys.stdout).strip()
+                except getpass.GetPassWarning:
+                    raise ConfigError("无法安全隐藏 Token 输入，请使用交互式终端重试。") from None
+            else:
+                token = input("Token> ").strip()
             if TOKEN_RE.fullmatch(token or old.get("TELEGRAM_BOT_TOKEN") or old.get("BOT_TOKEN", "")):
                 break
-            print("Token 格式不正确，请从 BotFather 完整复制后重试。输入不会显示在屏幕上。")
+            print("Token 格式不正确，请从 BotFather 完整复制后重试。")
     else:
         print("自动保留已有 Telegram Bot Token。")
     print("\n步骤 2/3：Telegram 数字 ID")

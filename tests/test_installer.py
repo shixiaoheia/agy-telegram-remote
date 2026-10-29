@@ -285,6 +285,7 @@ if confirm_service_stop; then exit 9; fi
                 dest.write_text("unchanged")
                 argv = ["manage.py", "prepare-config", "--output", str(dest), "--write-paths", str(path)]
                 with self.subTest(path=path), patch("sys.argv", argv), \
+                     patch("manage.choose_token_hidden", return_value=True), \
                      patch("manage.getpass.getpass", return_value=config_values()["TELEGRAM_BOT_TOKEN"]), \
                      patch("builtins.input", return_value="12345"), \
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -322,6 +323,7 @@ if confirm_service_stop; then exit 9; fi
             argv = ["manage.py", "prepare-config", "--output", str(dest),
                     "--home", "/root"]
             with patch("sys.argv", argv), \
+                 patch("manage.choose_token_hidden", return_value=True), \
                  patch("manage.getpass.getpass", return_value=config_values()["TELEGRAM_BOT_TOKEN"]) as secret, \
                  patch("builtins.input", return_value="12345") as inp, \
                  contextlib.redirect_stdout(io.StringIO()):
@@ -361,7 +363,8 @@ if confirm_service_stop; then exit 9; fi
             dest.touch()
             argv = ["manage.py", "prepare-config", "--old", str(old),
                     "--output", str(dest), "--reconfigure"]
-            with patch("sys.argv", argv), patch("manage.getpass.getpass", return_value="") as secret, \
+            with patch("sys.argv", argv), patch("manage.choose_token_hidden", return_value=True), \
+                    patch("manage.getpass.getpass", return_value="") as secret, \
                     patch("builtins.input", return_value="67890") as prompt, \
                     contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(main(), 0)
@@ -392,6 +395,7 @@ if confirm_service_stop; then exit 9; fi
             argv = ["manage.py", "prepare-config", "--output", str(dest)]
             output = io.StringIO()
             with patch("sys.argv", argv), \
+                    patch("manage.choose_token_hidden", return_value=True), \
                     patch("manage.getpass.getpass", side_effect=["bad", config_values()["TELEGRAM_BOT_TOKEN"]]) as secret, \
                     patch("builtins.input", side_effect=["invalid", "0", "12345"]) as ids, \
                     contextlib.redirect_stdout(output):
@@ -410,11 +414,56 @@ if confirm_service_stop; then exit 9; fi
             dest.write_text("unchanged")
             argv = ["manage.py", "prepare-config", "--output", str(dest)]
             errors = io.StringIO()
-            with patch("sys.argv", argv), patch("manage.getpass.getpass", side_effect=getpass.GetPassWarning), \
+            with patch("sys.argv", argv), patch("manage.choose_token_hidden", return_value=True), \
+                    patch("manage.getpass.getpass", side_effect=getpass.GetPassWarning), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
                 self.assertEqual(main(), 21)
             self.assertEqual(dest.read_text(), "unchanged")
             self.assertIn("无法安全隐藏", errors.getvalue())
+
+    def test_visible_token_choice_retries_and_does_not_use_getpass(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest = Path(temp) / "candidate"
+            dest.touch()
+            argv = ["manage.py", "prepare-config", "--output", str(dest)]
+            output = io.StringIO()
+            with patch("sys.argv", argv), \
+                    patch("builtins.input", side_effect=["wrong", "n", "invalid", config_values()["TELEGRAM_BOT_TOKEN"], "12345"]), \
+                    patch("manage.getpass.getpass", side_effect=AssertionError("visible input must not use getpass")), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(main(), 0)
+            self.assertIn("请输入 y", output.getvalue())
+            self.assertIn("输入会显示在屏幕上", output.getvalue())
+            self.assertIn("Token 格式不正确", output.getvalue())
+            self.assertEqual(Settings.load(dest).token, config_values()["TELEGRAM_BOT_TOKEN"])
+
+    def test_visibility_default_and_case_insensitive_choice(self):
+        from manage import choose_token_hidden
+        for choice, expected in (("", True), ("Y", True), ("y", True), ("N", False), ("n", False)):
+            with self.subTest(choice=choice), patch("builtins.input", return_value=choice):
+                self.assertEqual(choose_token_hidden(), expected)
+
+    def test_visibility_choice_eof_cancels_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest = Path(temp) / "candidate"
+            dest.write_text("unchanged")
+            argv = ["manage.py", "prepare-config", "--output", str(dest)]
+            with patch("sys.argv", argv), patch("builtins.input", side_effect=EOFError), \
+                    patch("manage.getpass.getpass", side_effect=AssertionError("should not read token")), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(), 20)
+            self.assertEqual(dest.read_text(), "unchanged")
+
+    def test_reconfigure_visible_blank_preserves_old_token(self):
+        with tempfile.TemporaryDirectory() as temp:
+            old, dest = Path(temp) / "old", Path(temp) / "candidate"
+            old.write_text("\n".join(f"{k}={v}" for k, v in config_values().items()))
+            dest.touch()
+            argv = ["manage.py", "prepare-config", "--old", str(old), "--output", str(dest), "--reconfigure"]
+            with patch("sys.argv", argv), patch("builtins.input", side_effect=["n", "", ""]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(), 0)
+            self.assertEqual(Settings.load(dest).token, config_values()["TELEGRAM_BOT_TOKEN"])
 
     def test_service_status_reports_only_observed_state(self):
         script = r'''
