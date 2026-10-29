@@ -48,13 +48,6 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-opus-5-5-thinking": "claude-opus-5-5-medium",
 }
 
-# Model-specific capacity policy lives with the catalog, not task dispatch.
-CAPACITY_RESUME_MODELS = frozenset({MODEL_ALIASES["3.8-high"]})
-CAPACITY_FALLBACKS = {
-    MODEL_ALIASES["3.8-low"]: MODEL_ALIASES["3.8-high"],
-    MODEL_ALIASES["3.8-med"]: MODEL_ALIASES["3.8-high"],
-}
-
 
 def is_retired_model(name: str) -> bool:
     """Explicitly removed families must not return through CLI discovery or old buttons."""

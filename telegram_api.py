@@ -8,9 +8,11 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 from http.client import HTTPException
 import socket
 import threading
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from urllib.request import getproxies, proxy_bypass
@@ -34,7 +36,7 @@ class TelegramAPI:
         self._file_endpoint = f"{root}/file/bot{token}/"
         self.request_timeout = request_timeout
         self._root = urlsplit(root)
-        self._idle: list[http.client.HTTPConnection] = []
+        self._idle: list[tuple[http.client.HTTPConnection, float]] = []
         self._pool_lock = threading.Lock()
         self._closed = False
 
@@ -42,16 +44,32 @@ class TelegramAPI:
         with self._pool_lock:
             self._closed = True
             idle, self._idle = self._idle, []
-        for connection in idle:
+        for connection, _ in idle:
             connection.close()
 
     def _connection(self, timeout: float) -> http.client.HTTPConnection:
-        with self._pool_lock:
-            connection = self._idle.pop() if self._idle else None
-        if connection is not None:
+        while True:
+            with self._pool_lock:
+                entry = self._idle.pop() if self._idle else None
+            if entry is None:
+                break
+            connection, idle_since = entry
+            sock = connection.sock
+            try:
+                # An idle connection with pending socket data may have received
+                # FIN/TLS close-notify. Never read from or reuse it. This is a
+                # pre-send check, not a retry of an ambiguous POST.
+                stale = sock is None or time.monotonic() - idle_since > 30
+                if not stale:
+                    readable, _, exceptional = select.select([sock], [], [sock], 0)
+                    stale = bool(readable or exceptional)
+            except (OSError, ValueError):
+                stale = True
+            if stale:
+                connection.close()
+                continue
             connection.timeout = timeout
-            if connection.sock is not None:
-                connection.sock.settimeout(timeout)
+            sock.settimeout(timeout)
             return connection
         root = self._root
         if root.scheme not in {"http", "https"} or not root.hostname:
@@ -120,7 +138,7 @@ class TelegramAPI:
             if connection is not None:
                 with self._pool_lock:
                     if reusable and not self._closed and len(self._idle) < 8:
-                        self._idle.append(connection)
+                        self._idle.append((connection, time.monotonic()))
                         connection = None
                 if connection is not None:
                     connection.close()

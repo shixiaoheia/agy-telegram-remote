@@ -368,6 +368,18 @@ needs_auth() {
   [[ "$1" -eq 10 || "$2" == 1 || "$3" == 1 ]]
 }
 
+validate_release_files() {
+  local stage="$1" required
+  for required in bot.py settings.py state_store.py telegram_api.py telegram_formatting.py agy_runner.py manage.py; do
+    [[ -f "$stage/$required" ]] || fail "所选提交缺少 $required；请先上传完整新版。"
+  done
+  # Older releases embedded command handlers in bot.py and legitimately lack
+  # this module. Require it only when the selected release imports it.
+  if grep -Eq '^[[:space:]]*(from[[:space:]]+command_handlers[[:space:]]+import|import[[:space:]]+command_handlers([[:space:]]|$))' "$stage/bot.py"; then
+    [[ -f "$stage/command_handlers.py" ]] || fail '所选提交缺少 command_handlers.py。'
+  fi
+}
+
 uninstall() {
   local answer managed_agy='' directory configured_input=''
   if [[ "$PURGE" == 1 ]]; then
@@ -534,9 +546,7 @@ main() {
   rm -rf -- "$STAGE/.git"
   find "$STAGE" -type d -exec chmod 0755 {} +
   find "$STAGE" -type f -exec chmod 0644 {} +
-  for required in bot.py command_handlers.py settings.py state_store.py telegram_api.py telegram_formatting.py agy_runner.py manage.py; do
-    [[ -f "$STAGE/$required" ]] || fail "所选提交缺少 $required；请先上传完整新版。"
-  done
+  validate_release_files "$STAGE"
   echo "采用提交：$commit"
 
   CANDIDATE="$(mktemp "$CONFIG_DIR/.candidate-XXXXXXXX")"
