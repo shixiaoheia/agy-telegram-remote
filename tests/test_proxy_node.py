@@ -28,6 +28,15 @@ class ProxyNodeTests(unittest.TestCase):
         self.assertEqual(result["tls"]["reality"]["public_key"], "testkey")
         self.assertEqual(result["flow"], "xtls-rprx-vision")
 
+    def test_reality_default_share_link_options(self):
+        base = f"vless://{UUID}@[2001:db8::1]:443?security=reality&sni=example.test&fp=chrome&pbk=testkey&sid=01&type=tcp"
+        result = parse_node(base + "&spx=%2F&headerType=none")
+        self.assertEqual(result["server"], "2001:db8::1")
+        self.assertEqual(result["tls"]["reality"]["short_id"], "01")
+        for suffix in ("&spx=%2Fother", "&headerType=http"):
+            with self.subTest(suffix=suffix), self.assertRaises(NodeError):
+                parse_node(base + suffix)
+
     def test_vmess_websocket(self):
         data = {"v": "2", "add": "example.test", "port": "443", "id": UUID,
                 "aid": "0", "net": "ws", "host": "example.test", "path": "/test", "tls": "tls"}

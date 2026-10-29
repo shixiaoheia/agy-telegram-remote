@@ -145,7 +145,7 @@ def parse_node(link: str) -> dict:
         params = dict(pairs)
         if len(params) != len(pairs):
             raise NodeError("节点包含重复参数。")
-        allowed = {"security", "sni", "peer", "fp", "pbk", "sid", "allowInsecure", "insecure", "type", "host", "path", "serviceName", "flow", "encryption"}
+        allowed = {"security", "sni", "peer", "fp", "pbk", "sid", "allowInsecure", "insecure", "type", "host", "path", "serviceName", "flow", "encryption", "spx", "headerType"}
         if set(params) - allowed:
             raise NodeError("节点包含暂不支持的参数。")
         if params.get("encryption", "none") != "none":
@@ -162,6 +162,10 @@ def parse_node(link: str) -> dict:
             if params.get("flow") or params.get("encryption"):
                 raise NodeError("该协议不支持 flow 或 encryption。")
         security = params.get("security", "none" if kind == "vless" else "tls")
+        if "spx" in params and (kind != "vless" or security != "reality" or params["spx"] not in ("", "/")):
+            raise NodeError("仅支持 Reality 的默认 spiderX 路径。")
+        if "headerType" in params and (params.get("type", "tcp") != "tcp" or params["headerType"] not in ("", "none")):
+            raise NodeError("不支持该 TCP 伪装类型。")
         tls = _tls(security, params.get("sni", params.get("peer", "")), params.get("fp", ""),
                    params.get("pbk", ""), params.get("sid", ""), params.get("allowInsecure", params.get("insecure", "")))
         transport = _transport(params.get("type", "tcp"), params.get("host", ""),
