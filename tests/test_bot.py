@@ -450,7 +450,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
         self.assertEqual(self.runner.calls, 0)
-        self.assertIn("单文件最大 10MB", self.api.messages[-1][1])
+        self.assertTrue(any("附件过大" in message[1] for message in self.api.messages))
+        self.assertIn("不支持这种附件格式", self.api.messages[-1][1])
 
     async def test_empty_result_does_not_say_task_completed_or_retry(self):
         self.runner.result = Result("no_text", detail="缺少回复")

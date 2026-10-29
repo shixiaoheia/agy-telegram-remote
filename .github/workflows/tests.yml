@@ -46,3 +46,13 @@ jobs:
           AGY_TEST_ISOLATED_CONTAINER: "1"
         run: bash scripts/test_account_debian12.sh --confirm-isolated-environment
 
+  arm64-offline-tests:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4 ref
+        with:
+          persist-credentials: false
+      - name: Verify on ARM64
+        timeout-minutes: 5
+        run: bash scripts/verify.sh
+

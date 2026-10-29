@@ -626,7 +626,8 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         with patch("bot.asyncio.sleep", new_callable=AsyncMock) as sleep:
             await self.bridge._refresh_progress(job)
         self.assertEqual([c.args[0] for c in sleep.await_args_list], [10, 20])
-        self.assertEqual(self.api.edit.await_count, 3)
+        self.assertEqual(self.api.edit.await_count, 4)
+        self.assertIn("正在取消并清理", self.api.edit.await_args_list[-1].args[2])
         self.assertEqual(self.runner.calls, 0)
 
     async def test_progress_respects_429_and_stops_for_deleted_card(self):
