@@ -56,3 +56,32 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/verify.sh
 
+  proxy-config-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            sha256: 699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            sha256: 436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4 ref
+        with:
+          persist-credentials: false
+      - name: Check generated configs with verified sing-box
+        env:
+          ARCH: ${{ matrix.arch }}
+          EXPECTED_SHA: ${{ matrix.sha256 }}
+        run: |
+          set -eu
+          archive="sing-box-1.14.4-linux-${ARCH}.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fsSL "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/${archive}" -o "$archive"
+          printf '%s  %s\n' "$EXPECTED_SHA" "$archive" | sha256sum -c -
+          tar -xOzf "$archive" "sing-box-1.14.4-linux-${ARCH}/sing-box" > "$RUNNER_TEMP/sing-box"
+          chmod 755 "$RUNNER_TEMP/sing-box"
+          AGY_TEST_SING_BOX="$RUNNER_TEMP/sing-box" python3 -m unittest tests.test_proxy_node -v
+

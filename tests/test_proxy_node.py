@@ -1,7 +1,10 @@
 """Share-link parsing only; no real credentials or network access."""
 import base64
 import json
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -57,3 +60,23 @@ class ProxyNodeTests(unittest.TestCase):
         with self.assertRaises(NodeError) as context:
             parse_node("vless://private-secret@example.test:443")
         self.assertNotIn("private-secret", str(context.exception))
+
+    @unittest.skipUnless(os.environ.get("AGY_TEST_SING_BOX"), "sing-box binary not supplied")
+    def test_generated_configs_accepted_by_sing_box(self):
+        vmess = {"v": "2", "add": "example.test", "port": "443", "id": UUID,
+                 "aid": "0", "net": "ws", "host": "example.test", "path": "/test", "tls": "tls"}
+        encoded = base64.b64encode(json.dumps(vmess).encode()).decode()
+        public_key = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
+        ss = base64.urlsafe_b64encode(b"aes-128-gcm:dummy").decode().rstrip("=")
+        links = [f"vless://{UUID}@example.test:443?security=reality&sni=example.test&fp=chrome&pbk={public_key}",
+                 "vmess://" + encoded, "anytls://dummy@example.test:443?sni=example.test",
+                 "trojan://dummy@example.test:443?sni=example.test",
+                 "hy2://dummy@example.test:443?sni=example.test", f"ss://{ss}@example.test:443"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "proxy.json"
+            for link in links:
+                with self.subTest(protocol=link.split(":", 1)[0]):
+                    path.write_text(json.dumps(build_config(parse_node(link), 42000)), encoding="utf-8")
+                    result = subprocess.run([os.environ["AGY_TEST_SING_BOX"], "check", "-c", str(path)],
+                                            capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr)

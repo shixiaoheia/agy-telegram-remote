@@ -19,6 +19,30 @@ class ProxyManagerTests(unittest.TestCase):
         self.assertIn(f"EnvironmentFile={manager.ENV}", manager.drop_text().decode())
         self.assertIn("NoNewPrivileges=yes", manager.unit_text().decode())
 
+    def test_successful_switch_starts_proxy_and_checks_bot_ready(self):
+        paths = (manager.CONFIG, manager.ENV, manager.UNIT, manager.DROP)
+        old = {path: f"old-{index}".encode() for index, path in enumerate(paths)}
+        files = dict(old)
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+
+        with patch.object(manager, "secure_dir"), \
+             patch.object(manager, "read_managed", side_effect=lambda path, marker=False: old[path]), \
+             patch.object(manager, "atomic_write", side_effect=lambda path, data, mode: files.update({path: data})), \
+             patch.object(manager, "active", return_value=True), \
+             patch.object(manager, "enabled", return_value=True), \
+             patch.object(manager, "run", side_effect=fake_run), \
+             patch.object(manager, "check_connectivity") as check, \
+             patch.object(manager, "ready", return_value=True):
+            manager.apply({"outbounds": []}, 32123)
+        self.assertIn(("systemctl", "enable", "--now", manager.PROXY_SERVICE), calls)
+        self.assertIn(("systemctl", "start", manager.SERVICE), calls)
+        self.assertIn(b"127.0.0.1:32123", files[manager.ENV])
+        check.assert_called_once_with(32123)
+
     def test_failed_new_proxy_restores_previous_files_and_services(self):
         paths = (manager.CONFIG, manager.ENV, manager.UNIT, manager.DROP)
         old = {path: f"old-{index}".encode() for index, path in enumerate(paths)}
