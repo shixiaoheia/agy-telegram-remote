@@ -140,6 +140,9 @@ choose_initial_proxy() {
 
 load_managed_proxy() {
   local env_file="$CONFIG_DIR/proxy.env" port
+  if [[ "${1:-}" != allow-pending && ( -e "$CONFIG_DIR/.proxy-transaction.json" || -L "$CONFIG_DIR/.proxy-transaction.json" ) ]]; then
+    fail '检测到上次节点切换未完成。请先选择菜单 4 恢复原代理，再继续安装或更新。'
+  fi
   [[ -e "$env_file" || -L "$env_file" ]] || return 0
   [[ -f "$env_file" && ! -L "$env_file" && "$(stat -c %u "$env_file")" == 0 ]] \
     || fail '代理环境文件不安全。'
@@ -415,12 +418,37 @@ confirm_service_stop() {
   done
 }
 
-# A previous installation may not contain the proxy helper, and updating it can
-# itself require a proxy. Fetch a fresh root-owned helper before changing the
-# existing service; do not execute Python from the old installation.
+# Reuse only a compatible, root-owned immutable release. Older installations
+# download a clean helper, using the current managed proxy when available.
+installed_proxy_helper() {
+  local release unsafe required
+  [[ -L "$APP" && ! -L "$RELEASES" ]] || return 1
+  release="$(readlink -f -- "$APP")"
+  [[ "$release" == "$RELEASES/"* && -d "$release" && "$(stat -c %u "$release")" == 0 ]] || return 1
+  for required in proxy_manager.py proxy_node.py manage.py agy_runner.py settings.py state_store.py telegram_api.py; do
+    [[ -f "$release/$required" && ! -L "$release/$required" ]] || return 1
+  done
+  grep -Fxq 'PROXY_RECOVERY_VERSION = 1' "$release/proxy_manager.py" || return 1
+  unsafe="$(find "$release" -path "$release/.git" -prune -o \( -type l -o ! -user root -o -perm /022 \) -print -quit)"
+  [[ -z "$unsafe" ]] || return 1
+  printf '%s\n' "$release"
+}
+
 run_proxy_setup() (
-  local proxy_stage commit
+  local proxy_stage commit installed
+  if installed="$(installed_proxy_helper)"; then
+    echo '使用已安装的安全代理管理程序。'
+    execute_proxy_helper "$installed"
+    return
+  fi
   command -v git >/dev/null || fail '配置节点需要 git；请先安装 git 并确保能访问 GitHub。'
+  # Existing service environments are not inherited by an SSH shell. Reuse
+  # the managed proxy for the bootstrap if it is currently running.
+  if [[ -f "$CONFIG_DIR/proxy.env" && ! -L "$CONFIG_DIR/proxy.env" ]] \
+      && systemctl is-active --quiet agy-telegram-proxy.service 2>/dev/null; then
+    load_managed_proxy allow-pending
+    echo '下载代理管理程序时使用当前节点。'
+  fi
   root_dir "$RELEASES"
   proxy_stage="$(mktemp -d "$RELEASES/.proxy-stage-XXXXXXXX")"
   trap 'rm -rf -- "$proxy_stage"' EXIT
