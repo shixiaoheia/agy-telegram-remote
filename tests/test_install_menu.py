@@ -160,6 +160,7 @@ main "$@"
         rc, output = self.run_main_until_privilege_boundary(text="1\n")
         self.assert_mode_at_boundary(rc, output, "install")
         self.assertEqual(output.count("[0/1/2/3]"), 1)
+        self.assertIn("安装（推荐", output)
 
     def test_main_two_routes_update_once(self):
         rc, output = self.run_main_until_privilege_boundary(text="2\n")
@@ -176,6 +177,7 @@ main "$@"
         rc, output = self.run_main_until_privilege_boundary(text="2\n", existing=True)
         self.assert_mode_at_boundary(rc, output, "install")
         self.assertIn("[0/1/2/3]", output)
+        self.assertIn("更新到最新版本（推荐", output)
 
     def test_legacy_install_shows_menu_before_update(self):
         rc, output = self.run_main_until_privilege_boundary(text="2\n", legacy=True)
@@ -250,7 +252,7 @@ class WizardOrderTests(unittest.TestCase):
             completed = []
             fixture_token = "123456:" + "x" * 32
 
-            def prompt_side_effect(_=None):
+            def prompt_side_effect(_=None, **kwargs):
                 if not completed:
                     self.assertIn("1/3", output.getvalue())
                     self.assertNotIn("2/3", output.getvalue())
@@ -263,7 +265,9 @@ class WizardOrderTests(unittest.TestCase):
                 completed.append(2)
                 return "12345"
 
-            with contextlib.redirect_stdout(output), patch("builtins.input", side_effect=prompt_side_effect):
+            with contextlib.redirect_stdout(output), \
+                    patch("manage.getpass.getpass", side_effect=prompt_side_effect), \
+                    patch("builtins.input", side_effect=prompt_side_effect):
                 self.assertEqual(manage.prepare_config(args), 0)
             self.assertEqual(completed, [1, 2])
             self.assertEqual(Settings.load(dest).allowed, frozenset({12345}))
@@ -277,17 +281,57 @@ class WizardOrderTests(unittest.TestCase):
             output = io.StringIO()
             call_count = []
 
-            def cancel_first(_=None):
+            def cancel_first(_=None, **kwargs):
                 call_count.append(1)
                 raise EOFError
 
-            with patch("sys.argv", argv), patch("builtins.input", side_effect=cancel_first), \
+            with patch("sys.argv", argv), patch("manage.getpass.getpass", side_effect=cancel_first), \
                     contextlib.redirect_stdout(output), \
                     contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(manage.main(), 20)
             self.assertEqual(len(call_count), 1)
             self.assertNotIn("2/3", output.getvalue())
             self.assertEqual(dest.read_text(), "")
+
+    def test_real_terminal_hides_token(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest = Path(temp) / "candidate"
+            dest.touch()
+            master, slave = pty.openpty()
+            proc = subprocess.Popen([sys.executable, str(ROOT / "manage.py"), "prepare-config",
+                                     "--output", str(dest)], stdin=slave, stdout=slave, stderr=slave,
+                                    close_fds=True, start_new_session=True)
+            os.close(slave)
+            output = bytearray()
+            fixture_token = "123456:" + "x" * 32
+            try:
+                def read_until(marker):
+                    deadline = time.monotonic() + 5
+                    while marker not in output and time.monotonic() < deadline:
+                        ready, _, _ = select.select([master], [], [], 0.1)
+                        if ready:
+                            try:
+                                output.extend(os.read(master, 65536))
+                            except OSError:
+                                break
+                    self.assertIn(marker, output)
+                read_until(b"> ")
+                os.write(master, (fixture_token + "\n").encode())
+                read_until("步骤 2/3".encode())
+                os.write(master, b"12345\n")
+                self.assertEqual(proc.wait(timeout=5), 0)
+                while select.select([master], [], [], 0)[0]:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+                self.assertNotIn(fixture_token.encode(), output)
+                self.assertEqual(Settings.load(dest).allowed, frozenset({12345}))
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                os.close(master)
 
     def test_only_three_step_headers_remain(self):
         text = (ROOT / "install.sh").read_text() + (ROOT / "manage.py").read_text()
