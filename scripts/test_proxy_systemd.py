@@ -77,6 +77,7 @@ try:
     pm.CONFIG_DIR = config_dir
     pm.CONFIG = config_dir / "proxy.json"
     pm.ENV = config_dir / "proxy.env"
+    pm.JOURNAL = config_dir / ".proxy-transaction.json"
     pm.ENGINE = engine
     pm.UNIT = proxy_unit
     pm.DROP_DIR = drop_dir
@@ -138,6 +139,7 @@ try:
     else:
         raise AssertionError("Unreachable replacement was accepted")
     assert pm.CONFIG.read_bytes() == old_config
+    assert not pm.JOURNAL.exists()
     assert pm.active(bot_name) and pm.active(proxy_name)
     pm.wait_listener(local_port)
     connectivity(local_port)

@@ -101,6 +101,62 @@ run_proxy_setup
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("BOOTSTRAP_HELPER_OK", r.stdout)
 
+    def test_proxy_bootstrap_uses_current_running_managed_proxy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = r'''
+source "$1"
+RELEASES="$2/releases"
+CONFIG_DIR="$2/config"
+mkdir -p "$RELEASES" "$CONFIG_DIR"
+: > "$CONFIG_DIR/proxy.env"
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+root_dir() { :; }
+validate_release_files() { :; }
+installed_proxy_helper() { return 1; }
+systemctl() { return 0; }
+load_managed_proxy() { export HTTPS_PROXY='http://127.0.0.1:32123'; }
+git() {
+  case "$*" in
+    *" init -q "*) PROXY_FAKE_STAGE="${@: -1}"; mkdir "$PROXY_FAKE_STAGE/.git" ;;
+    *" fetch "*) printf 'FETCH_PROXY=%s\n' "${HTTPS_PROXY-UNSET}" ;;
+    *" checkout -q "*) : > "$PROXY_FAKE_STAGE/proxy_manager.py"; : > "$PROXY_FAKE_STAGE/proxy_node.py" ;;
+    *" rev-parse HEAD"*) printf '%040d\n' 1 ;;
+  esac
+}
+execute_proxy_helper() { :; }
+run_proxy_setup
+'''
+            r = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                               capture_output=True, text=True, timeout=5)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("FETCH_PROXY=http://127.0.0.1:32123", r.stdout)
+
+    def test_proxy_management_can_recover_offline_with_installed_helper(self):
+        with tempfile.TemporaryDirectory() as temp:
+            script = r'''
+source "$1"
+TEST_RELEASE="$2"
+installed_proxy_helper() { printf '%s\n' "$TEST_RELEASE"; }
+git() { printf 'UNEXPECTED_FETCH\n'; return 1; }
+execute_proxy_helper() { printf 'OFFLINE_HELPER_USED\n'; }
+run_proxy_setup
+'''
+            r = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                               capture_output=True, text=True, timeout=5)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("OFFLINE_HELPER_USED", r.stdout)
+            self.assertNotIn("UNEXPECTED_FETCH", r.stdout)
+
+    def test_install_blocks_on_unrecovered_proxy_transaction(self):
+        with tempfile.TemporaryDirectory() as temp:
+            (Path(temp) / ".proxy-transaction.json").touch()
+            script = 'source "$1"; CONFIG_DIR="$2"; load_managed_proxy; printf "UNEXPECTED\\n"'
+            r = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                               capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertNotIn("UNEXPECTED", r.stdout)
+            self.assertIn("上次节点切换未完成", r.stderr)
+
     def test_zero_choice(self):
         r = self.menu("0\n")
         self.assertEqual(r.returncode, 0)

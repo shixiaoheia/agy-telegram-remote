@@ -7,10 +7,12 @@ line. The surrounding installer holds its deployment lock before invoking us.
 from __future__ import annotations
 
 import contextlib
+import base64
 import getpass
 import hashlib
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -27,6 +29,7 @@ from pathlib import Path
 from proxy_node import NodeError, build_config, parse_node
 
 VERSION = "1.14.4"
+PROXY_RECOVERY_VERSION = 1
 ARCHES = {
     "x86_64": ("amd64", "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968"),
     "aarch64": ("arm64", "436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26"),
@@ -35,6 +38,7 @@ CONFIG_DIR = Path("/etc/agy-telegram-remote")
 ENGINE_DIR = Path("/opt/agy-telegram-remote-proxy")
 CONFIG = CONFIG_DIR / "proxy.json"
 ENV = CONFIG_DIR / "proxy.env"
+JOURNAL = CONFIG_DIR / ".proxy-transaction.json"
 UNIT = Path("/etc/systemd/system/agy-telegram-proxy.service")
 DROP_DIR = Path("/etc/systemd/system/agy-telegram-remote.service.d")
 DROP = DROP_DIR / "90-agy-managed-proxy.conf"
@@ -65,12 +69,13 @@ def read_managed(path: Path, marker: bool = False) -> bytes | None:
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         info = os.fstat(fd)
+        limit = 8 * 1024 * 1024 if path == JOURNAL else 1024 * 1024
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1
-                or info.st_mode & (0o077 if path in (CONFIG, ENV) else 0o022)
-                or info.st_size > 1024 * 1024):
+                or info.st_mode & (0o077 if path in (CONFIG, ENV, JOURNAL) else 0o022)
+                or info.st_size > limit):
             raise ProxyError(f"文件不安全：{path}")
         with os.fdopen(fd, "rb", closefd=False) as stream:
-            data = stream.read(1024 * 1024 + 1)
+            data = stream.read(limit + 1)
         if marker and not data.startswith(MARKER.encode()):
             raise ProxyError(f"拒绝覆盖非本项目管理的文件：{path}")
         return data
@@ -88,9 +93,85 @@ def atomic_write(path: Path, content: bytes, mode: int) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(name, path)
+        sync_directory(path.parent)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(name)
+
+
+def sync_directory(path: Path) -> None:
+    # A file fsync alone does not make the rename durable across power loss.
+    if hasattr(os, "O_DIRECTORY"):
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def snapshot_paths() -> tuple[Path, ...]:
+    return CONFIG, ENV, UNIT, DROP
+
+
+def save_transaction(before: dict[Path, bytes | None], bot: bool, proxy: bool, enabled_: bool) -> None:
+    if read_managed(JOURNAL) is not None:
+        raise ProxyError("存在未恢复的代理切换记录，请先恢复。")
+    encoded = [None if before[path] is None else base64.b64encode(before[path]).decode("ascii")
+               for path in snapshot_paths()]
+    record = {"version": 1, "files": encoded, "bot_active": bot,
+              "proxy_active": proxy, "proxy_enabled": enabled_}
+    atomic_write(JOURNAL, json.dumps(record, separators=(",", ":")).encode(), 0o600)
+
+
+def read_transaction() -> tuple[dict[Path, bytes | None], bool, bool, bool] | None:
+    raw = read_managed(JOURNAL)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+        if (not isinstance(value, dict) or set(value) != {"version", "files", "bot_active", "proxy_active", "proxy_enabled"}
+                or type(value["version"]) is not int or value["version"] != 1
+                or not isinstance(value["files"], list) or len(value["files"]) != 4
+                or any(type(value[key]) is not bool for key in ("bot_active", "proxy_active", "proxy_enabled"))):
+            raise ValueError
+        decoded = [None if item is None else base64.b64decode(item, validate=True) for item in value["files"]]
+        if any(item is not None and len(item) > 1024 * 1024 for item in decoded):
+            raise ValueError
+        for item in decoded[2:]:
+            if item is not None and not item.startswith(MARKER.encode()):
+                raise ValueError
+        before = dict(zip(snapshot_paths(), decoded))
+        return before, value["bot_active"], value["proxy_active"], value["proxy_enabled"]
+    except (TypeError, ValueError, KeyError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ProxyError("代理恢复记录无效，已停止；请人工检查。") from exc
+
+
+def clear_transaction() -> None:
+    read_managed(JOURNAL)
+    JOURNAL.unlink(missing_ok=True)
+    sync_directory(JOURNAL.parent)
+
+
+def previous_port(before: dict[Path, bytes | None]) -> int | None:
+    if before[CONFIG] is None and before[ENV] is None:
+        return None
+    if before[CONFIG] is None or before[ENV] is None:
+        raise ProxyError("已有代理配置不完整，请先人工检查。")
+    try:
+        match = re.match(rb"HTTP_PROXY=http://127\.0\.0\.1:([0-9]{1,5})\n", before[ENV])
+        if not match:
+            raise ValueError
+        port = int(match.group(1))
+        if not 1 <= port <= 65535 or before[ENV] != env_text(port):
+            raise ValueError
+        cfg = json.loads(before[CONFIG])
+        inbound = cfg["inbounds"]
+        if (not isinstance(inbound, list) or len(inbound) != 1 or inbound[0].get("type") != "http"
+                or inbound[0].get("listen") != "127.0.0.1" or inbound[0].get("listen_port") != port):
+            raise ValueError
+        return port
+    except (TypeError, ValueError, KeyError, AttributeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ProxyError("已有代理端口配置不一致，请先恢复或人工检查。") from exc
 
 
 def run(*args: str, check: bool = True, timeout: int = 90) -> subprocess.CompletedProcess:
@@ -295,22 +376,87 @@ def service_proxy_matches(port: int) -> bool:
     return True
 
 
+def wait_bot(port: int | None) -> None:
+    for _ in range(120):
+        if active(SERVICE) and ready() and (port is None or service_proxy_matches(port)):
+            return
+        time.sleep(0.5)
+    raise ProxyError("机器人未通过启动和代理环境检查。")
+
+
+def restore_transaction(before: dict[Path, bytes | None], old_bot_active: bool,
+                        old_proxy_active: bool, old_proxy_enabled: bool) -> bool:
+    failures = []
+
+    def attempt(action) -> bool:
+        try:
+            action()
+            return True
+        except Exception:
+            failures.append(True)
+            return False
+
+    # A previous interrupted switch may have restarted the bot after the record
+    # was written. The caller has already warned before stopping an active bot.
+    if old_bot_active or active(SERVICE):
+        attempt(lambda: run("systemctl", "stop", SERVICE))
+    attempt(lambda: run("systemctl", "stop", PROXY_SERVICE, check=False))
+    if not old_proxy_enabled and UNIT.exists():
+        attempt(lambda: run("systemctl", "disable", PROXY_SERVICE))
+    for path, value in before.items():
+        if value is None:
+            attempt(lambda p=path: p.unlink(missing_ok=True))
+        else:
+            attempt(lambda p=path, v=value: atomic_write(p, v, 0o600 if p in (CONFIG, ENV) else 0o644))
+    attempt(lambda: run("systemctl", "daemon-reload"))
+    if old_proxy_enabled:
+        attempt(lambda: run("systemctl", "enable", PROXY_SERVICE))
+    if old_proxy_active:
+        if attempt(lambda: run("systemctl", "start", PROXY_SERVICE)):
+            port = previous_port(before)
+            if port is not None:
+                attempt(lambda: wait_listener(port))
+    if old_bot_active and not failures:
+        if attempt(lambda: run("systemctl", "start", SERVICE)):
+            attempt(lambda: wait_bot(previous_port(before)))
+    if failures:
+        print("回退有操作失败，恢复记录已保留；请检查两个服务状态和日志。", file=sys.stderr)
+        return False
+    print("已尝试恢复原配置和服务，请检查服务状态。", file=sys.stderr)
+    return True
+
+
+def recover_pending() -> bool:
+    pending = read_transaction()
+    if pending is None:
+        return False
+    print("检测到上次节点切换被中断，正在恢复之前的配置……")
+    if not restore_transaction(*pending):
+        raise ProxyError("未能完成代理恢复；记录已保留，请检查服务后重试。")
+    clear_transaction()
+    print("已恢复之前的代理配置；未自动重跑任何任务。")
+    return True
+
+
 def apply(config: dict, port: int) -> None:
     """Switch only after a candidate probe. Roll back both services on failure."""
     secure_dir(CONFIG_DIR, 0o700)
     secure_dir(DROP_DIR, 0o755)
-    paths = (CONFIG, ENV, UNIT, DROP)
-    before = {path: read_managed(path, marker=path in (UNIT, DROP)) for path in paths}
-    if (before[CONFIG] is None) != (before[ENV] is None):
-        raise ProxyError("已有代理配置不完整，请先人工检查。")
+    before = {path: read_managed(path, marker=path in (UNIT, DROP)) for path in snapshot_paths()}
+    old_port = previous_port(before)
+    if old_port is not None:
+        # The same local port keeps the two independently persisted files
+        # consistent even if power fails between their atomic replacements.
+        port = old_port
+        config = dict(config)
+        config["inbounds"] = [dict(config["inbounds"][0], listen_port=port)]
     old_bot_active = active(SERVICE)
     old_proxy_active = active(PROXY_SERVICE)
     old_proxy_enabled = enabled(PROXY_SERVICE)
     if before[UNIT] is None and (old_proxy_active or old_proxy_enabled):
         raise ProxyError("发现同名代理服务，不能覆盖。")
-    changed = False
+    save_transaction(before, old_bot_active, old_proxy_active, old_proxy_enabled)
     try:
-        changed = True
         if old_bot_active:
             run("systemctl", "stop", SERVICE)
         if old_proxy_active:
@@ -331,48 +477,34 @@ def apply(config: dict, port: int) -> None:
             raise ProxyError("新节点代理已退出。")
         if old_bot_active:
             run("systemctl", "start", SERVICE)
-            for _ in range(120):
-                if active(SERVICE) and ready():
-                    break
-                time.sleep(0.5)
-            else:
-                raise ProxyError("机器人未通过就绪检查。")
-            if not service_proxy_matches(port):
-                raise ProxyError("机器人未使用新代理，可能有其他服务配置覆盖了代理设置。")
+            wait_bot(port)
     except BaseException:
-        failures = []
-
-        def attempt(action) -> None:
-            try:
-                action()
-            except Exception:
-                failures.append(True)
-
-        if changed:
-            if old_bot_active:
-                attempt(lambda: run("systemctl", "stop", SERVICE))
-            attempt(lambda: run("systemctl", "stop", PROXY_SERVICE, check=False))
-            # Remove links while the new unit still exists; after deleting it,
-            # systemctl may be unable to disable an otherwise dangling link.
-            if not old_proxy_enabled and UNIT.exists():
-                attempt(lambda: run("systemctl", "disable", PROXY_SERVICE))
-            for path, value in before.items():
-                if value is None:
-                    attempt(lambda p=path: p.unlink(missing_ok=True))
-                else:
-                    attempt(lambda p=path, v=value: atomic_write(p, v, 0o600 if p in (CONFIG, ENV) else 0o644))
-            attempt(lambda: run("systemctl", "daemon-reload"))
-            if old_proxy_enabled:
-                attempt(lambda: run("systemctl", "enable", PROXY_SERVICE))
-            if old_proxy_active:
-                attempt(lambda: run("systemctl", "start", PROXY_SERVICE))
-        if old_bot_active:
-            attempt(lambda: run("systemctl", "start", SERVICE))
-        if failures:
-            print("回退有操作失败，请检查两个服务状态和日志。", file=sys.stderr)
-        else:
-            print("已尝试恢复原配置和服务，请检查服务状态。", file=sys.stderr)
+        if restore_transaction(before, old_bot_active, old_proxy_active, old_proxy_enabled):
+            clear_transaction()
         raise
+    clear_transaction()
+
+
+def service_installed() -> bool:
+    result = subprocess.run(["systemctl", "show", SERVICE, "-p", "LoadState", "--value"],
+                            capture_output=True, text=True, timeout=10, check=False)
+    return result.returncode == 0 and result.stdout.strip() == "loaded"
+
+
+def start_saved_bot() -> None:
+    before = {CONFIG: read_managed(CONFIG), ENV: read_managed(ENV)}
+    port = previous_port(before)
+    if port is None:
+        raise ProxyError("节点配置不存在，无法启动机器人。")
+    run("systemctl", "reset-failed", SERVICE, check=False)
+    try:
+        run("systemctl", "start", SERVICE)
+        wait_bot(port)
+        print("机器人已启动并通过就绪检查。")
+        return
+    except (subprocess.SubprocessError, ProxyError):
+        pass
+    raise ProxyError("节点已保存，但机器人未通过启动检查；请查看机器人服务日志。")
 
 
 def main() -> int:
@@ -382,6 +514,7 @@ def main() -> int:
     def interrupted(_signum, _frame):
         raise ProxyError("操作中断。")
     signal.signal(signal.SIGTERM, interrupted)
+    recover_pending()
     print("节点链接包含密码，请只粘贴在此终端，输入默认隐藏。")
     print("支持常见 VLESS、VMess、AnyTLS、Trojan、Hysteria2 和 Shadowsocks 链接。")
     with warnings.catch_warnings():
@@ -399,6 +532,21 @@ def main() -> int:
     probe(config, port)
     apply(config, port)
     print("节点已保存并启用。网络连通不代表 Google 账号已获得使用资格。")
+    if service_installed() and not active(SERVICE):
+        print("机器人服务目前未运行。")
+        while True:
+            try:
+                answer = input("是否现在启动机器人？[y/n]： ").strip().lower()
+            except EOFError:
+                print("已保留停止状态；代理节点已保存。")
+                break
+            if answer == "n":
+                print("已保留停止状态；代理节点已保存。")
+                break
+            if answer == "y":
+                start_saved_bot()
+                break
+            print("请输入 y 或 n。")
     return 0
 
 
