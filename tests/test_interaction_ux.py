@@ -220,6 +220,7 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("时间未知", text)
 
     async def test_current_model_probe_merges_only_selected_result_and_preserves_preferences(self):
+        self.runner.hold = True
         self.store.set_model(12345, "gemini-3.8-flash-high")
         self.store.set_mode(12345, "plan")
         old_time = time.time() - 7200
@@ -227,8 +228,10 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
             "outcome": "success", "category": "", "checked_at": old_time}})
         self.runner.list_models = AsyncMock()
         await self.bridge.handle(callback_update("probe:current"))
+        await self.runner.started.wait()
         task = self.bridge.model_check_task
         self.assertIsNotNone(task)
+        self.runner.finish.set()
         await task
         await self._drain()
         self.assertEqual(self.runner.calls, 1)
@@ -242,8 +245,12 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1/1", self.api.messages[-1][1])
 
     async def test_all_models_button_uses_existing_full_detection_path(self):
+        self.runner.hold = True
         await self.bridge.handle(callback_update("probe:all"))
-        await self.bridge.model_check_task
+        await self.runner.started.wait()
+        task = self.bridge.model_check_task
+        self.runner.finish.set()
+        await task
         await self._drain()
         self.assertEqual(self.runner.calls, len(OFFICIAL_MODELS))
         self.assertIsNone(self.store.get_model(12345))
