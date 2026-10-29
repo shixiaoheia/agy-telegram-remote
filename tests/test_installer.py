@@ -701,7 +701,7 @@ class SmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await smoke(config), 0)
             self.assertEqual(seen["prompt"], SMOKE_PROMPT)
             command = build_command(seen["settings"], SMOKE_PROMPT)
-            self.assertEqual(command[command.index("--output-format") + 1], "json")
+            self.assertEqual(command[command.index("--output-format") + 1], "stream-json")
             self.assertIn("--dangerously-skip-permissions", command)
 
     async def test_auth_quota_network_have_distinct_codes(self):

@@ -16,13 +16,16 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.responses = []
         self.requests = []
+        self.connections = []
         self.file_body = b"fixture"
         outer = self
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
             def log_message(self, *_):
                 pass
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
+                outer.connections.append(self.client_address[1])
                 outer.requests.append((self.path.rsplit("/", 1)[-1], json.loads(body)))
                 status, value = outer.responses.pop(0)
                 raw = value if isinstance(value, bytes) else json.dumps(value).encode()
@@ -66,6 +69,13 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["chat_id"], 12345)
         self.assertEqual(payload["text"], "hello")
         self.assertNotIn("parse_mode", payload)
+
+    async def test_http_connection_is_reused_without_retrying_posts(self):
+        self.responses.extend([(200, {"ok": True, "result": True})] * 2)
+        await self.api.call("getMe")
+        await self.api.call("getWebhookInfo")
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(self.connections[0], self.connections[1])
 
     async def test_explicit_429_retries_only_delivery(self):
         self.responses.extend([
@@ -182,7 +192,7 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_incomplete_http_response_sanitized(self):
         from http.client import IncompleteRead
-        with patch("telegram_api.urlopen", side_effect=IncompleteRead(b"partial", 50)):
+        with patch.object(self.api, "_connection", side_effect=IncompleteRead(b"partial", 50)):
             with self.assertRaises(TelegramError):
                 await self.api.call("getMe")
 

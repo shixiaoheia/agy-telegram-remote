@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import http.client
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,8 @@ import socket
 import threading
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.request import getproxies, proxy_bypass
+from urllib.parse import unquote, urlsplit
 
 
 class TelegramError(Exception):
@@ -29,24 +33,64 @@ class TelegramAPI:
         self._endpoint = f"{root}/bot{token}/"
         self._file_endpoint = f"{root}/file/bot{token}/"
         self.request_timeout = request_timeout
+        self._root = urlsplit(root)
+        self._idle: list[http.client.HTTPConnection] = []
+        self._pool_lock = threading.Lock()
+        self._closed = False
+
+    def close(self) -> None:
+        with self._pool_lock:
+            self._closed = True
+            idle, self._idle = self._idle, []
+        for connection in idle:
+            connection.close()
+
+    def _connection(self, timeout: float) -> http.client.HTTPConnection:
+        with self._pool_lock:
+            connection = self._idle.pop() if self._idle else None
+        if connection is not None:
+            connection.timeout = timeout
+            if connection.sock is not None:
+                connection.sock.settimeout(timeout)
+            return connection
+        root = self._root
+        if root.scheme not in {"http", "https"} or not root.hostname:
+            raise ValueError("invalid API endpoint")
+        proxy_url = getproxies().get(root.scheme) if not proxy_bypass(root.hostname) else None
+        if proxy_url:
+            proxy = urlsplit(proxy_url if "://" in proxy_url else "http://" + proxy_url)
+            if proxy.scheme != "http" or not proxy.hostname:
+                raise ValueError("unsupported proxy")
+            connection = (http.client.HTTPSConnection if root.scheme == "https" else http.client.HTTPConnection)(
+                proxy.hostname, proxy.port or 80, timeout=timeout)
+            if root.scheme == "https":
+                headers = {}
+                if proxy.username is not None:
+                    credentials = f"{unquote(proxy.username)}:{unquote(proxy.password or '')}".encode()
+                    headers["Proxy-Authorization"] = "Basic " + base64.b64encode(credentials).decode("ascii")
+                connection.set_tunnel(root.hostname, root.port or 443, headers=headers)
+            else:
+                # HTTP proxies require absolute-form requests; local tests use direct connections.
+                raise ValueError("HTTP proxy unsupported for test endpoint")
+            return connection
+        return (http.client.HTTPSConnection if root.scheme == "https" else http.client.HTTPConnection)(
+            root.hostname, root.port, timeout=timeout)
 
     def _request(self, method: str, payload: dict, request_timeout: float | None = None) -> object:
-        request = Request(
-            self._endpoint + method,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
+        connection = None
+        reusable = False
         http_code = 0
         try:
-            try:
-                response = urlopen(request, timeout=request_timeout or self.request_timeout)
-            except HTTPError as error:
-                http_code = error.code
-                response = error
-            with response:
-                raw = response.read(2097153)
+            connection = self._connection(request_timeout or self.request_timeout)
+            path = (self._root.path.rstrip("/") + "/bot" + self._endpoint.split("/bot", 1)[1] + method)
+            connection.request("POST", path, body=json.dumps(payload).encode("utf-8"),
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            http_code = response.status if response.status != 200 else 0
+            raw = response.read(2097153)
             if len(raw) > 2097152:
                 raise TelegramError(http_code)
+            reusable = not response.will_close
             value = json.loads(raw)
             if not isinstance(value, dict):
                 raise TelegramError(http_code)
@@ -72,6 +116,14 @@ class TelegramAPI:
         except (URLError, OSError, socket.timeout, ValueError, HTTPException, RecursionError):
             # The original exception can include the token-bearing request URL.
             raise TelegramError() from None
+        finally:
+            if connection is not None:
+                with self._pool_lock:
+                    if reusable and not self._closed and len(self._idle) < 8:
+                        self._idle.append(connection)
+                        connection = None
+                if connection is not None:
+                    connection.close()
 
     async def call(self, method: str, **payload) -> object:
         return await asyncio.to_thread(self._request, method, payload)

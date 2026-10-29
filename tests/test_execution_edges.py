@@ -163,9 +163,10 @@ class ExecutionEdgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["delivery"], "sent")
         self.assertIn("会话", record["metadata_warning"])
         self.assertNotIn("PRIVATE_CONTEXT", str(record))
-        self.assertTrue(self.runner.blocked)
-        await self.bridge.handle(update("do not start this"))
-        self.assertEqual(self.runner.calls, 1)
+        self.assertFalse(self.runner.blocked)
+        await self.bridge.handle(update("new task"))
+        await self.bridge.slot.worker
+        self.assertEqual(self.runner.calls, 2)
 
     async def test_history_failure_cannot_erase_already_completed_result(self):
         self.runner.result = Result("success", text="completed before history failure")
@@ -173,7 +174,7 @@ class ExecutionEdgeTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.handle(update("operation"))
             await self.bridge.slot.worker
         self.assertEqual(self.store.load(12345)["text"], "completed before history failure")
-        self.assertTrue(self.runner.blocked)
+        self.assertFalse(self.runner.blocked)
         self.assertEqual(self.runner.calls, 1)
 
     async def test_html_second_page_downgrade_never_repeats_first_page(self):

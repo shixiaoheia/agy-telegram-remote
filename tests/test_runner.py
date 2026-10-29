@@ -22,6 +22,14 @@ class ParserTests(unittest.TestCase):
     def test_success(self):
         self.assertEqual(self.parse({"status": "SUCCESS", "response": " hello "}).text, "hello")
 
+    def test_invalid_optional_counters_do_not_crash_or_lose_result(self):
+        for invalid in ([], {}, True, -1, 1.2, "not-a-number", "9" * 100):
+            with self.subTest(invalid=invalid):
+                result = self.parse({"status": "SUCCESS", "response": "done", "num_turns": invalid,
+                                     "usage": {"input_tokens": invalid, "total_tokens": invalid}})
+                self.assertEqual((result.outcome, result.text, result.num_turns, result.input_tokens,
+                                  result.total_tokens), ("success", "done", 0, 0, 0))
+
     def test_empty_success_not_completed(self):
         self.assertEqual(self.parse({"status": "SUCCESS", "response": " \n"}).outcome, "no_text")
 
@@ -254,7 +262,9 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_success_and_arguments(self):
         self.executable(
             "import json,sys,os\n"
-            "assert sys.argv[sys.argv.index('--output-format')+1] == 'json'\n"
+            "assert sys.argv[sys.argv.index('--output-format')+1] == 'stream-json'\n"
+            "assert 'hello' not in sys.argv\n"
+            "assert json.loads(sys.stdin.readline())['message']['content'] == 'hello'\n"
             "assert '--dangerously-skip-permissions' in sys.argv\n"
             f"assert os.getcwd() == {str(self.settings.workspace)!r}\n"
             "assert 'TELEGRAM_BOT_TOKEN' not in os.environ\n"
@@ -309,7 +319,7 @@ class RealProcessTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_no_shell_interpolation(self):
         marker = self.directory / "must-not-exist"
-        self.executable("import json,sys\nprint(json.dumps({'status':'SUCCESS','response':sys.argv[-1]}))\n")
+        self.executable("import json,sys\nprompt=json.loads(sys.stdin.readline())['message']['content']\nprint(json.dumps({'status':'SUCCESS','response':prompt}))\n")
         prompt = f"$(touch {marker}); echo danger"
         result = await self.runner().run(prompt, asyncio.Event())
         self.assertEqual(result.text, prompt)
