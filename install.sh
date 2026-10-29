@@ -27,7 +27,6 @@ WRITE_PATHS=
 WRITE_PATHS_SET=0
 REAUTH=0
 RECONFIGURE=0
-SHOW_MENU=0
 MODE=menu
 PURGE=0
 TRANSACTION=0
@@ -52,7 +51,7 @@ usage() {
  Antigravity Telegram Remote 安装与管理脚本
 =============================================
 用法：
-  bash install.sh                         已安装时自动更新；首次运行显示安装菜单
+  bash install.sh                         显示安装、更新与卸载菜单
   bash install.sh --menu                  显示管理菜单（安装、更新、彻底卸载、退出）
   bash install.sh --reconfigure           安装/更新并重新询问 Token 与白名单
   bash install.sh --install               👑 极简 Root 模式安装/更新（直接以 root 运行）
@@ -65,7 +64,7 @@ usage() {
   bash install.sh --reauth                 重新进入 Google 账号授权流程
   bash install.sh --ref COMMIT_OR_BRANCH   安装/升级指定不可变 Git 提交 SHA 或分支（推荐生产使用 Commit SHA）
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
-  bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 PURGE 二次确认）
+  bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 y 确认）
   bash install.sh --help                   显示此帮助说明
 EOF
 }
@@ -76,6 +75,11 @@ choose_operation() {
   echo '============================================='
   echo ' Antigravity Telegram Remote 管理菜单'
   echo '============================================='
+  if [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
+    echo '检测到已有安装；更新将保留现有配置。'
+  else
+    echo '未检测到已有安装；首次使用请选择安装。'
+  fi
   echo '  1) 安装'
   echo '  2) 更新'
   echo '  3) 彻底卸载（清除本项目全部组件）'
@@ -253,12 +257,138 @@ on_exit() {
   exit "$rc"
 }
 
+find_input_dir() {
+  # Parse configuration as data; never execute an old checkout or source its env file.
+  local source_config=''
+  [[ ! -L "$CONFIG" ]] || fail '配置文件是符号链接，无法安全确认附件目录。'
+  if [[ -f "$CONFIG" ]]; then
+    source_config="$CONFIG"
+  elif [[ ! -L "$APP" && -f "$APP/.env" ]]; then
+    source_config="$APP/.env"
+  fi
+  /usr/bin/python3 -I - "$source_config" "$APP_HOME" <<'PY'
+import os, re, shlex, stat, sys
+from pathlib import Path
+try:
+    config, home_arg = sys.argv[1:]
+    home = Path(home_arg)
+    work = home
+    if config:
+        fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 65536:
+                raise ValueError('unsafe config')
+            content = stream.read(65537).decode('utf-8-sig')
+        found = []
+        for line in content.splitlines():
+            line = line.strip()
+            if line.startswith('export '):
+                line = line[7:].lstrip()
+            key, sep, value = line.partition('=')
+            if sep and key.strip() == 'AGY_WORKSPACE':
+                value = value.strip()
+                if value.startswith(("'", '"')):
+                    parts = shlex.split(value, comments=True, posix=True)
+                    if len(parts) != 1:
+                        raise ValueError('bad workspace')
+                    value = parts[0]
+                else:
+                    value = re.split(r'\s+#', value, maxsplit=1)[0].rstrip()
+                found.append(value)
+        if len(found) > 1:
+            raise ValueError('duplicate workspace')
+        if found:
+            work = Path(found[0])
+    if not re.fullmatch(r'/[A-Za-z0-9._/-]+', str(work)) or '..' in work.parts:
+        raise ValueError('bad workspace')
+    if work != home and home not in work.parents:
+        raise ValueError('workspace outside home')
+    current = home
+    for part in ((), *[(p,) for p in work.relative_to(home).parts], ('.agy-telegram-inputs',)):
+        if part:
+            current = current / part[0]
+        if os.path.lexists(current):
+            info = os.lstat(current)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                raise ValueError('unsafe directory')
+    print(current)
+except (OSError, UnicodeError, ValueError):
+    print('无法安全识别附件目录，请检查配置和路径后重试。', file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+confirm_service_stop() {
+  local pid children answer
+  pid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+  children=''
+  if [[ ! "$pid" =~ ^[1-9][0-9]*$ || ! -r "/proc/$pid/task/$pid/children" ]]; then
+    echo '无法确认服务子进程状态，可能有任务正在运行。'
+  else
+    IFS= read -r children < "/proc/$pid/task/$pid/children" || true
+    if [[ -n "$children" ]]; then
+      echo '检测到服务子进程，可能有任务或模型检测正在运行。'
+    else
+      echo '未检测到服务子进程；仍可能有正在准备或新开始的任务。'
+    fi
+  fi
+  echo '更新将停止服务，中断的任务不会自动重跑，已产生的修改不会撤销。'
+  while true; do
+    if ! IFS= read -r -p '继续更新？[y/n]： ' answer; then echo; return 1; fi
+    case "$answer" in
+      y|Y) return 0 ;;
+      n|N) return 1 ;;
+      *) echo '请输入 y 或 n。' ;;
+    esac
+  done
+}
+
+needs_auth() {
+  [[ "$1" -eq 10 || "$2" == 1 || "$3" == 1 ]]
+}
+
 uninstall() {
-  local answer agy_answer managed_agy=''
-  echo '此操作移除 systemd 服务，默认保留程序、配置、工作目录及 Google 登录。'
-  read -r -p '确认请输入 UNINSTALL： ' answer || exit 0
-  [[ "$answer" == UNINSTALL ]] || exit 0
+  local answer managed_agy='' directory configured_input=''
+  if [[ "$PURGE" == 1 ]]; then
+    configured_input="$(find_input_dir)" || fail '未能安全确认附件清理范围；未停止服务。'
+    if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
+      IFS= read -r managed_agy < "$AGY_MANAGED_MARKER" || true
+      [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
+    fi
+    echo '将删除服务、程序、配置、任务记录、备份、运行文件和 Bot 临时附件。'
+    if [[ -n "$managed_agy" ]]; then
+      echo '还将删除本安装器安装的 agy 和对应的 Google 登录资料。'
+    else
+      echo '将保留独立安装或来源不明的 agy 与 Google 登录资料。'
+    fi
+    echo '保留工作目录及用户文件、systemd 自定义配置、系统日志和 BotFather 中的 Bot。'
+    echo "将清理附件目录：$configured_input"
+    [[ "$configured_input" == "$INPUT_DIR" ]] || echo "也将清理默认附件目录：$INPUT_DIR"
+  else
+    echo '将移除 systemd 服务；程序、配置、工作目录及 Google 登录会保留。'
+  fi
+  while true; do
+    if ! IFS= read -r -p '确认继续？[y/n]： ' answer; then
+      echo; echo '已取消，没有卸载任何内容。'; return 0
+    fi
+    case "$answer" in
+      y|Y) break ;;
+      n|N) echo '已取消，没有卸载任何内容。'; return 0 ;;
+      *) echo '请输入 y 或 n。' ;;
+    esac
+  done
   [[ ! -L "$UNIT" ]] || fail "服务文件是链接，请人工检查。"
+  if [[ "$PURGE" == 1 ]]; then
+    for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR" "$configured_input"; do
+      [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
+    done
+    if [[ -n "$managed_agy" ]]; then
+      for directory in "$APP_HOME/.local" "$APP_HOME/.local/bin" "$managed_agy" "$APP_HOME/.gemini" "$APP_HOME/.gemini/antigravity-cli"; do
+        [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
+      done
+    fi
+  fi
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     fail '服务未能停止；未移除服务文件。'
@@ -269,37 +399,13 @@ uninstall() {
     echo '服务已移除，所有程序和数据保留。'
     return
   fi
-  if [[ -f "$AGY_MANAGED_MARKER" && ! -L "$AGY_MANAGED_MARKER" ]]; then
-    IFS= read -r managed_agy < "$AGY_MANAGED_MARKER" || true
-    [[ "$managed_agy" == "$APP_HOME/.local/bin/agy" ]] || managed_agy=''
-  fi
-  if [[ -z "$managed_agy" && -x "$APP_HOME/.local/bin/agy" ]]; then
-    echo '检测到旧版使用的标准 agy 与 Google 登录资料。它们也可能被你单独使用。'
-    read -r -p '如也要永久删除它们，请输入 ERASE_AGY；直接回车则保留： ' agy_answer || exit 0
-    [[ "$agy_answer" != ERASE_AGY ]] || managed_agy="$APP_HOME/.local/bin/agy"
-  fi
-  echo '彻底清理将删除本项目的服务、程序、配置、任务记录、备份、运行文件和 Bot 临时附件。'
+  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR" "$configured_input"
   if [[ -n "$managed_agy" ]]; then
-    echo '同时删除：本安装器安装的 agy 与对应 Google 登录资料。'
-  else
-    echo '提示：将保留独立安装的 agy 与登录资料。'
-  fi
-  echo '不会删除你的 /root 工作目录或其中的项目文件。'
-  read -r -p '确认永久删除上述数据请输入 PURGE： ' answer || exit 0
-  [[ "$answer" == PURGE ]] || exit 0
-  for directory in "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"; do
-    [[ ! -L "$directory" ]] || fail "拒绝清理符号链接：$directory"
-  done
-  [[ ! -L "$DEPLOY_LOCK_FILE" ]] || fail "拒绝清理符号链接：$DEPLOY_LOCK_FILE"
-  rm -rf -- "$APP" "$RELEASES" "$CONFIG_DIR" "$STATE_BASE" "$BACKUPS" "$RUNTIME_DIR" "$INPUT_DIR"
-  rm -f -- "$DEPLOY_LOCK_FILE"
-  if [[ -n "$managed_agy" ]]; then
-    [[ ! -L "$managed_agy" ]] || fail "拒绝清理符号链接：$managed_agy"
     rm -f -- "$managed_agy"
     rm -rf -- "$APP_HOME/.gemini/antigravity-cli"
   fi
   systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
-  echo '彻底清理完成：本项目组件已删除。不会删除 BotFather 中创建的 Telegram Bot。'
+  echo '清理完成。为保证操作互斥，保留不含凭据的部署锁文件。'
 }
 
 main() {
@@ -308,7 +414,7 @@ main() {
   while (( $# )); do
     case "$1" in
       --help|-h) usage; return ;;
-      --menu) SHOW_MENU=1 ;;
+      --menu) : ;;
       --reconfigure) RECONFIGURE=1; direct_install=1 ;;
       --install|--root) MODE=install; direct_install=1 ;;
       --enable-auto-approve) ENABLE_AUTO=1; direct_install=1 ;;
@@ -332,19 +438,14 @@ main() {
     esac
     shift
   done
-  # Explicit modes win; bare invocation upgrades an existing installation.
+  # Explicit modes bypass the menu; bare invocation always displays it.
   if [[ "$MODE" == menu && "$direct_install" == 1 ]]; then
     MODE=install
   fi
   [[ "$MODE" == uninstall || "$PURGE" == 0 ]] || fail '--purge 必须与 --uninstall 一起使用。'
   [[ -t 0 && -t 1 ]] || fail '请在可交互 SSH 终端运行，不要把脚本通过管道传给 bash。'
   if [[ "$MODE" == menu ]]; then
-    if [[ "$SHOW_MENU" == 0 ]] && [[ -f "$CONFIG" || -L "$APP" || -f "$APP/.env" ]]; then
-      MODE=install
-      echo '检测到已有安装，将自动更新并保留现有配置。'
-    else
-      choose_operation
-    fi
+    choose_operation
   fi
   [[ "$MODE" != exit ]] || return 0
   if [[ "$EUID" -ne 0 ]]; then
@@ -449,6 +550,14 @@ main() {
   rm -f -- "$test_log"
   as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" check-token --config "$CANDIDATE"
 
+  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+    if ! confirm_service_stop; then
+      echo '已取消更新，旧服务保持运行。'
+      rm -rf -- "$STAGE"
+      STAGE=
+      return 0
+    fi
+  fi
   BACKUP="$(mktemp -d "$BACKUPS/deploy-XXXXXXXX")"
   [[ ! -f "$CONFIG" ]] || cp -p -- "$CONFIG" "$BACKUP/config.env"
   [[ ! -f "$UNIT" ]] || cp -p -- "$UNIT" "$BACKUP/service"
@@ -538,12 +647,12 @@ _ONBOARDING_EOF
       smoke_rc=$?
     fi
   fi
-  if [[ "$smoke_rc" -ne 0 || "$REAUTH" == 1 ]]; then
+  if needs_auth "$smoke_rc" "$REAUTH" "$installed_now"; then
     local auth_rc=0
     local _token_file="$APP_HOME/.gemini/antigravity-cli/antigravity-oauth-token"
     # 若已有凭证失效或主动重授，移开旧凭据以确保直接输出全新授权链接
     if [[ -f "$_token_file" ]]; then
-      mv -f -- "$_token_file" "$_token_file.bak.$$" 2>/dev/null || rm -f -- "$_token_file"
+      mv -f -- "$_token_file" "$_token_file.bak.$$" || fail '无法暂存旧授权资料，已停止并保留原文件。'
     fi
     as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" auth-login --config "$CANDIDATE" || auth_rc=$?
     if [[ "$auth_rc" -ne 0 ]]; then
