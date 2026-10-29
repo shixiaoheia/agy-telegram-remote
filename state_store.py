@@ -89,6 +89,60 @@ class Store:
             os.close(self.lock_fd)
             self.lock_fd = None
 
+    def load_queue(self, max_prompt: int) -> list[tuple[int, int, str]]:
+        try:
+            data = read_json(self.directory / "waiting-queue.json", 18 * max_prompt + 4096)
+        except FileNotFoundError:
+            return []
+        if not isinstance(data, dict) or type(data.get("saved_at")) not in {int, float}:
+            raise ValueError("Invalid queue file")
+        entries = data.get("entries")
+        if not isinstance(entries, list) or len(entries) > 3:
+            raise ValueError("Invalid queue file")
+        if not 0 <= time.time() - data["saved_at"] <= self.retention:
+            (self.directory / "waiting-queue.json").unlink(missing_ok=True)
+            return []
+        result = []
+        for item in entries:
+            if (not isinstance(item, list) or len(item) != 3 or type(item[0]) is not int
+                    or type(item[1]) is not int or item[0] != item[1]
+                    or not isinstance(item[2], str) or not item[2]
+                    or len(item[2]) > max_prompt or "\x00" in item[2]):
+                raise ValueError("Invalid queue entry")
+            if item[0] in self.allowed:
+                result.append(tuple(item))
+        return result
+
+    def save_queue(self, entries: list[tuple[int, int, str]]) -> None:
+        if len(entries) > 3:
+            raise ValueError("Queue is full")
+        atomic_json(self.directory / "waiting-queue.json", {"saved_at": time.time(), "entries": entries})
+
+    def _emergency_path(self, home: Path, user: int) -> Path:
+        self._path(user)  # enforce the current whitelist
+        directory = home / ".agy-telegram-recovery"
+        check_no_symlink(directory)
+        directory.mkdir(mode=0o700, exist_ok=True)
+        info = directory.stat()
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise PermissionError("Recovery directory must be private")
+        return directory / f"result-{user}.json"
+
+    def save_emergency(self, home: Path, user: int, record: dict) -> None:
+        atomic_json(self._emergency_path(home, user), self.prepare_record(user, record))
+
+    def load_emergency(self, home: Path, user: int) -> dict | None:
+        try:
+            value = read_json(self._emergency_path(home, user), self.max_reply * 12 + 65536)
+        except FileNotFoundError:
+            return None
+        if not isinstance(value, dict) or value.get("user_id") != user:
+            raise ValueError("Invalid recovery record")
+        return value
+
+    def clear_emergency(self, home: Path, user: int) -> None:
+        self._emergency_path(home, user).unlink(missing_ok=True)
+
     def _path(self, user: int) -> Path:
         if type(user) is not int or user not in self.allowed:
             raise ValueError("User is not allowed")

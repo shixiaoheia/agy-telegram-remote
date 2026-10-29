@@ -524,6 +524,10 @@ def main() -> int:
     ready = sub.add_parser("check-ready")
     ready.add_argument("--file", type=Path, required=True)
     ready.add_argument("--pid", type=int, required=True)
+    health = sub.add_parser("check-health")
+    health.add_argument("--file", type=Path, required=True)
+    health.add_argument("--pid", type=int, required=True)
+    health.add_argument("--max-poll-age", type=float, default=90.0)
     args = parser.parse_args()
     try:
         if args.command == "prepare-config":
@@ -537,6 +541,16 @@ def main() -> int:
                 and data.get("polling_ready") is True
                 and isinstance(data.get("started_at"), (int, float))
                 and 0 <= time.time() - data["started_at"] < 120
+            ) else 1
+        if args.command == "check-health":
+            data = read_json(args.file, 1024)
+            last_poll = data.get("last_poll_at") if isinstance(data, dict) else None
+            return 0 if (
+                args.pid > 0 and args.max_poll_age >= 30
+                and isinstance(data, dict) and data.get("pid") == args.pid
+                and data.get("initialized") is True and data.get("polling_ready") is True
+                and type(last_poll) in {int, float}
+                and 0 <= time.time() - last_poll <= args.max_poll_age
             ) else 1
         if args.command == "auth-login":
             if args.config:

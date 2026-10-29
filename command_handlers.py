@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import uuid
 from collections import deque
 from settings import MODEL_RE, is_retired_model, resolve_model
 
@@ -91,26 +92,38 @@ class CommandHandlers:
 
     async def _command_queue(self, text, user, chat_id, helpers):
         if text.split(maxsplit=1)[1:] == ["cancel"]:
-            before = len(self.waiting_jobs)
-            removed_head = bool(self.waiting_jobs and self.waiting_jobs[0][0] == user)
-            self.waiting_jobs = deque(item for item in self.waiting_jobs if item[0] != user)
-            self.queue_reply(chat_id, f"🛑 已移除你的 {before - len(self.waiting_jobs)} 个等待任务；正在执行的任务不受影响。")
-            if removed_head:
-                self.queue_paused = False
-                self._wake_queue()
+            removed = self._remove_queued(lambda item: item[0] == user)
+            self.queue_reply(chat_id, f"🛑 已移除你的 {removed} 个等待任务；正在执行的任务不受影响。" if removed is not None
+                             else "⚠️ 无法保存取消操作，请检查服务器存储。")
         elif text.split(maxsplit=1)[1:] == ["resume"]:
             if self.waiting_jobs and self.waiting_jobs[0][0] == user:
+                if not self.queue_storage_ok:
+                    try:
+                        self.store.save_queue(list(self.waiting_jobs))
+                    except (OSError, ValueError):
+                        self.queue_reply(chat_id, "⚠️ 队列仍无法保存，请先修复服务器存储。")
+                        return
+                    self.queue_storage_ok = True
                 self.queue_paused = False
                 self.queue_reply(chat_id, "正在尝试启动你的等待任务。")
                 self._wake_queue()
             else:
                 self.queue_reply(chat_id, "只有队首任务的发起者可以恢复等待队列。")
         else:
-            positions = [str(i) for i, item in enumerate(self.waiting_jobs, 1) if item[0] == user]
-            self.queue_reply(chat_id, ("⏳ 你的任务排队位置：" + "、".join(positions) if positions
+            self.queue_buttons = {key: value for key, value in self.queue_buttons.items() if value[0] != user}
+            entries = [(i, item) for i, item in enumerate(self.waiting_jobs, 1) if item[0] == user]
+            lines, buttons = [], []
+            for position, item in entries:
+                title = self.store.redact(" ".join(item[2].split()))[:60]
+                lines.append(f"{position}. {title}")
+                token = uuid.uuid4().hex[:12]
+                self.queue_buttons[token] = (user, item)
+                buttons.append([{"text": f"🛑 取消第 {position} 项", "callback_data": f"queue:cancel:{token}"}])
+            self.queue_reply(chat_id, ("⏳ 你的等待任务：\n" + "\n".join(lines) if lines
                                        else "ℹ️ 你没有等待中的任务。")
                              + ("\n⚠️ 队列已暂停，队首发起者检查后可恢复。" if self.queue_paused else "")
-                             + "\n/queue add <文字任务> 加入队列；/queue cancel 取消等待；/queue resume 恢复队首。服务重启后队列不会保留。")
+                             + "\n/queue add <文字任务> 加入队列；/queue cancel 取消全部；/queue resume 恢复队首。重启后等待确认。",
+                             reply_markup={"inline_keyboard": buttons} if buttons else None)
         return
 
     async def _command_cancel(self, text, user, chat_id, helpers):
@@ -123,6 +136,7 @@ class CommandHandlers:
             self.queue_reply(chat_id, "🛑 已请求取消模型检测，正在等待进程清理完成；完成前不会接收新任务。")
         elif job is not None and job.user == user:
             job.cancel.set()
+            job.progress_requested.set()
             job.steer_cancelled = True
             self.queue_reply(chat_id, "🛑 已请求取消。会清理任务进程；已经发生的修改不会自动撤销。")
         elif self.pending_album is not None and self.pending_album["user"] == user:
@@ -137,7 +151,7 @@ class CommandHandlers:
     async def _command_last(self, text, user, chat_id, helpers):
         describe_html = helpers.describe_html
         if not self._recover_unsaved(user):
-            self.queue_reply(chat_id, "⚠️ 结果仍无法保存，暂存在服务内存中；请修复服务器存储后再次发送 /last。服务重启会丢失临时结果，请勿重复执行任务。")
+            self.queue_reply(chat_id, "⚠️ 结果仍无法保存；请修复服务器存储后再次发送 /last。若私有恢复文件也不可用，重启会丢失内存中的结果，请勿重复执行任务。")
             return
         try:
             record = self.store.load(user)
@@ -266,8 +280,8 @@ class CommandHandlers:
             self.queue_reply(chat_id, "⏳ 重启已安排，请稍候，不需要重复发送。")
             return
         self.queue_reply(chat_id, "🔄 服务将退出并由 systemd 重新启动，请稍后发送 /status 验证。"
-                         + ("注意：等待队列不会保留，请重启后重新提交。" if self.waiting_jobs else "")
-                         + ("注意：仍有未保存的临时结果，重启后会丢失。" if self.unsaved_results else ""))
+                         + ("注意：等待队列会暂停，重启后由队首发起者确认恢复。" if self.waiting_jobs else "")
+                         + ("注意：仍有未恢复的结果；若私有恢复文件不可用，重启会丢失内存副本。" if self.unsaved_results else ""))
 
         self.restart_task = asyncio.create_task(self._do_restart())
         return
@@ -318,6 +332,13 @@ class CommandHandlers:
                 return
             ok = self.store.add_whitelist(target_id)
             if ok:
+                try:
+                    record = self.store.load_emergency(self.settings.home, target_id)
+                    self.unreadable_recovery.discard(target_id)
+                    if record is not None:
+                        self.unsaved_results[target_id] = record
+                except (OSError, ValueError):
+                    self.unreadable_recovery.add(target_id)
                 self.queue_control(chat_id, f"✅ 已成功添加用户 `{target_id}` 到授权白名单！该用户现在可以私聊使用此 Bot。")
             else:
                 self.queue_control(chat_id, f"ℹ️ 用户 `{target_id}` 已经在动态白名单中了。")
@@ -333,7 +354,15 @@ class CommandHandlers:
                 return
             ok = self.store.remove_whitelist(target_id)
             if ok:
-                self.queue_control(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`。")
+                removed = self._remove_queued(lambda item: item[0] == target_id)
+                if removed is None:
+                    # Fail closed: revoked entries must never run, including on restart.
+                    self.waiting_jobs = deque(item for item in self.waiting_jobs if item[0] != target_id)
+                    self.queue_paused = True
+                    self.queue_storage_ok = False
+                    self.queue_control(chat_id, f"🗑️ 已移除用户 `{target_id}`。队列存储异常，已暂停；请检查服务器。")
+                else:
+                    self.queue_control(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`，并移除其 {removed} 个等待任务。正在执行的任务不受影响。")
             else:
                 self.queue_control(chat_id, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。")
             return

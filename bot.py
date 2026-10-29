@@ -636,6 +636,7 @@ class Bridge(CommandHandlers):
         self.settings, self.api, self.store, self.runner = settings, api, store, runner
         self.ready_file = ready_file
         self.polling_ready = False
+        self._ready_at = 0.0
         self._started_at = time.time()
         self._deployment_version = deployment_version()
         self.slot: Job | None = None
@@ -661,19 +662,39 @@ class Bridge(CommandHandlers):
         self.restart_task: asyncio.Task | None = None
         self.steer_tasks: set[asyncio.Task] = set()
         self.callback_tasks: set[asyncio.Task] = set()
-        self.waiting_jobs: deque[tuple[int, int, str]] = deque()
+        try:
+            self.waiting_jobs: deque[tuple[int, int, str]] = deque(store.load_queue(settings.max_prompt))
+            self.queue_storage_ok = True
+        except (OSError, ValueError):
+            LOG.warning("queue_recovery_failed")
+            self.waiting_jobs = deque()
+            self.queue_storage_ok = False
         self.queue_task: asyncio.Task | None = None
-        self.queue_paused = False
+        self.queue_paused = bool(self.waiting_jobs) or not self.queue_storage_ok
+        self.recovered_entries = {id(item) for item in self.waiting_jobs}
+        self.queue_buttons: dict[str, tuple[int, tuple[int, int, str]]] = {}
         # At most one bounded result per authorized user; never sent before saving.
         self.unsaved_results: dict[int, dict] = {}
+        self.unreadable_recovery: set[int] = set()
+        for user in self.store.allowed:
+            try:
+                record = self.store.load_emergency(self.settings.home, user)
+                if record is not None:
+                    self.unsaved_results[user] = record
+            except (OSError, ValueError):
+                self.unreadable_recovery.add(user)
+                LOG.warning("result_recovery_read_failed user=%s", user)
 
     def _recover_unsaved(self, user: int) -> bool:
+        if user in self.unreadable_recovery:
+            return False
         record = self.unsaved_results.get(user)
         if record is None:
             return True
         try:
             saved = self.store.save(user, record)
             self.store.save_history(user, record.get("title", ""), saved)
+            self.store.clear_emergency(self.settings.home, user)
         except (OSError, ValueError) as error:
             LOG.warning("result_recovery_failed type=%s", type(error).__name__)
             return False
@@ -708,7 +729,7 @@ class Bridge(CommandHandlers):
         if job is not None and job.user == user:
             stage = ("正在清理并交接修正任务" if job.steered and job.steer_task and not job.steer_task.done()
                      else "正在取消并清理" if job.cancel.is_set()
-                     else {"preparing": "准备任务", "receiving": "接收附件", "starting": "启动模型",
+                     else {"preparing": "准备任务", "receiving": job.activity if job.activity.startswith("接收附件") else "接收附件", "starting": "启动模型",
                            "saving": "保存结果", "sending": "结果已完成，正在发送"}.get(job.phase, job.activity))
             lines.extend([f"当前任务：{task_title(job.history_title)}", f"阶段：{stage}",
                           f"已运行：{max(0, int(time.monotonic() - job.started_at))} 秒"])
@@ -1005,7 +1026,7 @@ class Bridge(CommandHandlers):
             self._wake_queue()
 
     def _wake_queue(self) -> None:
-        if (not self.waiting_jobs or self.queue_paused or self.stop.is_set() or self.runner.blocked
+        if (not self.waiting_jobs or not self.queue_storage_ok or self.queue_paused or self.stop.is_set() or self.runner.blocked
                 or self.slot is not None or self.pending_album is not None
                 or (self.album_task is not None and not self.album_task.done())
                 or self._restart_pending() or any(not task.done() for task in self.steer_tasks)
@@ -1013,6 +1034,25 @@ class Bridge(CommandHandlers):
                 or (self.queue_task is not None and not self.queue_task.done())):
             return
         self.queue_task = asyncio.create_task(self._start_queued())
+
+    def _remove_queued(self, predicate) -> int | None:
+        old = list(self.waiting_jobs)
+        # Do not overwrite a queue file that could not be read at startup.
+        if not self.queue_storage_ok and not old:
+            return None
+        kept = [item for item in old if not predicate(item)]
+        try:
+            self.store.save_queue(kept)
+        except (OSError, ValueError):
+            self.queue_paused = True
+            return None
+        removed_head = bool(old and all(old[0] is not item for item in kept))
+        self.waiting_jobs = deque(kept)
+        self.recovered_entries.intersection_update(id(item) for item in kept)
+        if removed_head:
+            self.queue_paused = bool(kept and id(kept[0]) in self.recovered_entries)
+            self._wake_queue()
+        return len(old) - len(kept)
 
     async def _start_queued(self) -> None:
         while self.waiting_jobs and not self.stop.is_set() and not self.runner.blocked:
@@ -1024,9 +1064,20 @@ class Bridge(CommandHandlers):
             item = self.waiting_jobs[0]
             user, chat, text = item
             if not self._is_allowed(user):
+                try:
+                    self.store.save_queue(list(self.waiting_jobs)[1:])
+                except (OSError, ValueError):
+                    self.queue_paused = True
+                    return
                 self.waiting_jobs.popleft()
+                self.recovered_entries.discard(id(item))
+                if self.waiting_jobs and id(self.waiting_jobs[0]) in self.recovered_entries:
+                    self.queue_paused = True
+                    return
                 continue
             try:
+                # Record removal before starting; a crash cannot replay side effects.
+                self.store.save_queue(list(self.waiting_jobs)[1:])
                 await self.handle({"message": {"from": {"id": user},
                     "chat": {"id": chat, "type": "private"}, "text": text}}, from_queue=True)
             except Exception as error:
@@ -1034,8 +1085,15 @@ class Bridge(CommandHandlers):
             if self.slot is not None and self.slot.user == user:
                 if self.waiting_jobs and self.waiting_jobs[0] is item:
                     self.waiting_jobs.popleft()
+                self.recovered_entries.discard(id(item))
+                if self.waiting_jobs and id(self.waiting_jobs[0]) in self.recovered_entries:
+                    self.queue_paused = True
                 return
             self.queue_paused = True
+            try:
+                self.store.save_queue(list(self.waiting_jobs))
+            except (OSError, ValueError):
+                self.queue_storage_ok = False
             self.queue_reply(chat, "⚠️ 等待任务未能启动，仍保留在队列中。请检查模型和存储后发送 /queue resume，或使用 /queue cancel 取消。")
             return
 
@@ -1222,14 +1280,18 @@ class Bridge(CommandHandlers):
             try:
                 record = self.store.save(job.user, result_data)
             except (OSError, ValueError) as error:
-                # Preserve a bounded, redacted private copy in memory only.
-                # /last persists it before delivery; it cannot survive restart.
                 self.unsaved_results[job.user] = self.store.prepare_record(job.user, result_data | {
                     "delivery": "failed_or_partial",
-                    "metadata_warning": "结果曾因存储异常暂存在内存中，恢复后已保存；本次会话和用量记录可能缺失。",
+                    "metadata_warning": "结果曾因存储异常暂存，恢复后已保存；本次会话和用量记录可能缺失。",
                 })
+                recovery = "暂时保存在服务内存中，服务重启会丢失"
+                try:
+                    self.store.save_emergency(self.settings.home, job.user, self.unsaved_results[job.user])
+                    recovery = "已额外保存在私有恢复文件中；请勿删除该文件"
+                except (OSError, ValueError):
+                    LOG.warning("emergency_result_save_failed id=%s", job.job_id)
                 LOG.warning("result_save_failed id=%s type=%s", job.job_id, type(error).__name__)
-                await self.send_text(job.chat, "⚠️ 任务已结束，但结果保存失败，暂时保存在服务内存中，尚未发送。请修复服务器存储后发送 /last 保存并取回；服务重启会丢失这份临时结果。不要重复执行原任务。")
+                await self.send_text(job.chat, f"⚠️ 任务已结束，但结果保存失败，{recovery}，尚未发送。请修复服务器存储后发送 /last 保存并取回。不要重复执行原任务。")
                 return
             try:
                 self.store.save_history(job.user, job.history_title, record)
@@ -1238,6 +1300,10 @@ class Bridge(CommandHandlers):
                     "delivery": "failed_or_partial",
                     "metadata_warning": "结果已保存，历史记录曾写入失败，恢复后已补存；会话和用量可能缺失。",
                 })
+                try:
+                    self.store.save_emergency(self.settings.home, job.user, self.unsaved_results[job.user])
+                except (OSError, ValueError):
+                    LOG.warning("emergency_result_save_failed id=%s", job.job_id)
                 LOG.warning("result_history_save_failed id=%s type=%s", job.job_id, type(error).__name__)
                 await self.send_text(job.chat, "⚠️ 结果已保存，但历史记录保存失败。请修复服务器存储后发送 /last 取回并补存历史；不要重复执行任务。")
                 return
@@ -1377,7 +1443,7 @@ class Bridge(CommandHandlers):
     async def _refresh_progress(self, job: Job) -> None:
         delay = PROGRESS_UPDATE_SECONDS
         retrying = False
-        while not self.stop.is_set() and not job.cancel.is_set():
+        while not self.stop.is_set():
             if retrying:
                 # A manual click must not bypass Telegram's rate-limit delay.
                 await asyncio.sleep(delay)
@@ -1397,7 +1463,7 @@ class Bridge(CommandHandlers):
                 finally:
                     waiter.cancel()
                     await asyncio.gather(waiter, return_exceptions=True)
-            if self.stop.is_set() or job.cancel.is_set():
+            if self.stop.is_set():
                 return
             if job.phase in {"saving", "sending"}:
                 return
@@ -1408,6 +1474,7 @@ class Bridge(CommandHandlers):
             try:
                 # All automatic and requested edits have one writer. A button
                 # never races a pending HTTP edit, or the final result below.
+                cancel_rendered = job.cancel.is_set()
                 edit = asyncio.create_task(self.api.edit(job.chat, job.status_message_id,
                                                         self._progress_text(job), self._progress_buttons(job),
                                                         parse_mode="HTML"))
@@ -1419,6 +1486,10 @@ class Bridge(CommandHandlers):
                     await asyncio.gather(edit, return_exceptions=True)
                     raise
                 delay = PROGRESS_UPDATE_SECONDS
+                if cancel_rendered:
+                    return
+                if job.cancel.is_set():
+                    job.progress_requested.set()
             except TelegramError as error:
                 if error.not_modified:
                     delay = PROGRESS_UPDATE_SECONDS
@@ -1515,7 +1586,9 @@ class Bridge(CommandHandlers):
         """Fetch a whitelisted Telegram attachment into this job's private workspace."""
         size = attachment.get("file_size")
         file_id = attachment.get("file_id")
-        if type(size) is not int or not 0 < size <= MAX_ATTACHMENT_BYTES or not isinstance(file_id, str) or not FILE_ID_RE.fullmatch(file_id):
+        if type(size) is int and size > MAX_ATTACHMENT_BYTES:
+            raise ValueError("oversized file")
+        if type(size) is not int or not 0 < size or not isinstance(file_id, str) or not FILE_ID_RE.fullmatch(file_id):
             raise ValueError("invalid attachment metadata")
         original = "screenshot.jpg" if is_photo else str(attachment.get("file_name") or "")
         suffix = ".jpg" if is_photo else Path(original).suffix.lower()
@@ -1557,9 +1630,15 @@ class Bridge(CommandHandlers):
             )
             if not isinstance(downloaded, int) or not 0 < downloaded <= MAX_ATTACHMENT_BYTES:
                 raise ValueError("invalid downloaded file")
-        except (TelegramError, OSError, ValueError, AttributeError):
+        except TelegramError as error:
+            destination.unlink(missing_ok=True)
+            raise ValueError("oversized file" if error.code == 413 else "attachment download failed") from None
+        except (OSError, AttributeError):
             destination.unlink(missing_ok=True)
             raise ValueError("attachment download failed") from None
+        except ValueError:
+            destination.unlink(missing_ok=True)
+            raise
         job.attachments.append(destination)
         if is_photo or not display_name:
             display_name = destination.name
@@ -1915,12 +1994,27 @@ class Bridge(CommandHandlers):
             job = self.slot
             if job is not None and job.user == user and data == f"cancel:{job.job_id}":
                 job.cancel.set()
+                job.progress_requested.set()
                 job.steer_cancelled = True
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🛑 已请求取消")
                 self.queue_reply(chat_id, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。")
             elif cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id, text="该任务已结束或不可取消")
+            return
+
+        if data.startswith("queue:cancel:"):
+            key = data.removeprefix("queue:cancel:")
+            entry = self.queue_buttons.get(key)
+            if not entry or entry[0] != user or not any(item is entry[1] for item in self.waiting_jobs):
+                if cq_id:
+                    self._answer_callback(cq_id, text="这条等待任务已失效。")
+                return
+            self.queue_buttons.pop(key, None)
+            removed = self._remove_queued(lambda item: item is entry[1])
+            if cq_id:
+                self._answer_callback(cq_id, text="已取消等待任务" if removed else "保存失败，请检查存储")
+            self.queue_reply(chat_id, "🛑 已取消这条等待任务。" if removed else "⚠️ 无法保存取消操作，请检查服务器存储。")
             return
 
         if data.startswith("history:"):
@@ -2205,7 +2299,7 @@ class Bridge(CommandHandlers):
         if self.model_check_task and not self.model_check_task.done():
             self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
             return
-        if user in self.unsaved_results:
+        if user in self.unsaved_results or user in self.unreadable_recovery:
             if not self._recover_unsaved(user):
                 self.queue_reply(chat_id, "⚠️ 上一个结果尚未保存，请修复服务器存储并发送 /last 取回；新任务尚未启动。")
                 return
@@ -2220,10 +2314,18 @@ class Bridge(CommandHandlers):
                 self.queue_reply(chat_id, "⚠️ 附件暂不支持排队，请等待当前任务完成后重新发送。")
             elif len(self.waiting_jobs) >= 3:
                 self.queue_reply(chat_id, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。")
+            elif not self.queue_storage_ok:
+                self.queue_reply(chat_id, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。")
             else:
-                self.waiting_jobs.append((user, chat_id, text))
+                entry = (user, chat_id, text)
+                try:
+                    self.store.save_queue([*self.waiting_jobs, entry])
+                except (OSError, ValueError):
+                    self.queue_reply(chat_id, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。")
+                    return
+                self.waiting_jobs.append(entry)
                 state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
-                self.queue_reply(chat_id, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后队列会丢失。")
+                self.queue_reply(chat_id, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。")
                 self._wake_queue()
             return
 
@@ -2269,7 +2371,9 @@ class Bridge(CommandHandlers):
                 try:
                     received = []
                     total_bytes = 0
-                    for item, photo in items:
+                    self.queue_reply(chat_id, f"📎 正在接收 {len(items)} 个附件；发送 /status 查看进度，或发送 /cancel 取消。")
+                    for index, (item, photo) in enumerate(items, 1):
+                        job.activity = f"接收附件 {index}/{len(items)}"
                         if job.cancel.is_set() or self.stop.is_set():
                             raise ValueError("attachment cancelled")
                         path, display_name = await self._receive_attachment(job, item, photo)
@@ -2277,10 +2381,18 @@ class Bridge(CommandHandlers):
                         total_bytes += path.stat().st_size
                         if total_bytes > MAX_ALBUM_BYTES:
                             raise ValueError("album too large")
-                except (ValueError, OSError):
+                except (ValueError, OSError) as error:
                     self._cleanup_attachments(job)
-                    self.queue_reply(chat_id, "🛑 已取消附件接收，没有启动任务。" if job.cancel.is_set() else
-                                     "⚠️ 附件未接收：仅支持截图或常见的文本、日志、代码文件，单文件最大 10MB；本组没有启动任务。")
+                    reason = str(error)
+                    if job.cancel.is_set():
+                        message = "🛑 已取消附件接收，没有启动任务。"
+                    elif reason in {"oversized file", "album too large"}:
+                        message = "⚠️ 附件过大：单文件最多 10 MB，整组最多 30 MB；本组没有启动任务。"
+                    elif reason == "unsupported document":
+                        message = "⚠️ 不支持这种附件格式，请发送截图或常见的文本、日志、代码文件；本组没有启动任务。"
+                    else:
+                        message = "⚠️ 附件接收失败，请检查网络、文件信息和服务器存储后重新发送；本组没有启动任务。"
+                    self.queue_reply(chat_id, message)
                     return
                 instruction = text or "请读取并分析该附件，说明发现的问题和建议。"
                 paths = "\n".join(f"- {name}: {path}" for path, name in received)
@@ -2430,15 +2542,20 @@ class Bridge(CommandHandlers):
                         raise TelegramError()
                     if not self.polling_ready:
                         self.polling_ready = True
-                        if self.ready_file is not None:
+                        self._ready_at = time.time()
+                        LOG.info("POLLING_READY pid=%s", os.getpid())
+                    if self.ready_file is not None:
+                        try:
                             atomic_json(self.ready_file, {
                                 "pid": os.getpid(),
                                 "initialized": True,
                                 "polling_ready": True,
                                 "started_at": self._started_at,
-                                "ready_at": time.time(),
+                                "ready_at": self._ready_at,
+                                "last_poll_at": time.time(),
                             })
-                        LOG.info("POLLING_READY pid=%s", os.getpid())
+                        except (OSError, ValueError):
+                            LOG.warning("health_marker_write_failed")
                     await self.consume_updates(updates)
                     backoff = 1.0
                 except TelegramError as error:
