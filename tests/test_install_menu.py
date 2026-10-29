@@ -56,6 +56,51 @@ class InstallMenuTests(unittest.TestCase):
             self.assertEqual(r.returncode, 0)
             self.assertIn(f"NEW_PROXY={expected}", r.stdout)
 
+    def bootstrap_proxy(self, symlink=False):
+        with tempfile.TemporaryDirectory() as temp:
+            script = r'''
+source "$1"
+RELEASES="$2/releases"
+PROXY_TEST_MODE="$3"
+mkdir -p "$RELEASES"
+root_dir() { :; }
+validate_release_files() { :; }
+git() {
+  case "$*" in
+    *" init -q "*)
+      PROXY_FAKE_STAGE="${@: -1}"
+      mkdir "$PROXY_FAKE_STAGE/.git"
+      ;;
+    *" checkout -q "*)
+      : > "$PROXY_FAKE_STAGE/proxy_manager.py"
+      if [[ "$PROXY_TEST_MODE" == 'symlink' ]]; then
+        ln -s /etc/passwd "$PROXY_FAKE_STAGE/proxy_node.py"
+      else
+        : > "$PROXY_FAKE_STAGE/proxy_node.py"
+      fi
+      ;;
+    *" rev-parse HEAD"*) printf '%040d\n' 1 ;;
+  esac
+}
+execute_proxy_helper() { test -f "$1/proxy_node.py"; printf 'BOOTSTRAP_HELPER_OK\n'; }
+run_proxy_setup
+'''
+            r = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp,
+                                "symlink" if symlink else "normal"],
+                               capture_output=True, text=True, timeout=5)
+            self.assertEqual(list((Path(temp) / "releases").iterdir()), [])
+            return r
+
+    def test_proxy_bootstraps_without_old_release(self):
+        r = self.bootstrap_proxy()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("BOOTSTRAP_HELPER_OK", r.stdout)
+
+    def test_proxy_bootstrap_rejects_symlink_before_execution(self):
+        r = self.bootstrap_proxy(symlink=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("BOOTSTRAP_HELPER_OK", r.stdout)
+
     def test_zero_choice(self):
         r = self.menu("0\n")
         self.assertEqual(r.returncode, 0)

@@ -268,7 +268,8 @@ def ready() -> bool:
     pid = result.stdout.strip()
     if not pid.isdecimal() or pid == "0":
         return False
-    return run("/usr/bin/python3", "-E", "-s", "-B", "/opt/agy-telegram-remote/manage.py",
+    helper = Path(__file__).resolve().with_name("manage.py")
+    return run("/usr/bin/python3", "-E", "-s", "-B", str(helper),
                "check-ready", "--file", "/run/agy-telegram-remote/ready.json", "--pid", pid,
                check=False, timeout=10).returncode == 0
 
