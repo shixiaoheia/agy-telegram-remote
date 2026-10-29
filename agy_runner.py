@@ -93,6 +93,16 @@ def _reject_constant(value: str) -> None:
     raise ValueError("Non-finite JSON value")
 
 
+def _count(value: object) -> int:
+    """Ignore malformed or implausibly large optional counters."""
+    if type(value) is int:
+        return value if 0 <= value <= 2**63 - 1 else 0
+    if isinstance(value, str) and re.fullmatch(r"[0-9]{1,19}", value):
+        number = int(value)
+        return number if number <= 2**63 - 1 else 0
+    return 0
+
+
 def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
     """Only a complete JSON SUCCESS envelope with nonempty text is success."""
     diagnostics = stderr.decode("utf-8", errors="replace")
@@ -112,15 +122,17 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
     status = envelope.get("status")
     response = envelope.get("response")
     raw_error = envelope.get("error")
-    conversation_id = str(envelope.get("conversation_id") or "")
-    num_turns = int(envelope.get("num_turns") or 0)
+    conversation_id = envelope.get("conversation_id")
+    conversation_id = (conversation_id if isinstance(conversation_id, str)
+                       and re.fullmatch(r"[A-Za-z0-9._-]{2,128}", conversation_id) else "")
+    num_turns = _count(envelope.get("num_turns"))
     usage = envelope.get("usage")
     input_tokens, output_tokens, thinking_tokens, total_tokens = 0, 0, 0, 0
     if isinstance(usage, dict):
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        thinking_tokens = int(usage.get("thinking_tokens") or 0)
-        total_tokens = int(usage.get("total_tokens") or 0)
+        input_tokens = _count(usage.get("input_tokens"))
+        output_tokens = _count(usage.get("output_tokens"))
+        thinking_tokens = _count(usage.get("thinking_tokens"))
+        total_tokens = _count(usage.get("total_tokens"))
 
     if isinstance(raw_error, str):
         category = classify(raw_error + "\n" + diagnostics)
@@ -200,7 +212,7 @@ def parse_stream_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
             "invalid", detail="agy 未返回完整、有效的事件流结果；任务可能已产生修改。",
             category=classify(stderr.decode("utf-8", errors="replace")), exit_code=exit_code,
         )
-    return parse_result(json.dumps(terminal, ensure_ascii=False).encode("utf-8"), stderr, exit_code)
+    return parse_result(json.dumps(terminal, ensure_ascii=True).encode("utf-8"), stderr, exit_code)
 
 
 def child_environment(home: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -225,7 +237,7 @@ def build_command(settings: Settings, prompt: str, model: str | None = None,
                   mode: str | None = None, stream_json: bool = False) -> list[str]:
     command = [
         str(settings.agy), "--print-timeout", f"{math.ceil(settings.timeout)}s",
-        "--output-format", "stream-json" if stream_json else "json",
+        "--input-format", "stream-json", "--output-format", "stream-json",
     ]
     if settings.skip_permissions:
         command.append("--dangerously-skip-permissions")
@@ -237,7 +249,8 @@ def build_command(settings: Settings, prompt: str, model: str | None = None,
         command.extend(["--effort", effort])
     if mode:
         command.extend(["--mode", mode])
-    return command + ["--print", prompt]
+    # The prompt is sent via stdin, never in the process argument list.
+    return command
 
 
 @dataclass
@@ -483,7 +496,11 @@ class Runner:
             return tuple(models)
         finally:
             if process is not None:
-                if not await cleanup_group(process, grace=self.terminate_grace):
+                try:
+                    cleaned = await cleanup_group(process, grace=self.terminate_grace)
+                except (OSError, RuntimeError):
+                    cleaned = False
+                if not cleaned:
                     self.blocked = True
                 for reader in readers:
                     if not reader.done():
@@ -517,6 +534,8 @@ class Runner:
         task_cancelled = False
         captured = [Capture(), Capture()]
         cleanup_ok = True
+        capture_failed = False
+        input_sent = False
         try:
             spawn = asyncio.create_task(asyncio.create_subprocess_exec(
                 *build_command(self.settings, prompt, model=selected_model or None,
@@ -525,7 +544,7 @@ class Runner:
                                stream_json=progress is not None),
                 cwd=self.settings.workspace,
                 env=child_environment(self.settings.home),
-                stdin=asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
             ))
@@ -537,6 +556,19 @@ class Runner:
                 cancel.set()
                 process = await spawn
             assert process.stdout is not None and process.stderr is not None
+            assert process.stdin is not None
+            async def write_prompt() -> None:
+                nonlocal input_sent
+                try:
+                    message = {"event": "user", "message": {"content": prompt}}
+                    process.stdin.write((json.dumps(message, ensure_ascii=True) + "\n").encode("utf-8"))
+                    await process.stdin.drain()
+                    input_sent = True
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    process.stdin.close()
+            writer = asyncio.create_task(write_prompt())
             overflow = asyncio.Event()
             stdout_reader = (read_stream_events(process.stdout, self.settings.max_output, overflow, progress)
                              if progress is not None
@@ -588,7 +620,7 @@ class Runner:
                             if isinstance(output, Capture):
                                 captured[index] = output
                             else:
-                                cleanup_ok = False
+                                capture_failed = True
                     except asyncio.TimeoutError:
                         # A setsid() descendant may retain pipes outside our group.
                         cleanup_ok = False
@@ -606,6 +638,10 @@ class Runner:
                     transport = getattr(process, "_transport", None)
                     if transport is not None:
                         transport.close()
+                if 'writer' in locals():
+                    if not writer.done():
+                        writer.cancel()
+                    await asyncio.gather(writer, return_exceptions=True)
             for watcher in watchers:
                 watcher.cancel()
             if watchers:
@@ -616,11 +652,13 @@ class Runner:
             result = Result("cleanup_failed", detail="未能确认全部子进程与管道已清理；已暂停接收新任务。",
                             cleanup_ok=False)
         elif result.outcome == "pending" and process is not None:
-            if (captured[0].total > self.settings.max_output
+            if capture_failed or not input_sent:
+                result = Result("invalid", detail="任务输入或输出读取未确认完成；请核对已有修改。")
+            elif (captured[0].total > self.settings.max_output
                     or captured[1].total > min(self.settings.max_output, 262144)):
                 result = Result("output_limit", detail="输出超过上限；没有解析或转发截断数据。")
             else:
-                parser = parse_stream_result if progress is not None else parse_result
+                parser = parse_stream_result
                 result = parser(captured[0].data, captured[1].data, process.returncode or 0)
         result.stdout_bytes = captured[0].total
         result.stderr_bytes = captured[1].total

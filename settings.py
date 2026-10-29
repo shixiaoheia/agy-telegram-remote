@@ -17,7 +17,7 @@ MODEL_RE = re.compile(r"[A-Za-z0-9._-]{2,64}\Z")
 OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
     ("Gemini 4 Argon", "gemini-4-argon-high", "High 深度推理"),
     ("Gemini 4 Argon", "gemini-4-argon-medium", "Medium 推理"),
-    *(("Anthropic Claude", f"claude-{family}-5-5-{level}", f"{family.title()} 5.5 ({level})")
+    *((f"Claude {family.title()} 5.5", f"claude-{family}-5-5-{level}", f"{family.title()} 5.5 ({level})")
       for family in ("sonnet", "opus") for level in ("low", "medium", "high", "max")),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-high", "High 思考 (推荐)"),
     ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-medium", "Medium 思考"),
@@ -46,6 +46,13 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-sonnet-5-5-thinking": "claude-sonnet-5-5-medium",
     "claude-opus-5-5": "claude-opus-5-5-medium",
     "claude-opus-5-5-thinking": "claude-opus-5-5-medium",
+}
+
+# Model-specific capacity policy lives with the catalog, not task dispatch.
+CAPACITY_RESUME_MODELS = frozenset({MODEL_ALIASES["3.8-high"]})
+CAPACITY_FALLBACKS = {
+    MODEL_ALIASES["3.8-low"]: MODEL_ALIASES["3.8-high"],
+    MODEL_ALIASES["3.8-med"]: MODEL_ALIASES["3.8-high"],
 }
 
 

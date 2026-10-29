@@ -58,7 +58,63 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge._run_task(Job(12345, 12345), "one execution only")
         self.runner.run.assert_awaited_once()
 
-    async def test_worker_typeerror_blocks_without_replaying_side_effects(self):
+    async def test_waiting_tasks_run_in_order_only_after_slot_release(self):
+        self.runner.hold = True
+        prompts = []
+        run = self.runner.run
+        async def record(prompt, *args, **kwargs):
+            prompts.append(prompt)
+            return await run(prompt, *args, **kwargs)
+        self.runner.run = record
+        await self.bridge.handle(update("first"))
+        await self.runner.started.wait()
+        first = self.bridge.slot
+        await self.bridge.handle(update("/queue add second"))
+        await self.bridge.handle(update("third", user=67890))
+        self.assertEqual(prompts, ["first"])
+        self.assertEqual(len(self.bridge.waiting_jobs), 2)
+        self.runner.finish.set()
+        await first.worker
+        for _ in range(100):
+            if len(prompts) == 3:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(prompts, ["first", "second", "third"])
+        if self.bridge.slot:
+            await self.bridge.slot.worker
+
+    async def test_queue_limit_and_user_cancel_leave_other_users_entries(self):
+        self.runner.hold = True
+        await self.bridge.handle(update("first"))
+        await self.runner.started.wait()
+        await self.bridge.handle(update("/queue add second"))
+        await self.bridge.handle(update("third", user=67890))
+        await self.bridge.handle(update("/queue add fourth"))
+        await self.bridge.handle(update("fifth", user=67890))
+        self.assertEqual(len(self.bridge.waiting_jobs), 3)
+        await self.bridge.handle(update("/queue cancel"))
+        self.assertEqual([item[0] for item in self.bridge.waiting_jobs], [67890])
+        self.bridge.waiting_jobs.clear()
+
+    async def test_slow_callback_answer_does_not_block_next_update(self):
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        async def slow_answer(*args, **kwargs):
+            entered.set()
+            await gate.wait()
+        self.api.answer_callback_query = slow_answer
+        await asyncio.wait_for(self.bridge.consume_updates([
+            callback_update("progress:expand:expired"),
+            update("/status", update_id=2),
+        ]), 1)
+        await entered.wait()
+        self.assertFalse(gate.is_set())
+        await self.bridge.reply_worker
+        self.assertTrue(self.api.messages)
+        gate.set()
+        await asyncio.gather(*tuple(self.bridge.callback_tasks))
+
+    async def test_worker_typeerror_does_not_replay_or_block_new_tasks(self):
         effects = []
         async def fail(*args, **kwargs):
             effects.append("executed")
@@ -67,9 +123,10 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(update("task"))
         await self.bridge.slot.worker
         self.assertEqual(effects, ["executed"])
-        self.assertTrue(self.runner.blocked)
+        self.assertFalse(self.runner.blocked)
         await self.bridge.handle(update("another task"))
-        self.assertEqual(effects, ["executed"])
+        await self.bridge.slot.worker
+        self.assertEqual(effects, ["executed", "executed"])
 
     async def test_model_cancel_waits_for_cleanup_and_preserves_full_cache(self):
         started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
@@ -256,7 +313,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             return Result("cancelled")
 
         self.runner.run = run
-        with patch("bot.os.execv") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
+        with patch("bot.os._exit") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
             await self.bridge.handle(update("safe task"))
             await asyncio.wait_for(started.wait(), 1)
             job = self.bridge.slot
@@ -276,10 +333,19 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await restart
             execute.assert_called_once()
 
+    async def test_restart_remains_available_after_failed_cleanup(self):
+        self.runner.blocked = True
+        with patch("bot.os._exit") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
+            await self.bridge.handle(update("/restart"))
+            self.assertIsNotNone(self.bridge.restart_task)
+            await self.bridge.restart_task
+            execute.assert_called_once_with(75)
+        self.runner.blocked = False
+
     async def test_restart_rejects_album_model_probe_and_pending_correction(self):
         waiting = asyncio.create_task(asyncio.Event().wait())
         try:
-            with patch("bot.os.execv") as execute:
+            with patch("bot.os._exit") as execute:
                 for field, value in (("pending_album", {"user": 12345}),
                                      ("album_task", waiting), ("model_check_task", waiting)):
                     setattr(self.bridge, field, value)
@@ -290,9 +356,6 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 await self.bridge.handle(update("/restart"))
                 self.assertIsNone(self.bridge.restart_task)
                 self.bridge.steer_tasks.clear()
-                self.runner.blocked = True
-                await self.bridge.handle(update("/restart"))
-                self.assertIsNone(self.bridge.restart_task)
                 execute.assert_not_called()
         finally:
             self.runner.blocked = False
@@ -300,7 +363,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(waiting, return_exceptions=True)
 
     async def test_restart_reservation_blocks_new_work_and_duplicate_restarts(self):
-        with patch("bot.os.execv") as execute, patch("bot.RESTART_DELAY_SECONDS", 0.02):
+        with patch("bot.os._exit") as execute, patch("bot.RESTART_DELAY_SECONDS", 0.02):
             await self.bridge.handle(update("/restart"))
             restart = self.bridge.restart_task
             await self.bridge.handle(update("a new task"))
@@ -319,7 +382,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(self.bridge._restart_pending())
 
     async def test_restart_checks_for_new_busy_state_immediately_before_exec(self):
-        with patch("bot.os.execv") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
+        with patch("bot.os._exit") as execute, patch("bot.RESTART_DELAY_SECONDS", 0):
             await self.bridge.handle(update("/restart"))
             restart = self.bridge.restart_task
             self.bridge.slot = Job(12345, 12345)
@@ -332,7 +395,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.bridge.slot = None
 
     async def test_shutdown_cancels_pending_restart_without_exec(self):
-        with patch("bot.os.execv") as execute:
+        with patch("bot.os._exit") as execute:
             await self.bridge.handle(update("/restart"))
             restart = self.bridge.restart_task
             self.bridge.stop.set()

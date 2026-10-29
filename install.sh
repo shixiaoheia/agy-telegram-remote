@@ -534,7 +534,7 @@ main() {
   rm -rf -- "$STAGE/.git"
   find "$STAGE" -type d -exec chmod 0755 {} +
   find "$STAGE" -type f -exec chmod 0644 {} +
-  for required in bot.py settings.py state_store.py telegram_api.py telegram_formatting.py agy_runner.py manage.py; do
+  for required in bot.py command_handlers.py settings.py state_store.py telegram_api.py telegram_formatting.py agy_runner.py manage.py; do
     [[ -f "$STAGE/$required" ]] || fail "所选提交缺少 $required；请先上传完整新版。"
   done
   echo "采用提交：$commit"

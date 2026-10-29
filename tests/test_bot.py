@@ -213,7 +213,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.runner.started.wait()
         await self.handle(update("other task", user=67890))
         self.assertEqual(self.runner.calls, 1)
-        self.assertIn("已有任务", self.api.messages[-1][1])
+        self.assertIn("等待队列", self.api.messages[-1][1])
         self.runner.finish.set()
         await self.finish_job()
 
@@ -494,10 +494,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.initialize()
         self.assertEqual(self.runner.calls, 0)
 
-    async def test_storage_failure_blocks_new_tasks(self):
+    async def test_storage_failure_does_not_block_new_tasks(self):
         with patch.object(self.store, "save", side_effect=OSError("disk full")):
             await self.handle(update("task"))
-        self.assertTrue(self.runner.blocked)
+        self.assertFalse(self.runner.blocked)
         self.assertEqual(self.runner.calls, 0)
 
     async def test_invalid_or_oversized_task_not_launched(self):
@@ -1407,10 +1407,10 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
         self.bridge.slot = None
 
         # Idle admin triggers restart
-        with patch("bot.os.execv") as mock_execv:
+        with patch("bot.os._exit") as mock_execv:
             await self.bridge.handle(update("/restart", user=12345))
             await self.bridge.reply_worker
-            self.assertIn("守护进程正在重新载入并启动", self.api.messages[-1][1])
+            self.assertIn("由 systemd 重新启动", self.api.messages[-1][1])
             await asyncio.sleep(1.0)
             mock_execv.assert_called_once()
 

@@ -177,10 +177,14 @@ class ControlPolishTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.sent_count, 1)
 
     async def test_probe_reuses_card_and_zero_success_is_warning(self):
+        self.runner.hold = True
         self.runner.result = Result("error", category="network")
         self.store.set_model(12345, "gemini-3.8-flash-high")
         await self.bridge.handle(callback_update("probe:current"))
-        await self.bridge.model_check_task
+        await self.runner.started.wait()
+        task = self.bridge.model_check_task
+        self.runner.finish.set()
+        await task
         await self.drain()
         self.assertEqual(self.api.sent_count, 1)
         final = self.api.messages[0]
