@@ -12,6 +12,13 @@ import proxy_manager as manager
 
 
 class ProxyManagerTests(unittest.TestCase):
+    def test_ready_uses_trusted_manager_release(self):
+        show = subprocess.CompletedProcess([], 0, stdout="123\n")
+        with patch.object(manager.subprocess, "run", return_value=show), \
+             patch.object(manager, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.assertTrue(manager.ready())
+        self.assertEqual(run.call_args.args[4], str(Path(manager.__file__).resolve().with_name("manage.py")))
+
     def test_service_environment_is_private_and_loopback_only(self):
         env = manager.env_text(32123).decode()
         self.assertIn("HTTPS_PROXY=http://127.0.0.1:32123", env)

@@ -415,6 +415,37 @@ confirm_service_stop() {
   done
 }
 
+# A previous installation may not contain the proxy helper, and updating it can
+# itself require a proxy. Fetch a fresh root-owned helper before changing the
+# existing service; do not execute Python from the old installation.
+run_proxy_setup() (
+  local proxy_stage commit
+  command -v git >/dev/null || fail '配置节点需要 git；请先安装 git 并确保能访问 GitHub。'
+  root_dir "$RELEASES"
+  proxy_stage="$(mktemp -d "$RELEASES/.proxy-stage-XXXXXXXX")"
+  trap 'rm -rf -- "$proxy_stage"' EXIT
+  git -c core.hooksPath=/dev/null init -q "$proxy_stage"
+  git -c core.hooksPath=/dev/null -c protocol.file.allow=never -C "$proxy_stage" \
+    fetch -q --depth=1 "$REPO" "$REF"
+  git -c core.hooksPath=/dev/null -C "$proxy_stage" checkout -q --detach FETCH_HEAD
+  commit="$(git -C "$proxy_stage" rev-parse HEAD)"
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail '无法确认代理管理程序版本。'
+  [[ -z "$(find "$proxy_stage" -path "$proxy_stage/.git" -prune -o -type l -print -quit)" ]] \
+    || fail '代理管理程序含符号链接，已停止。'
+  rm -rf -- "$proxy_stage/.git"
+  find "$proxy_stage" -type d -exec chmod 0755 {} +
+  find "$proxy_stage" -type f -exec chmod 0644 {} +
+  validate_release_files "$proxy_stage"
+  [[ -f "$proxy_stage/proxy_manager.py" && -f "$proxy_stage/proxy_node.py" ]] \
+    || fail '所选版本不支持代理节点。'
+  echo "代理管理程序版本：$commit"
+  execute_proxy_helper "$proxy_stage"
+)
+
+execute_proxy_helper() {
+  /usr/bin/python3 -E -s -B "$1/proxy_manager.py"
+}
+
 needs_auth() {
   [[ "$1" -eq 10 || "$2" == 1 || "$3" == 1 ]]
 }
@@ -597,26 +628,11 @@ main() {
     return
   fi
   if [[ "$MODE" == proxy ]]; then
-    [[ -L "$APP" ]] || fail '请先安装或更新到支持代理节点的版本。'
-    local proxy_release
-    proxy_release="$(readlink -f -- "$APP")"
-    [[ "$proxy_release" == "$RELEASES/"* && -d "$proxy_release" \
-       && "$(stat -c %u "$proxy_release")" == 0 \
-       && -f "$proxy_release/proxy_manager.py" && ! -L "$proxy_release/proxy_manager.py" \
-       && -f "$proxy_release/proxy_node.py" && ! -L "$proxy_release/proxy_node.py" \
-       && "$(stat -c %u "$proxy_release/proxy_manager.py")" == 0 \
-       && "$(stat -c %u "$proxy_release/proxy_node.py")" == 0 ]] \
-      || fail '请先更新到支持代理节点的版本。'
-    local proxy_perms
-    for proxy_perms in "$(stat -c %a "$proxy_release")" \
-      "$(stat -c %a "$proxy_release/proxy_manager.py")" "$(stat -c %a "$proxy_release/proxy_node.py")"; do
-      (( (8#$proxy_perms & 0022) == 0 )) || fail '代理程序可被非 root 修改，已停止。'
-    done
     if systemctl is-active --quiet "$SERVICE" 2>/dev/null && ! confirm_service_stop; then
       echo '已取消更换节点，原服务保持运行。'
       return 0
     fi
-    /usr/bin/python3 -E -s -B "$proxy_release/proxy_manager.py"
+    run_proxy_setup
     return
   fi
 
