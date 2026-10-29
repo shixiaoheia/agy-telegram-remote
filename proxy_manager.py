@@ -262,6 +262,27 @@ def ready() -> bool:
                check=False, timeout=10).returncode == 0
 
 
+def service_proxy_matches(port: int) -> bool:
+    result = subprocess.run(["systemctl", "show", SERVICE, "-p", "MainPID", "--value"],
+                            capture_output=True, text=True, timeout=10, check=False)
+    pid = result.stdout.strip()
+    if not pid.isdecimal() or pid == "0":
+        return False
+    try:
+        data = (Path("/proc") / pid / "environ").read_bytes()
+    except OSError:
+        return False
+    if len(data) > 1024 * 1024:
+        return False
+    entries = data.split(b"\0")
+    proxy = f"http://127.0.0.1:{port}".encode()
+    for key in (b"HTTP_PROXY", b"HTTPS_PROXY", b"http_proxy", b"https_proxy"):
+        values = [entry[len(key) + 1:] for entry in entries if entry.startswith(key + b"=")]
+        if values != [proxy]:
+            return False
+    return True
+
+
 def apply(config: dict, port: int) -> None:
     """Switch only after a candidate probe. Roll back both services on failure."""
     secure_dir(CONFIG_DIR, 0o700)
@@ -301,6 +322,8 @@ def apply(config: dict, port: int) -> None:
                 time.sleep(0.5)
             else:
                 raise ProxyError("机器人未通过就绪检查。")
+            if not service_proxy_matches(port):
+                raise ProxyError("机器人未使用新代理，可能有其他服务配置覆盖了代理设置。")
     except BaseException:
         failures = []
 

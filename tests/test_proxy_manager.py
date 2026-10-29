@@ -36,7 +36,8 @@ class ProxyManagerTests(unittest.TestCase):
              patch.object(manager, "enabled", return_value=True), \
              patch.object(manager, "run", side_effect=fake_run), \
              patch.object(manager, "check_connectivity") as check, \
-             patch.object(manager, "ready", return_value=True):
+             patch.object(manager, "ready", return_value=True), \
+             patch.object(manager, "service_proxy_matches", return_value=True):
             manager.apply({"outbounds": []}, 32123)
         self.assertIn(("systemctl", "enable", "--now", manager.PROXY_SERVICE), calls)
         self.assertIn(("systemctl", "start", manager.SERVICE), calls)

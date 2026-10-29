@@ -678,6 +678,9 @@ main() {
   if [[ "$NEW_PROXY" == 1 ]]; then
     [[ -f "$STAGE/proxy_manager.py" && -f "$STAGE/proxy_node.py" ]] \
       || fail '所选版本不支持代理节点。'
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+      fail '检测到同名服务正在运行，请先检查已有安装，再通过菜单更换节点。'
+    fi
     /usr/bin/python3 -E -s -B "$STAGE/proxy_manager.py" || fail '节点配置未完成，安装已停止。'
     load_managed_proxy
   fi

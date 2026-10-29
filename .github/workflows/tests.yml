@@ -84,4 +84,9 @@ jobs:
           tar -xOzf "$archive" "sing-box-1.14.4-linux-${ARCH}/sing-box" > "$RUNNER_TEMP/sing-box"
           chmod 755 "$RUNNER_TEMP/sing-box"
           AGY_TEST_SING_BOX="$RUNNER_TEMP/sing-box" python3 -m unittest tests.test_proxy_node -v
+      - name: Verify systemd switch and rollback in disposable runner
+        timeout-minutes: 3
+        run: |
+          sudo env GITHUB_ACTIONS=true CI=true AGY_TEST_ISOLATED_SYSTEMD=1 \
+            AGY_TEST_SING_BOX="$RUNNER_TEMP/sing-box" /usr/bin/python3 scripts/test_proxy_systemd.py
 
