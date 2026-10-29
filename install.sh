@@ -271,6 +271,7 @@ uninstall() {
       echo '将保留独立安装或来源不明的 agy 与 Google 登录资料。'
     fi
     echo '保留工作目录及用户文件、systemd 自定义配置、系统日志和 BotFather 中的 Bot。'
+    echo '自定义工作目录中的附件缓存可能保留，请在卸载后自行检查。'
   else
     echo '将移除 systemd 服务；程序、配置、工作目录及 Google 登录会保留。'
   fi

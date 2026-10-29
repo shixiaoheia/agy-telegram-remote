@@ -192,7 +192,7 @@ curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/mai
 - 备份文件与 Bot 接收附件的临时目录；
 - 如果有本安装器的安装标记，还会删除该 `agy` 和它的 Google 登录资料；独立安装或来源不明的 agy 和资料会保留。
 
-为了避免误删你的项目，`/root` 工作目录和里面的代码、文件不会删除。自定义 systemd 配置、系统日志和不含凭据的部署锁文件也会保留。BotFather 里创建的 Telegram Bot 也不会被删除；如不再需要，请到 BotFather 手动删除。下载到当前目录的 `install.sh` 需自行删除。
+为了避免误删你的项目，`/root` 工作目录和里面的代码、文件不会删除。自定义工作目录下的 `.agy-telegram-inputs` 可能保留，请自行检查；自定义 systemd 配置、系统日志和不含凭据的部署锁文件也会保留。BotFather 里创建的 Telegram Bot 也不会被删除；如不再需要，请到 BotFather 手动删除。下载到当前目录的 `install.sh` 需自行删除。
 
 ## 常见问题
 

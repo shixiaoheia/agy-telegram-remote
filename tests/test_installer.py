@@ -114,6 +114,26 @@ uninstall
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("已取消", result.stdout)
 
+    def test_purge_rejects_symlink_before_stopping_service(self):
+        script = r'''
+source "$1"
+BASE="$2"; UNIT="$BASE/service"; PURGE=1
+RELEASES="$BASE/releases"; CONFIG_DIR="$BASE/config"; AGY_MANAGED_MARKER="$CONFIG_DIR/marker"
+STATE_BASE="$BASE/state"; BACKUPS="$BASE/backups"; RUNTIME_DIR="$BASE/runtime"; INPUT_DIR="$BASE/inputs"
+mkdir "$BASE/outside"
+ln -s "$BASE/outside" "$STATE_BASE"
+touch "$UNIT"
+systemctl() { echo invoked > "$BASE/invoked"; }
+echo y | uninstall
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("符号链接", result.stderr)
+            self.assertTrue((Path(temp) / "service").exists())
+            self.assertFalse((Path(temp) / "invoked").exists())
+
     def test_bash_syntax(self):
         subprocess.run(["bash", "-n", str(ROOT / "install.sh")], check=True)
 
