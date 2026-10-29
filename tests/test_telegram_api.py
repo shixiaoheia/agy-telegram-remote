@@ -15,6 +15,15 @@ from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 
 class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # The test server is local even when the host routes Internet traffic
+        # through a proxy. Make that boundary explicit and restore the real
+        # environment after each test.
+        local_proxy = patch.dict('os.environ', {
+            'HTTP_PROXY': 'http://127.0.0.1:9', 'http_proxy': 'http://127.0.0.1:9',
+            'NO_PROXY': '127.0.0.1,localhost', 'no_proxy': '127.0.0.1,localhost',
+        })
+        local_proxy.start()
+        self.addCleanup(local_proxy.stop)
         self.responses = []
         self.requests = []
         self.connections = []
