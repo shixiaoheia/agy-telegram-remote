@@ -477,7 +477,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_drops_backlog_and_recovers_interruption(self):
         self.api.backlog = [update("old task", update_id=200)]
         self.store.save(12345, {"outcome": "running"})
-        await self.bridge.initialize()
+        with self.assertLogs("agy_remote", level="WARNING") as logs:
+            await self.bridge.initialize()
+        self.assertTrue(any("startup_backlog_discarded" in line for line in logs.output))
         self.assertEqual(self.runner.calls, 0)
         self.assertEqual(self.bridge.offset, 201)
         self.assertEqual(self.store.load(12345)["outcome"], "interrupted")

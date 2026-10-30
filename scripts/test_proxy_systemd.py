@@ -131,6 +131,21 @@ try:
     environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
     assert f"HTTPS_PROXY=http://127.0.0.1:{local_port}".encode() in environment
     old_config = pm.CONFIG.read_bytes()
+    # A required proxy that cannot start must prevent the bot from starting.
+    command("systemctl", "stop", bot_name)
+    command("systemctl", "stop", proxy_name)
+    engine.chmod(0o644)
+    command("systemctl", "reset-failed", proxy_name, check=False)
+    command("systemctl", "reset-failed", bot_name, check=False)
+    failed = command("systemctl", "start", bot_name, check=False)
+    if failed.returncode == 0 or pm.active(bot_name):
+        raise AssertionError("Bot started with a failed required proxy")
+    engine.chmod(0o755)
+    command("systemctl", "reset-failed", proxy_name, check=False)
+    command("systemctl", "reset-failed", bot_name, check=False)
+    command("systemctl", "start", bot_name)
+    pm.wait_listener(local_port)
+    connectivity(local_port)
     bad = build_config(parse_node(f"vless://{uuid}@127.0.0.1:{bad_upstream_port}"), bad_port)
     try:
         pm.apply(bad, bad_port)
