@@ -45,10 +45,15 @@ class ProxyManagerTests(unittest.TestCase):
         files = self.old_snapshot()
         good = {k: "http://127.0.0.1:32123" for k in
                 ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
+        good.update({"NO_PROXY": "localhost,127.0.0.1,::1",
+                     "no_proxy": "localhost,127.0.0.1,::1", "ALL_PROXY": "", "all_proxy": ""})
         with patch.object(manager, "read_managed", side_effect=lambda p: files.get(p)), \
              patch.object(manager, "wait_listener") as listener:
             with self.assertRaises(manager.ProxyError):
                 manager.check_bot_proxy_environment({})
+            listener.assert_not_called()
+            with self.assertRaises(manager.ProxyError):
+                manager.check_bot_proxy_environment(dict(good, NO_PROXY="*"))
             listener.assert_not_called()
             listener.side_effect = manager.ProxyError("listener unavailable")
             with self.assertRaises(manager.ProxyError):

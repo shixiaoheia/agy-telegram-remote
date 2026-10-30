@@ -401,9 +401,8 @@ def check_bot_proxy_environment(environ: dict[str, str] | None = None) -> None:
             raise ProxyError("上次代理切换未完成；请先通过菜单 4 恢复。")
         return  # A direct or externally managed installation remains unchanged.
     environ = os.environ if environ is None else environ
-    expected = f"http://127.0.0.1:{port}"
-    if any(environ.get(key) != expected for key in
-           ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")):
+    expected = dict(line.split("=", 1) for line in env_text(port).decode("ascii").splitlines())
+    if any(environ.get(key) != value for key, value in expected.items()):
         raise ProxyError("代理配置存在但机器人没有加载代理环境；请检查服务配置。")
     try:
         wait_listener(port, timeout=10)
