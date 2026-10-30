@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -83,6 +84,27 @@ class ProxyManagerTests(unittest.TestCase):
                           return_value=subprocess.CompletedProcess([], 7, stdout="000")):
             with self.assertRaisesRegex(manager.ProxyError, "Google"):
                 manager.check_connectivity(32123)
+
+    def test_candidate_telegram_check_uses_candidate_proxy_without_credentials_in_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.env"
+            config.write_text("fixture", encoding="utf-8")
+            with patch.object(manager, "CONFIG_DIR", Path(directory)), \
+                 patch.object(manager.subprocess, "run", return_value=subprocess.CompletedProcess(
+                     [], 0, stdout=b"TELEGRAM_CHECK_OK\n")) as run:
+                self.assertTrue(manager.check_telegram_identity(32123))
+            args, kwargs = run.call_args
+            self.assertIn("check-token", args[0])
+            self.assertNotIn("fixture", args[0])
+            self.assertEqual(kwargs["env"]["HTTPS_PROXY"], "http://127.0.0.1:32123")
+            self.assertEqual(kwargs["env"]["ALL_PROXY"], "")
+
+    def test_candidate_telegram_check_skips_missing_configuration(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(manager, "CONFIG_DIR", Path(directory)), \
+             patch.object(manager.subprocess, "run") as run:
+            self.assertIsNone(manager.check_telegram_identity(32123))
+            run.assert_not_called()
 
     def test_successful_switch_starts_proxy_and_checks_bot_ready(self):
         old = self.old_snapshot()
