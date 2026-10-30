@@ -130,6 +130,8 @@ try:
     pid = subprocess.check_output(["systemctl", "show", bot_name, "-p", "MainPID", "--value"], text=True).strip()
     environment = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
     assert f"HTTPS_PROXY=http://127.0.0.1:{local_port}".encode() in environment
+    parsed_environment = dict(entry.decode().split("=", 1) for entry in environment if b"=" in entry)
+    pm.check_bot_proxy_environment(parsed_environment)
     old_config = pm.CONFIG.read_bytes()
     # A required proxy that cannot start must prevent the bot from starting.
     command("systemctl", "stop", bot_name)
