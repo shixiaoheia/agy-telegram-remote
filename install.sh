@@ -67,6 +67,7 @@ usage() {
   bash install.sh --uninstall              安全卸载服务（仅停止并移除服务，保留数据与配置）
   bash install.sh --uninstall --purge      彻底清理本项目组件（需输入 y 确认）
   bash install.sh --proxy                  添加或更换本项目代理节点
+  bash install.sh --diagnose               检查机器人和代理服务状态
   bash install.sh --help                   显示此帮助说明
 EOF
 }
@@ -93,10 +94,11 @@ choose_operation() {
   fi
   echo '  3) 彻底卸载（查看清理范围并确认）'
   echo '  4) 添加或更换代理节点'
+  echo '  5) 检查机器人和代理状态'
   echo '  0) 退出'
   echo
   while true; do
-    printf '请输入选项 [0/1/2/3/4]： '
+    printf '请输入选项 [0/1/2/3/4/5]： '
     if IFS= read -r choice; then
       case "$choice" in
         1) MODE=install; return 0 ;;
@@ -104,12 +106,13 @@ choose_operation() {
         2) MODE=install; return 0 ;;
         3) MODE=uninstall; PURGE=1; return 0 ;;
         4) MODE=proxy; return 0 ;;
+        5) MODE=diagnose; return 0 ;;
         0)
           MODE="exit"
           echo '已退出，未开始任何安装或卸载操作。'
           return 0
           ;;
-        *) echo '请输入 1、2、3、4 或 0，然后回车。' ;;
+        *) echo '请输入 1、2、3、4、5 或 0，然后回车。' ;;
       esac
     else
       rc=$?
@@ -435,11 +438,29 @@ installed_proxy_helper() {
 }
 
 run_proxy_setup() (
-  local proxy_stage commit installed
+  local proxy_stage commit installed answer installed_commit
   if installed="$(installed_proxy_helper)"; then
-    echo '使用已安装的安全代理管理程序。'
-    execute_proxy_helper "$installed"
-    return
+    installed_commit=''
+    if [[ -f "$installed/.commit" && ! -L "$installed/.commit" ]]; then
+      IFS= read -r installed_commit < "$installed/.commit" || true
+      [[ "$installed_commit" =~ ^[0-9a-f]{40}$ ]] || installed_commit=''
+    fi
+    echo "已安装的代理管理程序版本：${installed_commit:-未知}（可离线使用）。"
+    while true; do
+      if ! IFS= read -r -p '下载所选版本的代理管理程序？[y/N]： ' answer; then answer='n'; echo; fi
+      case "$answer" in
+        ''|n|N)
+          echo '使用已安装的安全代理管理程序。'
+          execute_proxy_helper "$installed"
+          return
+          ;;
+        y|Y)
+          echo '将下载代理管理程序；若网络失败，可重新进入菜单 4 使用已安装版本。'
+          break
+          ;;
+        *) echo '请输入 y 或 n，直接回车使用已安装版本。' ;;
+      esac
+    done
   fi
   command -v git >/dev/null || fail '配置节点需要 git；请先安装 git 并确保能访问 GitHub。'
   # Existing service environments are not inherited by an SSH shell. Reuse
@@ -474,6 +495,45 @@ execute_proxy_helper() {
   /usr/bin/python3 -E -s -B "$1/proxy_manager.py"
 }
 
+diagnose() {
+  local state pid invocation log
+  state="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+  pid="$(systemctl show "$SERVICE" -p MainPID --value 2>/dev/null || true)"
+  invocation="$(systemctl show "$SERVICE" -p InvocationID --value 2>/dev/null || true)"
+  echo "机器人服务状态：${state:-未知}"
+  if [[ -e "$CONFIG_DIR/proxy.json" || -e "$CONFIG_DIR/proxy.env" ]]; then
+    if systemctl is-active --quiet agy-telegram-proxy.service 2>/dev/null; then
+      echo '项目代理服务：运行中。'
+    else
+      echo '项目代理服务：未运行；请检查代理服务及菜单 4 的节点配置。'
+    fi
+  else
+    echo '项目代理：未检测到项目管理的配置。'
+  fi
+  if [[ "$state" == active && "$pid" =~ ^[1-9][0-9]*$ && -f "$APP/manage.py" ]]; then
+    if /usr/bin/python3 -E -s -B "$APP/manage.py" check-health \
+      --file /run/agy-telegram-remote/ready.json --pid "$pid" >/dev/null 2>&1; then
+      echo 'Telegram 轮询：近期正常。'
+    else
+      echo 'Telegram 轮询：暂未确认，请检查服务日志和网络。'
+    fi
+  fi
+  if [[ "$invocation" =~ ^[0-9a-f]{32}$ ]] && command -v journalctl >/dev/null; then
+    log="$(journalctl -u "$SERVICE" "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat 2>/dev/null || true)"
+    if [[ "$state" != active && "$log" == *'startup_or_poll_failed: Telegram code=409'* ]]; then
+      echo 'Telegram 409：同一机器人可能有其他实例正在接收消息；请检查其他设备，避免反复启动。'
+    elif [[ "$state" != active && ( "$log" == *'startup_or_poll_failed: Telegram code=401'* || "$log" == *'startup_or_poll_failed: Telegram code=403'* ) ]]; then
+      echo 'Telegram 授权失败：请检查机器人 Token 和 BotFather 中的状态。'
+    elif [[ "$state" != active && "$log" == *'startup_failed: managed proxy unavailable or not loaded'* ]]; then
+      echo '项目代理未就绪或未加载：请检查代理服务、节点配置及服务配置文件。'
+    fi
+    if [[ "$log" == *'startup_backlog_discarded:'* ]]; then
+      echo '本次启动时丢弃了离线期间的积压消息；这些消息不会自动执行。'
+    fi
+  fi
+  echo '日志命令：journalctl -u agy-telegram-remote -n 80 --no-pager'
+}
+
 needs_auth() {
   [[ "$1" -eq 10 || "$2" == 1 || "$3" == 1 ]]
 }
@@ -487,6 +547,9 @@ validate_release_files() {
   # this module. Require it only when the selected release imports it.
   if grep -Eq '^[[:space:]]*(from[[:space:]]+command_handlers[[:space:]]+import|import[[:space:]]+command_handlers([[:space:]]|$))' "$stage/bot.py"; then
     [[ -f "$stage/command_handlers.py" ]] || fail '所选提交缺少 command_handlers.py。'
+  fi
+  if grep -Eq '^[[:space:]]*(from[[:space:]]+proxy_manager[[:space:]]+import|import[[:space:]]+proxy_manager([[:space:]]|$))' "$stage/bot.py"; then
+    [[ -f "$stage/proxy_manager.py" && -f "$stage/proxy_node.py" ]] || fail '所选提交缺少代理启动检查所需文件。'
   fi
 }
 
@@ -614,6 +677,7 @@ main() {
       --reauth) REAUTH=1; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
       --proxy) MODE=proxy ;;
+      --diagnose) MODE=diagnose ;;
       --purge) PURGE=1 ;;
       --ref)
         (( $# >= 2 )) || fail '--ref 缺少值。'
@@ -661,6 +725,10 @@ main() {
       return 0
     fi
     run_proxy_setup
+    return
+  fi
+  if [[ "$MODE" == diagnose ]]; then
+    diagnose
     return
   fi
 

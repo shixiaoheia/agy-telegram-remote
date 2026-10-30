@@ -237,7 +237,10 @@ def install_engine() -> None:
                 with os.fdopen(fd2, "wb") as out:
                     shutil.copyfileobj(source, out)
                     os.fchmod(out.fileno(), 0o755)
+                    out.flush()
+                    os.fsync(out.fileno())
                 os.replace(executable, ENGINE)
+                sync_directory(ENGINE_DIR)
             finally:
                 with contextlib.suppress(FileNotFoundError):
                     os.unlink(executable)
@@ -253,12 +256,54 @@ def ephemeral_port() -> int:
 
 
 def check_connectivity(port: int) -> None:
-    for url in ("https://antigravity.google/", "https://api.telegram.org/"):
-        result = run("curl", "--silent", "--show-error", "--output", "/dev/null",
-                     "--max-time", "20", "--noproxy", "", "--proxy",
-                     f"http://127.0.0.1:{port}", url, check=False, timeout=25)
-        if result.returncode:
-            raise ProxyError("节点无法连接 Google 或 Telegram，请检查节点和网络。")
+    for label, url in (("Google", "https://antigravity.google/"),
+                       ("Telegram", "https://api.telegram.org/")):
+        result = subprocess.run(
+            ["curl", "--silent", "--show-error", "--output", "/dev/null",
+             "--write-out", "%{http_code}", "--max-time", "20", "--noproxy", "",
+             "--proxy", f"http://127.0.0.1:{port}", url],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=False, timeout=25,
+        )
+        if result.returncode or not re.fullmatch(r"[1-5][0-9]{2}", result.stdout):
+            raise ProxyError(f"节点无法连接 {label}，请检查节点和网络。")
+        if int(result.stdout) >= 400:
+            print(f"{label} 已建立 HTTPS 连接，但返回 HTTP {result.stdout}；请检查服务、地区或网络。")
+        else:
+            print(f"{label} HTTPS 连接正常（HTTP {result.stdout}）。")
+
+
+def check_telegram_identity(port: int) -> bool | None:
+    """Check an existing bot's identity through the candidate without polling."""
+    config = CONFIG_DIR / "config.env"
+    if not config.exists() and not config.is_symlink():
+        print("Telegram 身份验证：尚无机器人配置，安装时会继续验证。")
+        return None
+    env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "LC_ALL", "TZ")
+           if key in os.environ}
+    address = f"http://127.0.0.1:{port}"
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        env[key] = address
+    env["NO_PROXY"] = env["no_proxy"] = "localhost,127.0.0.1,::1"
+    env["ALL_PROXY"] = env["all_proxy"] = ""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-E", "-s", "-B", str(Path(__file__).resolve().with_name("manage.py")),
+             "check-token", "--config", str(config)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=env, check=False, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        print("Telegram 身份验证：暂未完成，请检查代理和网络。")
+        return False
+    if result.returncode == 0 and b"TELEGRAM_CHECK_OK" in result.stdout.splitlines():
+        print("Telegram 身份验证：通过（不测试消息接收冲突）。")
+        return True
+    if result.returncode == 16:
+        print("Telegram 身份验证：当前机器人配置了 webhook，请人工检查。")
+    else:
+        print("Telegram 身份验证：未通过，请检查 Token、代理和网络。")
+    return False
 
 
 def wait_listener(port: int, timeout: float = 10.0) -> None:
@@ -296,6 +341,9 @@ def probe(config: dict, port: int) -> None:
         check_connectivity(port)
         if proc.poll() is not None:
             raise ProxyError("节点代理已退出。")
+        check_telegram_identity(port)
+        if proc.poll() is not None:
+            raise ProxyError("节点代理已退出。")
     finally:
         if proc is not None:
             proc.terminate()
@@ -314,6 +362,7 @@ Description=AGY Telegram Remote local proxy
 After=network-online.target
 Wants=network-online.target
 [Service]
+Type=exec
 ExecStart={ENGINE} run -c {CONFIG}
 Restart=on-failure
 RestartSec=5
@@ -339,8 +388,26 @@ def env_text(port: int) -> bytes:
 
 
 def drop_text() -> bytes:
-    return (MARKER + f"[Unit]\nWants={PROXY_SERVICE}\nAfter={PROXY_SERVICE}\n"
+    return (MARKER + f"[Unit]\nRequires={PROXY_SERVICE}\nAfter={PROXY_SERVICE}\n"
             f"[Service]\nEnvironmentFile={ENV}\n").encode()
+
+
+def check_bot_proxy_environment(environ: dict[str, str] | None = None) -> None:
+    """Fail closed when a project proxy exists but the bot cannot use it."""
+    before = {CONFIG: read_managed(CONFIG), ENV: read_managed(ENV)}
+    port = previous_port(before)
+    if port is None:
+        if read_managed(JOURNAL) is not None:
+            raise ProxyError("上次代理切换未完成；请先通过菜单 4 恢复。")
+        return  # A direct or externally managed installation remains unchanged.
+    environ = os.environ if environ is None else environ
+    expected = dict(line.split("=", 1) for line in env_text(port).decode("ascii").splitlines())
+    if any(environ.get(key) != value for key, value in expected.items()):
+        raise ProxyError("代理配置存在但机器人没有加载代理环境；请检查服务配置。")
+    try:
+        wait_listener(port, timeout=10)
+    except ProxyError as exc:
+        raise ProxyError("代理配置存在但本机代理未就绪；请检查代理服务。") from exc
 
 
 def ready() -> bool:
@@ -531,7 +598,7 @@ def main() -> int:
     print("正在验证节点与 Google、Telegram 的连接……")
     probe(config, port)
     apply(config, port)
-    print("节点已保存并启用。网络连通不代表 Google 账号已获得使用资格。")
+    print("节点已保存并启用。HTTPS 检查不验证 Google 账号资格或模型额度。")
     if service_installed() and not active(SERVICE):
         print("机器人服务目前未运行。")
         while True:

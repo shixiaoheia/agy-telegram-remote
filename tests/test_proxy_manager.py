@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -38,6 +39,77 @@ class ProxyManagerTests(unittest.TestCase):
         self.assertIn("NO_PROXY=localhost,127.0.0.1,::1", env)
         self.assertIn(f"EnvironmentFile={manager.ENV}", manager.drop_text().decode())
         self.assertIn("NoNewPrivileges=yes", manager.unit_text().decode())
+        self.assertIn(f"Requires={manager.PROXY_SERVICE}", manager.drop_text().decode())
+
+    def test_bot_rejects_missing_environment_or_listener_for_managed_proxy(self):
+        files = self.old_snapshot()
+        good = {k: "http://127.0.0.1:32123" for k in
+                ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
+        good.update({"NO_PROXY": "localhost,127.0.0.1,::1",
+                     "no_proxy": "localhost,127.0.0.1,::1", "ALL_PROXY": "", "all_proxy": ""})
+        with patch.object(manager, "read_managed", side_effect=lambda p: files.get(p)), \
+             patch.object(manager, "wait_listener") as listener:
+            with self.assertRaises(manager.ProxyError):
+                manager.check_bot_proxy_environment({})
+            listener.assert_not_called()
+            with self.assertRaises(manager.ProxyError):
+                manager.check_bot_proxy_environment(dict(good, NO_PROXY="*"))
+            listener.assert_not_called()
+            listener.side_effect = manager.ProxyError("listener unavailable")
+            with self.assertRaises(manager.ProxyError):
+                manager.check_bot_proxy_environment(good)
+            listener.side_effect = None
+            manager.check_bot_proxy_environment(good)
+            listener.assert_called_with(32123, timeout=10)
+
+    def test_direct_install_is_not_forced_to_use_project_proxy(self):
+        with patch.object(manager, "read_managed", return_value=None), \
+             patch.object(manager, "wait_listener") as listener:
+            manager.check_bot_proxy_environment({})
+            listener.assert_not_called()
+
+    def test_incomplete_project_proxy_blocks_bot_start(self):
+        with patch.object(manager, "read_managed",
+                          side_effect=lambda p: b"partial" if p == manager.CONFIG else None):
+            with self.assertRaises(manager.ProxyError):
+                manager.check_bot_proxy_environment({})
+
+    def test_interrupted_first_switch_without_proxy_files_blocks_start(self):
+        with patch.object(manager, "read_managed",
+                          side_effect=lambda p: b"pending" if p == manager.JOURNAL else None):
+            with self.assertRaises(manager.ProxyError):
+                manager.check_bot_proxy_environment({})
+
+    def test_connection_probe_separates_network_failure_and_http_status(self):
+        with patch.object(manager.subprocess, "run", side_effect=[
+                subprocess.CompletedProcess([], 0, stdout="403"),
+                subprocess.CompletedProcess([], 0, stdout="200")]):
+            manager.check_connectivity(32123)
+        with patch.object(manager.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 7, stdout="000")):
+            with self.assertRaisesRegex(manager.ProxyError, "Google"):
+                manager.check_connectivity(32123)
+
+    def test_candidate_telegram_check_uses_candidate_proxy_without_credentials_in_arguments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config.env"
+            config.write_text("fixture", encoding="utf-8")
+            with patch.object(manager, "CONFIG_DIR", Path(directory)), \
+                 patch.object(manager.subprocess, "run", return_value=subprocess.CompletedProcess(
+                     [], 0, stdout=b"TELEGRAM_CHECK_OK\n")) as run:
+                self.assertTrue(manager.check_telegram_identity(32123))
+            args, kwargs = run.call_args
+            self.assertIn("check-token", args[0])
+            self.assertNotIn("fixture", args[0])
+            self.assertEqual(kwargs["env"]["HTTPS_PROXY"], "http://127.0.0.1:32123")
+            self.assertEqual(kwargs["env"]["ALL_PROXY"], "")
+
+    def test_candidate_telegram_check_skips_missing_configuration(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(manager, "CONFIG_DIR", Path(directory)), \
+             patch.object(manager.subprocess, "run") as run:
+            self.assertIsNone(manager.check_telegram_identity(32123))
+            run.assert_not_called()
 
     def test_successful_switch_starts_proxy_and_checks_bot_ready(self):
         old = self.old_snapshot()

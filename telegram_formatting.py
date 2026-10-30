@@ -28,6 +28,42 @@ HTML_TOKEN = re.compile(
 TAG_NAME = re.compile(r"</?([a-z-]+)")
 
 
+def clean_model_reply(text: str) -> str:
+    """Make Markdown-oriented model output comfortable to read as Telegram plain text."""
+    lines: list[str] = []
+    in_code_block = False
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if line.strip().startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            lines.append(line)
+            continue
+        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+        line = re.sub(r"^\s*[-*+]\s+", "• ", line)
+        line = re.sub(r"(?<!\w)(\*{1,3}|_{1,3})(?=\S)(.+?)(?<=\S)\1", r"\2", line)
+        line = re.sub(r"^\s*>\s?", "│ ", line)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def control_html(text: str) -> str:
+    """Style control text without interpreting arbitrary Markdown or HTML."""
+    lines = [line for line in text.splitlines() if not re.fullmatch(r"━+", line)]
+    if not lines:
+        return ""
+
+    def inline(value: str) -> str:
+        parts = re.split(r"(`[^`\n]+`)", value)
+        return "".join("<code>" + html.escape(part[1:-1]) + "</code>"
+                       if part.startswith("`") and part.endswith("`") and len(part) > 2
+                       else html.escape(part) for part in parts)
+    title = "".join(part if part.startswith("<code>") else "<b>" + part + "</b>"
+                    for part in re.split(r"(<code>.*?</code>)", inline(lines[0])) if part)
+    body = "\n".join(inline(line) for line in lines[1:]).strip()
+    return title + ("\n\n" + body if body else "")
+
+
 def _escaped(text: str) -> str:
     return html.escape(html.unescape(text))
 

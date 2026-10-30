@@ -22,11 +22,13 @@ from pathlib import Path
 
 from agy_runner import Result, Runner
 from command_handlers import CommandHandlers
+from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
                       resolve_model, Settings)
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
-from telegram_formatting import html_chunks, plain_html_text, render_markdown_html
+from telegram_formatting import (clean_model_reply, control_html, html_chunks,
+                                 plain_html_text, render_markdown_html)
 
 LOG = logging.getLogger("agy_remote")
 LABELS = {
@@ -91,27 +93,6 @@ OFFICIAL_MODEL_IDS = frozenset(model_id for _, model_id, _ in OFFICIAL_MODELS)
 CATALOG_VARIANT_RE = re.compile(r"^((?:gemini|claude)-[A-Za-z0-9.-]+)-(low|medium|high|max)$")
 
 
-def clean_model_reply(text: str) -> str:
-    """Make Markdown-oriented model output comfortable to read as Telegram plain text."""
-    lines: list[str] = []
-    in_code_block = False
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if line.strip().startswith("```"):
-            in_code_block = not in_code_block
-            continue
-        if in_code_block:
-            lines.append(line)
-            continue
-        line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
-        line = re.sub(r"^\s*[-*+]\s+", "• ", line)
-        line = re.sub(r"(?<!\w)(\*{1,3}|_{1,3})(?=\S)(.+?)(?<=\S)\1", r"\2", line)
-        line = re.sub(r"^\s*>\s?", "│ ", line)
-        lines.append(line)
-    return "\n".join(lines).strip()
-
-
-
-
 @dataclass
 class ControlCard:
     chat: int
@@ -140,22 +121,6 @@ class ResetConfirmation:
     card: ControlCard
     expires: float
     timer: asyncio.TimerHandle | None = None
-
-
-def control_html(text: str) -> str:
-    """Style control text without interpreting arbitrary Markdown or HTML."""
-    lines = [line for line in text.splitlines() if not re.fullmatch(r"━+", line)]
-    if not lines:
-        return ""
-    def inline(value: str) -> str:
-        parts = re.split(r"(`[^`\n]+`)", value)
-        return "".join("<code>" + html.escape(part[1:-1]) + "</code>"
-                       if part.startswith("`") and part.endswith("`") and len(part) > 2
-                       else html.escape(part) for part in parts)
-    title = "".join(part if part.startswith("<code>") else "<b>" + part + "</b>"
-                    for part in re.split(r"(<code>.*?</code>)", inline(lines[0])) if part)
-    body = "\n".join(inline(line) for line in lines[1:]).strip()
-    return title + ("\n\n" + body if body else "")
 
 
 @dataclass
@@ -2483,6 +2448,8 @@ class Bridge(CommandHandlers):
         )
         if not isinstance(updates, list):
             raise TelegramError()
+        if updates:
+            LOG.warning("startup_backlog_discarded: offline messages are not executed")
         # Telegram may reseed update IDs after a long idle period. On startup
         # the explicit backlog drop defines a new watermark, not the old file.
         self.offset = 0
@@ -2610,6 +2577,7 @@ class Bridge(CommandHandlers):
 
 
 async def start(settings: Settings, ready_file: Path | None) -> None:
+    check_bot_proxy_environment()
     if not settings.workspace.is_dir() or not os.access(settings.workspace, os.R_OK | os.W_OK | os.X_OK):
         raise ConfigError("工作目录不可用。")
     store = Store(settings.state_dir, settings.allowed, settings.max_reply,
@@ -2636,6 +2604,9 @@ def main() -> int:
         settings = Settings.load(args.config)
         asyncio.run(start(settings, args.ready_file))
         return 0
+    except ProxyError:
+        LOG.error("startup_failed: managed proxy unavailable or not loaded; check proxy service and environment")
+        return 1
     except (ConfigError, PermissionError, BlockingIOError):
         LOG.error("startup_failed: configuration, permissions, or another local instance")
         return 78

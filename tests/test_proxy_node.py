@@ -70,6 +70,16 @@ class ProxyNodeTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(NodeError):
                 parse_node(url)
 
+    def test_reject_conflicting_aliases_without_rejecting_equivalent_flags(self):
+        for query in ("sni=one.example&peer=two.example",
+                      "type=grpc&path=one&serviceName=two",
+                      "allowInsecure=0&insecure=1"):
+            with self.subTest(query=query), self.assertRaises(NodeError):
+                parse_node("anytls://dummy@example.test:443?" + query)
+        parsed = parse_node("anytls://dummy@example.test:443?sni=one.example&peer=one.example"
+                            "&allowInsecure=0&insecure=false")
+        self.assertEqual(parsed["tls"]["server_name"], "one.example")
+
     def test_errors_do_not_contain_credentials(self):
         with self.assertRaises(NodeError) as context:
             parse_node("vless://private-secret@example.test:443")

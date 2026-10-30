@@ -145,6 +145,13 @@ def parse_node(link: str) -> dict:
         params = dict(pairs)
         if len(params) != len(pairs):
             raise NodeError("节点包含重复参数。")
+        for first, second in (("sni", "peer"), ("path", "serviceName")):
+            if first in params and second in params and params[first] != params[second]:
+                raise NodeError("节点包含相互冲突的参数。")
+        if "allowInsecure" in params and "insecure" in params:
+            safe = {"", "0", "false"}
+            if (params["allowInsecure"] in safe) != (params["insecure"] in safe):
+                raise NodeError("节点包含相互冲突的 TLS 参数。")
         allowed = {"security", "sni", "peer", "fp", "pbk", "sid", "allowInsecure", "insecure", "type", "host", "path", "serviceName", "flow", "encryption", "spx", "headerType"}
         if set(params) - allowed:
             raise NodeError("节点包含暂不支持的参数。")
