@@ -11,7 +11,11 @@ from settings import MODEL_RE, is_retired_model, resolve_model
 
 class CommandHandlers:
     def _text(self, user, zh, en):
-        return en if self.store.get_language(user) == "en" else zh
+        try:
+            language = self.store.get_language(user)
+        except (OSError, ValueError):
+            language = "zh"
+        return en if language == "en" else zh
 
     async def _command_language(self, text, user, chat_id, helpers):
         current = self.store.get_language(user)

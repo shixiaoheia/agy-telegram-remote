@@ -1137,7 +1137,7 @@ class Bridge(CommandHandlers):
             chunks = chunks_utf16(self.store.redact(text))
             total = len(chunks)
             for i, chunk in enumerate(chunks):
-                suffix = f"\n\n📄 [第 {i+1}/{total} 页]" if total > 1 else ""
+                suffix = self._text(chat, f"\n\n📄 [第 {i+1}/{total} 页]", f"\n\n📄 [Page {i+1}/{total}]") if total > 1 else ""
                 markup = reply_markup if i == total - 1 else None
                 try:
                     await self.api.send(chat, chunk + suffix, reply_markup=markup)
@@ -2040,11 +2040,12 @@ class Bridge(CommandHandlers):
         token = uuid.uuid4().hex[:12]
         pending = ResetConfirmation(token, self._reset_context(user), card, time.monotonic() + 90)
         pending.timer = asyncio.get_running_loop().call_later(
-            90, self._close_reset_confirmation, user, "⌛ 新建对话确认已过期，当前对话未改变。")
+            90, self._close_reset_confirmation, user, self._text(user, "⌛ 新建对话确认已过期，当前对话未改变。", "⌛ New conversation confirmation expired; the current conversation is unchanged."))
         self.reset_confirmations[user] = pending
-        self.queue_card(card, "🧠 确认新建对话？\n"
+        self.queue_card(card, self._text(user, "🧠 确认新建对话？\n"
                         "将清空当前对话记忆，历史结果和累计用量仍保留。\n"
-                        "如果有任务运行，会在该任务结束后重置。\n90 秒内确认生效。", {
+                        "如果有任务运行，会在该任务结束后重置。\n90 秒内确认生效。",
+                        "🧠 Start a new conversation?\nCurrent conversation context will be cleared; history and cumulative usage remain.\nIf a task is running, context will be reset after it finishes.\nConfirm within 90 seconds."), {
                             "inline_keyboard": [[
                                 {"text": "🧠 确认新建", "callback_data": f"dialog:confirm:{token}"},
                                 {"text": "↩️ 保留当前对话", "callback_data": f"dialog:dismiss:{token}"},
@@ -2069,7 +2070,7 @@ class Bridge(CommandHandlers):
                 or job.phase in {"saving", "sending"} or not job.original_prompt):
             return False
         if not text.strip() or "\x00" in text or len(correction_prompt(job, text)) > self.settings.max_prompt:
-            self.queue_reply(user, "⚠️ 补充与原任务合并后过长或格式无效。当前任务未改变，请精简补充内容。")
+            self.queue_reply(user, self._text(user, "⚠️ 补充与原任务合并后过长或格式无效。当前任务未改变，请精简补充内容。", "⚠️ The combined task and addition are too long or invalid. The current task is unchanged; shorten the addition."))
             return True
         job.pending_correction = text
         job.correction_token = uuid.uuid4().hex[:12]
@@ -2077,15 +2078,19 @@ class Bridge(CommandHandlers):
         if job.correction_timer is not None:
             job.correction_timer.cancel()
         job.correction_timer = asyncio.get_running_loop().call_later(
-            CORRECTION_TTL_SECONDS, self._forget_correction, job, "⌛ 补充已过期，当前任务未改变。")
+            CORRECTION_TTL_SECONDS, self._forget_correction, job, self._text(user, "⌛ 补充已过期，当前任务未改变。", "⌛ The addition expired; the current task is unchanged."))
         if job.correction_card is None:
             job.correction_card = ControlCard(user)
         prefix = f"correction:{{}}:{job.job_id}:{job.correction_token}"
         self.queue_card(job.correction_card,
-                         "💬 收到一条待确认补充，当前任务仍在运行。\n"
+                         self._text(user, "💬 收到一条待确认补充，当前任务仍在运行。\n"
                          "点击“作为修正”会先停止并清理当前任务，再按原需求和这段补充执行。\n"
                          f"补充预览：{self.store.redact(task_title(text))}\n"
                          "仅最新一条待确认补充有效，5 分钟后失效；不会自动执行。",
+                         "💬 An addition awaits confirmation while the current task continues.\n"
+                         "Apply correction stops and cleans up the current task, then runs the original request with this addition.\n"
+                         f"Preview: {self.store.redact(task_title(text))}\n"
+                         "Only the latest addition is valid. It expires after 5 minutes and will not run automatically."),
                          {"inline_keyboard": [[
                              {"text": "✏️ 作为修正", "callback_data": prefix.format("apply")},
                              {"text": "✖️ 忽略补充", "callback_data": prefix.format("dismiss")},
@@ -2566,7 +2571,8 @@ class Bridge(CommandHandlers):
                     return
                 self.waiting_jobs.append(entry)
                 state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
-                self.queue_reply(chat_id, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。")
+                en_state = "The queue is paused; the first task's owner must send /queue resume." if self.queue_paused else "It will start after the previous task is cleaned up."
+                self.queue_reply(chat_id, self._text(user, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。", f"⏳ Added to the queue at position {len(self.waiting_jobs)}. {en_state} Use /queue cancel to cancel. After a service restart the first task's owner must confirm resumption."))
                 self._wake_queue()
             return
 
@@ -2603,6 +2609,7 @@ class Bridge(CommandHandlers):
 
     async def _prepare_and_work(self, job: Job, text: str, items: list[tuple[dict, bool]]) -> None:
         """Download outside polling; retain the slot until all writes and cleanup finish."""
+        user = job.user
         job.phase = "receiving" if items else "preparing"
         chat_id = job.chat
         accepted = False
