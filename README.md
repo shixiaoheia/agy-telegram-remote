@@ -1,5 +1,7 @@
 # Antigravity Telegram Remote
 
+中文 | [English](README.en.md)
+
 把你的 Telegram 私聊变成服务器上的 `agy` 远程工作台。
 
 [![CI Tests](https://github.com/shixiaoheia/agy-telegram-remote/actions/workflows/tests.yml/badge.svg)](https://github.com/shixiaoheia/agy-telegram-remote/actions/workflows/tests.yml)

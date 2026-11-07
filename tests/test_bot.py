@@ -202,6 +202,31 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runner.calls, 0)
         self.assertEqual(self.api.messages, [])
 
+    async def test_language_menu_is_private_and_persisted_per_user(self):
+        await self.handle(update("/language"))
+        self.assertEqual(self.store.get_language(12345), "zh")
+        await self.handle(callback_update("language:en"))
+        self.assertEqual(self.store.get_language(12345), "en")
+        self.assertEqual(self.store.get_language(67890), "zh")
+        await self.handle(update("/start"))
+        self.assertIn("Welcome", self.api.messages[-1][1])
+        await self.handle(callback_update("language:zh"))
+        self.assertEqual(self.store.get_language(12345), "zh")
+
+    async def test_unauthorized_language_callback_cannot_change_preference(self):
+        await self.handle(callback_update("language:en", user=999))
+        self.assertEqual(self.store.get_language(12345), "zh")
+
+    async def test_english_status_and_result_preserve_user_text(self):
+        self.store.set_language(12345, "en")
+        await self.handle(update("/status"))
+        self.assertIn("Current status", self.api.messages[-1][1])
+        record = {"outcome": "success", "title": "我的项目", "text": "模型原始回复"}
+        rendered = self.bridge._render_result(12345, record)
+        self.assertIn("Request", rendered)
+        self.assertIn("我的项目", rendered)
+        self.assertIn("模型原始回复", rendered)
+
     async def test_id_private_without_authorization(self):
         await self.handle(update("/id", user=999))
         self.assertIn("999", self.api.messages[0][1])

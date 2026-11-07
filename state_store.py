@@ -195,6 +195,23 @@ class Store:
             raise ValueError("User is not allowed")
         return self.directory / f"model-{user}.json"
 
+    def get_language(self, user: int) -> str:
+        self._path(user)
+        try:
+            value = read_json(self.directory / f"language-{user}.json", 1024)
+        except FileNotFoundError:
+            return "zh"
+        if isinstance(value, dict) and value.get("user_id") == user and value.get("language") in {"zh", "en"}:
+            return value["language"]
+        return "zh"
+
+    def set_language(self, user: int, language: str) -> None:
+        self._path(user)
+        if language not in {"zh", "en"}:
+            raise ValueError("Invalid language")
+        atomic_json(self.directory / f"language-{user}.json",
+                    {"user_id": user, "language": language, "updated_at": time.time()})
+
     def get_model(self, user: int) -> str | None:
         path = self._model_path(user)
         try:

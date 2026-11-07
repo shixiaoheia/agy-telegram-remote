@@ -22,6 +22,8 @@ from pathlib import Path
 
 from agy_runner import Result, Runner
 from command_handlers import CommandHandlers
+from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, english_activity,
+                  english_attachment, localize_markup)
 from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
                       resolve_model, Settings)
@@ -383,6 +385,63 @@ def describe_html(record: dict) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def describe_html_en(record: dict) -> str:
+    """Render English interface labels while keeping model and user text unchanged."""
+    title = html.escape(ui_excerpt(record.get("title", ""), fallback="Task"))
+    attachment = english_attachment(str(record.get("attachment_summary") or ""))
+    attachment_line = "\n" + html.escape(ui_excerpt(attachment, 180)) if attachment else ""
+    parts = [f"<blockquote>❓ Request: <b>{title}</b>{attachment_line}</blockquote>"]
+    outcome = str(record.get("outcome", "error"))
+    if outcome != "success":
+        parts.append(html.escape(EN_OUTCOMES.get(outcome, "⚠️ Review the result")))
+    if record.get("text"):
+        parts.append(render_markdown_html(str(record["text"])))
+    elif record.get("detail"):
+        detail = str(record["detail"])
+        parts.append(html.escape(EN_DETAILS.get(detail, detail)))
+    help_text = EN_CATEGORY_HELP.get(record.get("category"))
+    if help_text:
+        parts.append("💡 " + html.escape(help_text))
+    if record.get("metadata_warning"):
+        parts.append("⚠️ " + html.escape(str(record["metadata_warning"])))
+    if record.get("delivery") in {"failed", "failed_or_partial"}:
+        parts.append("⚠️ Previous delivery was incomplete. This saved result was retrieved without rerunning the task.")
+    if record.get("model_fallback_from"):
+        parts.append("⚠️ Model switched due to capacity: "
+                     + html.escape(str(record["model_fallback_from"])) + " → "
+                     + html.escape(str(record.get("model") or "")))
+    if outcome not in {"success", "not_started", "running"}:
+        parts.append("ℹ️ The task was not rerun automatically; cancellation does not undo changes. /last retrieves the saved result.")
+    summary = str(record.get("execution_summary") or "").strip()
+    if summary:
+        translated = "\n".join(english_activity(line) for line in summary.splitlines())
+        parts.append("<blockquote expandable><b>Execution steps</b>\n" + html.escape(translated) + "</blockquote>")
+    duration = record.get("duration_seconds")
+    elapsed = (f"{duration:g}s" if type(duration) in {int, float} and 0 <= duration <= 1e12
+               and math.isfinite(duration) else "Not provided")
+    def count(key: str) -> str:
+        value = record.get(key)
+        return f"{value:,}" if type(value) is int and value >= 0 else "—"
+    model = html.escape(str(record.get("model") or "Default (agy setting)"))
+    footer = (f"🤖 {model} · ⏱ {elapsed}\n"
+              f"📊 Input {count('input_tokens')} · Output {count('output_tokens')} · Total {count('total_tokens')} tokens")
+    mode = record.get("mode")
+    turns = record.get("num_turns")
+    detail_items = []
+    if mode:
+        detail_items.append("Plan" if mode == "plan" else "Edit" if mode == "accept-edits" else str(mode))
+    if type(turns) is int and turns > 0:
+        detail_items.append(f"Conversation turn {turns}")
+    if detail_items:
+        footer += "\n" + html.escape(" · ".join(detail_items))
+    parts.append("<blockquote>" + footer + "</blockquote>")
+    if record.get("session_token_reminder"):
+        tokens = record.get("session_tokens", 0)
+        cumulative = f"about {tokens:,} tokens" if type(tokens) is int and tokens >= 0 else "a large context"
+        parts.append(f"💡 This conversation has {cumulative}. Use /new if replies slow down or the context becomes confused.")
+    return "\n\n".join(part for part in parts if part)
+
+
 def ui_excerpt(value: object, limit: int = 120, fallback: str = "未命名任务") -> str:
     value = " ".join(str(value or "").split()) or fallback
     return value if len(value) <= limit else value[:limit - 1] + "…"
@@ -679,6 +738,8 @@ class Bridge(CommandHandlers):
         task.add_done_callback(self.callback_tasks.discard)
 
     def _status_card(self, user: int, details: bool = False) -> tuple[str, dict]:
+        if self.store.get_language(user) == "en":
+            return self._status_card_en(user, details)
         keyboard = {"inline_keyboard": [[
             {"text": "⬅️ 返回概览" if details else "📋 详细信息",
              "callback_data": "status:summary" if details else "status:details"},
@@ -717,6 +778,69 @@ class Bridge(CommandHandlers):
         lines.append(f"部署版本：{self._deployment_version}")
         lines.append("路径、权限和启动时间可点“详细信息”查看。")
         return self.store.redact("\n".join(lines)), keyboard
+
+    def _status_card_en(self, user: int, details: bool) -> tuple[str, dict]:
+        keyboard = {"inline_keyboard": [[
+            {"text": "⬅️ Overview" if details else "📋 Details",
+             "callback_data": "status:summary" if details else "status:details"},
+            {"text": "🔄 Refresh", "callback_data": "status:details" if details else "status:summary"},
+        ]]}
+        current = self.store.get_model(user) or self.settings.model or "Default (agy setting)"
+        job = self.slot
+        lines = ["📋 Current status"]
+        if self.runner.blocked:
+            lines.append("⚠️ New tasks are paused. Check the server; saved results remain available.")
+        if job is not None and job.user == user:
+            if job.steered and job.steer_task and not job.steer_task.done():
+                stage = "Cleaning up and handing over the correction"
+            elif job.cancel.is_set():
+                stage = "Cancelling and cleaning up"
+            else:
+                stage = {"preparing": "Preparing", "receiving": "Receiving attachments",
+                         "starting": "Starting model", "saving": "Saving result",
+                         "sending": "Sending result", "running": "Running"}.get(job.phase, "Processing")
+            lines.extend([f"Task: {task_title(job.history_title)}", f"Stage: {stage}",
+                          f"Elapsed: {max(0, int(time.monotonic() - job.started_at))} s"])
+            current = job.model or current
+        elif self.model_check_task is not None and not self.model_check_task.done():
+            lines.append("🔎 Model check: " + ("Cancelling and cleaning up" if self.model_check_cancelling else "In progress"))
+        elif self.pending_album is not None:
+            lines.append("Receiving your attachments" if self.pending_album["user"] == user
+                         else "The workspace is in use by another user")
+        elif job is not None:
+            lines.append("You have no active task; the workspace is in use by another user.")
+        elif not self.runner.blocked:
+            lines.append("You have no active task. Send a message to begin.")
+        queued = sum(1 for item in self.waiting_jobs if item[0] == user)
+        if queued:
+            lines.append(f"Your waiting tasks: {queued}. Use /queue to view or cancel them.")
+        lines.extend([f"Model: {current}", f"Deployed version: {self._deployment_version}"])
+        if details:
+            mode = self.store.get_mode(user) or "Follow agy settings"
+            effort = self.store.get_effort(user) or "Default"
+            approval = "enabled" if self.settings.skip_permissions else "disabled"
+            host_mode = "Full root access" if self.settings.host_access == "full" else "Restricted directories"
+            paths = ", ".join(map(str, self.settings.write_paths)) or "None"
+            started = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(self._started_at))
+            lines.extend([f"Mode: {mode}", f"Reasoning effort: {effort}", f"Tool auto-approval: {approval}",
+                          f"Workspace: {self.settings.workspace}", f"Extra writable paths: {paths}",
+                          f"Host access: {host_mode}", f"Service started: {started} (server time)",
+                          "Actual permissions depend on the host and systemd configuration."])
+            conv = self.store.get_conversation(user)
+            if conv and conv.get("conversation_id"):
+                cid = conv["conversation_id"]
+                short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+                lines.append(f"Conversation: `{short_cid}` (turn {conv.get('num_turns', 1)})")
+            try:
+                import shutil
+                free_gb = shutil.disk_usage(self.settings.workspace).free / (1024 ** 3)
+                lines.append(f"Workspace free space: {free_gb:.1f} GB")
+            except OSError:
+                pass
+        else:
+            lines.append("Select Details for paths, permissions, and service start time.")
+        text = self.store.redact("\n".join(lines))
+        return (control_html(text) if details else text), keyboard
 
     def _status_details(self, user: int) -> str:
         current_model = self.store.get_model(user) or self.settings.model
@@ -927,7 +1051,18 @@ class Bridge(CommandHandlers):
     def _is_allowed(self, user: int) -> bool:
         return user in self.settings.allowed or user in self.store.allowed
 
+    def _buttons(self, chat: int, markup: dict | None) -> dict | None:
+        try:
+            language = self.store.get_language(chat)
+        except (OSError, ValueError):
+            language = "zh"
+        return localize_markup(markup, language)
+
+    def _render_result(self, user: int, record: dict) -> str:
+        return describe_html_en(record) if self.store.get_language(user) == "en" else describe_html(record)
+
     async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
+        reply_markup = self._buttons(chat, reply_markup)
         try:
             chunks = chunks_utf16(self.store.redact(text))
             total = len(chunks)
@@ -945,6 +1080,7 @@ class Bridge(CommandHandlers):
 
     async def send_html(self, chat: int, text: str, reply_markup: dict | None = None,
                         message_id: int | None = None, delivery_job: Job | None = None) -> bool:
+        reply_markup = self._buttons(chat, reply_markup)
         chunks = html_chunks(self.store.redact(text))
         total = len(chunks)
         for index, chunk in enumerate(chunks, 1):
@@ -1096,6 +1232,7 @@ class Bridge(CommandHandlers):
             return
         revision = card.revision
         text, markup = control_html(self.store.redact(card.text)), card.markup
+        markup = self._buttons(card.chat, markup)
         try:
             if card.message_id is None:
                 result = await self.api.send(card.chat, text, reply_markup=markup, parse_mode="HTML")
@@ -1304,7 +1441,7 @@ class Bridge(CommandHandlers):
             if job.steered:
                 await self._finish_progress(job, result.outcome)
             delivered = True if job.steered else await self.send_html(
-                job.chat, describe_html(record), reply_markup=self._completion_buttons(job),
+                job.chat, self._render_result(job.user, record), reply_markup=self._completion_buttons(job),
                 message_id=job.status_message_id, delivery_job=job,
             )
             final_record = self.store.save(job.user, record | {
@@ -1374,6 +1511,24 @@ class Bridge(CommandHandlers):
             await asyncio.sleep(TYPING_HEARTBEAT_SECONDS)
 
     def _progress_text(self, job: Job) -> str:
+        if self.store.get_language(job.user) == "en":
+            elapsed = max(0, int(time.monotonic() - job.started_at))
+            state = "🛑 Cancelling and cleaning up" if job.cancel.is_set() else "⏳ Task running"
+            activity = "Cleaning up" if job.cancel.is_set() else english_activity(ui_excerpt(job.activity, 90))
+            trace = [english_activity(ui_excerpt(step, 160)) for step in job.execution_steps[-6:]]
+            if not job.progress_expanded:
+                trace = trace[-1:]
+            steps = html.escape("\n".join(trace)) if trace else "Waiting for the first step…"
+            title = html.escape(ui_excerpt(job.history_title or job.original_prompt, fallback="Task"))
+            attachment = english_attachment(job.attachment_feedback)
+            attachment_line = "\n" + html.escape(ui_excerpt(attachment, 180)) if attachment else ""
+            text = (f"❓ Request: <b>{title}</b>{attachment_line}\n\n<b>{state}</b>\n"
+                    f"Stage: {html.escape(activity)}\n"
+                    f"🤖 {html.escape(job.model or 'Default')} · ⏱ Elapsed: {elapsed}s\n\n"
+                    f"<blockquote><b>Execution steps</b>\n{steps}</blockquote>"
+                    + ("\n📖 Reading mode: content is paused while the task continues. Refresh for updates."
+                       if job.progress_expanded else ""))
+            return self.store.redact(text)
         elapsed = max(0, int(time.monotonic() - job.started_at))
         state = "🛑 正在取消并清理" if job.cancel.is_set() else "⏳ 任务执行中"
         activity = "正在清理资源" if job.cancel.is_set() else ui_excerpt(job.activity, 90)
@@ -1397,13 +1552,13 @@ class Bridge(CommandHandlers):
         return self.store.redact(text)
 
     def _progress_buttons(self, job: Job) -> dict:
-        return {"inline_keyboard": [
+        return self._buttons(job.chat, {"inline_keyboard": [
             [{"text": "📥 收起过程" if job.progress_expanded else "📋 展开过程",
               "callback_data": f"progress:{'collapse' if job.progress_expanded else 'expand'}:{job.job_id}"},
              {"text": "🔄 刷新过程" if job.progress_expanded else "🔄 刷新进度",
               "callback_data": f"progress:refresh:{job.job_id}"}],
             [{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}],
-        ]}
+        ]})
 
     async def _refresh_progress(self, job: Job) -> None:
         delay = PROGRESS_UPDATE_SECONDS
@@ -1472,7 +1627,7 @@ class Bridge(CommandHandlers):
                 return
 
     def _completion_buttons(self, job: Job) -> dict:
-        return self._result_buttons(job.job_id)
+        return self._buttons(job.chat, self._result_buttons(job.job_id))
 
     def _result_buttons(self, job_id: str) -> dict:
         return {"inline_keyboard": [
@@ -1495,6 +1650,22 @@ class Bridge(CommandHandlers):
                 if job.steered else
                 f"{LABELS.get(outcome, '任务已结束')}\n\n{delivery_text}"
             )
+            if self.store.get_language(job.user) == "en":
+                label = {
+                    "success": "✅ Task completed", "no_text": "⚠️ No final reply",
+                    "permission": "🚫 Permission denied", "invalid": "⚠️ Invalid result",
+                    "error": "❌ Task failed", "timed_out": "⏱️ Task timed out",
+                    "cancelled": "🛑 Task cancelled", "interrupted": "⚠️ Task interrupted",
+                    "output_limit": "📏 Output limit reached", "cleanup_failed": "⚠️ Cleanup not confirmed",
+                    "not_started": "⏹️ Task did not start", "running": "⏳ Task running",
+                }.get(outcome, "⚠️ Task ended")
+                delivery_text = {
+                    "pending": "The result is saved and is being sent; you may also retrieve it below.",
+                    "sent": "The result was sent. Use the buttons below to retrieve it or start a conversation.",
+                    "failed_or_partial": "⚠️ Delivery failed or was incomplete. The result is saved; use /last to retrieve it without rerunning the task.",
+                }.get(delivery, "The result is saved; use the buttons below to view it.")
+                completion = ("⚡ The task stopped and will restart with your correction."
+                              if job.steered else f"{label}\n\n{delivery_text}")
             await self.api.edit(job.chat, job.status_message_id, completion,
                                 {"inline_keyboard": []} if job.steered else self._completion_buttons(job))
             return True
@@ -1671,6 +1842,7 @@ class Bridge(CommandHandlers):
         return model or "默认（由 agy 决定）"
 
     def _model_picker(self, user: int) -> tuple[str, dict]:
+        english = self.store.get_language(user) == "en"
         current = self.store.get_model(user) or self.settings.model or ""
         buttons = []
         notices = []
@@ -1687,13 +1859,15 @@ class Bridge(CommandHandlers):
             buttons.append({"text": ("✓ " if current in variants else "") + ("⚠️ " if failed else icon + " ") + label,
                             "callback_data": f"model:{target}"})
             if failed:
-                notices.append(f"{label}：{model_health_text(health[target])}")
+                notices.append(f"{label}: check failed ({health[target].get('category', 'unknown')})"
+                               if english else f"{label}：{model_health_text(health[target])}")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append([{"text": "🔎 检测当前模型", "callback_data": "probe:current"},
                      {"text": "🔎 检测全部", "callback_data": "probe:all"}])
         rows.append([{"text": "↩️ 恢复默认", "callback_data": "model:default"},
                      {"text": "✖️ 关闭", "callback_data": "selector:close"}])
-        text = f"选择模型\n当前：{self._model_label(current)}"
+        text = (f"Select a model\nCurrent: {current or 'Default (agy setting)'}" if english
+                else f"选择模型\n当前：{self._model_label(current)}")
         stamp = health.get(current, {}).get("checked_at", 0)
         if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0:
             age = max(0, int(time.time() - stamp))
@@ -1701,9 +1875,16 @@ class Bridge(CommandHandlers):
                        else f"{age // 3600} 小时前" if age < 86400 else record_time_label(stamp))
         else:
             checked = "未检测"
-        text += f"\n当前模型上次检测：{checked}\n检测会消耗模型额度，不更改选定模型。"
+        if english:
+            checked = (time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(stamp))
+                       if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0
+                       else "Not checked")
+            text += f"\nLast checked: {checked}\nChecks consume model quota and do not change your selection."
+        else:
+            text += f"\n当前模型上次检测：{checked}\n检测会消耗模型额度，不更改选定模型。"
         if notices:
-            text += "\n\n上次检测（不代表套餐无权限）：\n" + "\n".join(notices)
+            text += ("\n\nLast checks (failure does not necessarily mean ineligible):\n" if english
+                     else "\n\n上次检测（不代表套餐无权限）：\n") + "\n".join(notices)
         return text, {"inline_keyboard": rows}
 
     def _effort_picker(self, user: int, model_label: str, *, model: str | None = None) -> tuple[str, dict]:
@@ -1728,7 +1909,8 @@ class Bridge(CommandHandlers):
             {"text": "✖️ 关闭", "callback_data": "selector:close"},
         ]]}
         label = next((label for label, variants in self._model_choices() if model in variants), model_label)
-        return f"{label}\n选择思考强度后生效", keyboard
+        return (f"{label}\nChoose reasoning effort to apply" if self.store.get_language(user) == "en"
+                else f"{label}\n选择思考强度后生效"), keyboard
 
     def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
         text, keyboard = self._effort_picker(user, model_label)
@@ -1736,6 +1918,7 @@ class Bridge(CommandHandlers):
 
     async def _collapse_selector(self, chat_id: int, message: dict, text: str,
                                  reply_markup: dict | None = None, *, html_mode: bool = False) -> bool:
+        reply_markup = self._buttons(chat_id, reply_markup)
         message_id = message.get("message_id")
         if type(message_id) is not int or message_id <= 0:
             return False
@@ -1852,6 +2035,18 @@ class Bridge(CommandHandlers):
                 or chat.get("type") != "private" or type(chat_id) is not int or chat_id != user):
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id, text="⚠️ 无操作权限", show_alert=True)
+            return
+
+        if data in {"language:zh", "language:en"}:
+            language = data.split(":", 1)[1]
+            try:
+                self.store.set_language(user, language)
+            except (OSError, ValueError):
+                self._answer_callback(cq_id, text="无法保存语言 / Could not save language", show_alert=True)
+                return
+            notice = "已选择中文" if language == "zh" else "English selected; translation is in progress."
+            self._answer_callback(cq_id, text=notice)
+            self.queue_selector_edit(chat_id, message, notice)
             return
 
         if data.startswith("progress:"):
@@ -1994,7 +2189,7 @@ class Bridge(CommandHandlers):
                 return
             opened = False
             if record:
-                opened = self.queue_reply(chat_id, describe_html(record), html_mode=True,
+                opened = self.queue_reply(chat_id, self._render_result(user, record), html_mode=True,
                                           reply_markup=self._result_buttons(record["job_id"]),
                                           result_key=(user, record["job_id"]))
             if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -2426,6 +2621,7 @@ class Bridge(CommandHandlers):
         try:
             await self.api.set_commands([
                 {"command": "start", "description": "欢迎页与快速开始"},
+                {"command": "language", "description": "中文 / English"},
                 {"command": "help", "description": "查看帮助与使用说明"},
                 {"command": "status", "description": "查看当前任务状态"},
                 {"command": "cancel", "description": "取消正在执行的任务"},
