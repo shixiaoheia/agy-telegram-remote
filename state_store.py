@@ -172,10 +172,11 @@ class Store:
             if len(text) > self.max_reply:
                 suffix = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
                 text = text[:self.max_reply - len(suffix)] + suffix
+                record[key + "_truncated"] = True
             record[key] = text
         # No prompt, raw stdout/stderr, or credentials are stored here.
         record = {key: record[key] for key in (
-            "user_id", "updated_at", "job_id", "outcome", "text", "detail",
+            "user_id", "updated_at", "job_id", "outcome", "text", "detail", "text_truncated", "detail_truncated",
             "category", "agy_status", "exit_code", "stdout_bytes", "stderr_bytes",
             "cleanup_ok", "delivery", "model", "effort", "mode", "duration_seconds",
             "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",
@@ -194,6 +195,23 @@ class Store:
         if type(user) is not int or user not in self.allowed:
             raise ValueError("User is not allowed")
         return self.directory / f"model-{user}.json"
+
+    def get_language(self, user: int) -> str:
+        self._path(user)
+        try:
+            value = read_json(self.directory / f"language-{user}.json", 1024)
+        except (OSError, ValueError):
+            return "zh"
+        if isinstance(value, dict) and value.get("user_id") == user and value.get("language") in {"zh", "en"}:
+            return value["language"]
+        return "zh"
+
+    def set_language(self, user: int, language: str) -> None:
+        self._path(user)
+        if language not in {"zh", "en"}:
+            raise ValueError("Invalid language")
+        atomic_json(self.directory / f"language-{user}.json",
+                    {"user_id": user, "language": language, "updated_at": time.time()})
 
     def get_model(self, user: int) -> str | None:
         path = self._model_path(user)
@@ -530,6 +548,14 @@ class Store:
             match_model = re.fullmatch(r"model-([0-9]+)\.json", path.name)
             if match_model:
                 user = int(match_model[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                continue
+            match_language = re.fullmatch(r"language-([0-9]+)\.json", path.name)
+            if match_language:
+                user = int(match_language[1])
                 if path.is_symlink():
                     raise ValueError("Linked state record")
                 if user not in self.allowed:

@@ -1,5 +1,7 @@
 # Antigravity Telegram Remote
 
+中文 | [English](README.en.md)
+
 把你的 Telegram 私聊变成服务器上的 `agy` 远程工作台。
 
 [![CI Tests](https://github.com/shixiaoheia/agy-telegram-remote/actions/workflows/tests.yml/badge.svg)](https://github.com/shixiaoheia/agy-telegram-remote/actions/workflows/tests.yml)
@@ -163,6 +165,7 @@ pid=$(systemctl show agy-telegram-remote -p MainPID --value)
 | `/history` | 查看最近 10 条任务并打开完整结果 |
 | `/last` | 重新查看最近一次任务结果 |
 | `/usage` | 查看当前会话信息与历史累计 Token 统计 |
+| `/language` | 选择当前用户的机器人界面语言（中文或英文） |
 | `/help` | 查看完整指令说明 |
 
 ## 执行与恢复

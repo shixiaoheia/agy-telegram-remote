@@ -551,6 +551,9 @@ validate_release_files() {
   if grep -Eq '^[[:space:]]*(from[[:space:]]+proxy_manager[[:space:]]+import|import[[:space:]]+proxy_manager([[:space:]]|$))' "$stage/bot.py"; then
     [[ -f "$stage/proxy_manager.py" && -f "$stage/proxy_node.py" ]] || fail '所选提交缺少代理启动检查所需文件。'
   fi
+  if grep -Eq '^[[:space:]]*(from[[:space:]]+i18n[[:space:]]+import|import[[:space:]]+i18n([[:space:]]|$))' "$stage/bot.py"; then
+    [[ -f "$stage/i18n.py" ]] || fail '所选提交缺少界面语言所需文件。'
+  fi
 }
 
 uninstall() {

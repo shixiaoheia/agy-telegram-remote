@@ -1,0 +1,88 @@
+# Antigravity Telegram Remote
+
+[中文](README.md) | English
+
+Control the Google Antigravity CLI (`agy`) in a private Telegram chat on your VPS. The bot runs tasks in a shared workspace and sends the results back to Telegram.
+
+> This is a tool for you and people you fully trust. It can execute tasks on your server. Keep the bot token and whitelist private.
+
+## Requirements
+
+- A Debian 12+ or Ubuntu 22.04+ VPS with root access and systemd.
+- A Telegram bot token from [BotFather](https://t.me/BotFather) and your numeric Telegram user ID.
+- A Google account eligible to use Antigravity. Server location, network exit, account eligibility, model availability, and quota can all affect access. Check the [official FAQ](https://antigravity.google/docs/faq/).
+
+## Installation
+
+Connect to the server over SSH and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/main/install.sh -o install.sh && bash install.sh
+```
+
+The installer is in Chinese. Select `1` to install. It asks whether to configure a proxy, then requests the bot token and allowed Telegram ID, and guides you through Google authorization when needed. You can choose whether the token is hidden during input. After installation, send `/start` in a private chat with the bot.
+
+The same command opens the management menu. Select `2` to update while preserving existing settings, `3` to review and confirm complete removal, `4` to add or replace a proxy node, `5` to diagnose service status, or `0` to exit. Review the removal scope carefully: the workspace and independently installed agy credentials are preserved.
+
+## Proxy nodes
+
+The project supports selected share-link formats for VLESS, VMess, AnyTLS, Trojan, Hysteria2, and Shadowsocks. Unsupported options are rejected. Node links contain credentials: enter them only in the hidden terminal prompt, and do not publish them.
+
+The managed proxy listens on loopback for this project; it does not change system-wide routing. The installer checks HTTPS connectivity and, if bot configuration already exists, checks the Telegram identity through the candidate node. Connectivity does not establish Google account eligibility or model quota. The proxy core is downloaded from the official release and checked against a pinned SHA-256 for x86-64 or ARM64; initial downloads still require GitHub access.
+
+Replacing a node restarts the bot and may interrupt a task. Interrupted tasks are not automatically rerun. If switching fails, the manager attempts to restore the previous configuration. If a switch is interrupted, reopen menu `4` to recover; recovery is not performed automatically at boot.
+
+## Using the bot
+
+Send a text task, or attach screenshots, logs, or code files. Individual attachments are limited to 10 MB, with at most 10 files and 30 MB per group. The workspace is shared: allow only trusted users.
+
+| Command | Purpose |
+| --- | --- |
+| `/start`, `/help` | Welcome and command list |
+| `/language` | Select Chinese or English for your interface |
+| `/model`, `/model refresh` | Select a model or explicitly check available models |
+| `/mode` | Select execution mode |
+| `/status` | Check the current task |
+| `/cancel` | Cancel the current task |
+| `/queue` | View waiting tasks; use `/queue add <task>` to queue text |
+| `/queue cancel`, `/queue resume` | Cancel or resume your waiting tasks |
+| `/steer <correction>` | Stop and restart the current text task with a correction |
+| `/history`, `/last` | Retrieve saved results without rerunning them |
+| `/new`, `/reset` | Start a new conversation |
+| `/usage` | View usage statistics |
+| `/restart` | Restart the service when idle (owner only) |
+
+Up to three text tasks can wait in the queue; attachments cannot be queued. Saved waiting tasks are paused after a restart until their owners confirm. A crash can still lose a queued task. Messages received while the service is offline may be discarded at startup and are not automatically executed.
+
+Language preference is saved per authorized user. Your task text, file names, model replies, and externally supplied error text remain in their original language. Historical records created before this update may contain older Chinese labels. The installer remains in Chinese.
+
+## Troubleshooting
+
+Run the installer and choose `5`, or run `bash install.sh --diagnose`, to inspect bot and managed proxy status. Telegram 409 can indicate another instance is polling the same bot. Check other devices before restarting; do not repeatedly launch competing instances.
+
+```bash
+systemctl status agy-telegram-remote --no-pager
+journalctl -u agy-telegram-remote -n 80 --no-pager
+```
+
+Network connectivity, authorization, location, quota, and model availability are separate checks. Model checks consume quota. Task cancellation does not undo changes that have already happened.
+
+## Security and testing
+
+The bot and agy run as root and new installations enable automatic tool approval by default. The systemd restrictions are not a complete sandbox; an authorized user or a prompt-injected task can access sensitive files within the service's permissions. Read [SECURITY.md](SECURITY.md) before use. Never publish tokens, node links, Google authorization codes, or private keys.
+
+Updates preserve settings and keep private backups under `/var/backups/agy-telegram-remote`. Review and manage old backups deliberately.
+
+On a supported Linux system, run the offline checks with:
+
+```bash
+bash scripts/verify.sh
+```
+
+The project uses the Python standard library at runtime. Offline tests do not prove live Telegram or Google access. See [testing notes](docs/TESTING.md) and the [changelog](CHANGELOG.md) for detailed history.
+
+## Credits
+
+Thanks to [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot), [Google agy documentation](https://antigravity.google/docs/cli/install/), and the [Telegram Bot API](https://core.telegram.org/bots/api).
+
+Join the [Telegram community](https://t.me/xiaoheidemimi). The project also lists a [BandwagonHost referral link](https://bandwagonhost.com/aff.php?aff=80815) in the Chinese README.

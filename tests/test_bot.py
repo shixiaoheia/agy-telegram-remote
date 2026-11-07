@@ -116,6 +116,8 @@ class FakeAPI:
             return {"file_path": "documents/fixture.txt", "file_size": 4}
         if method == "sendChatAction":
             return True
+        if method == "setMyCommands":
+            return True
         raise AssertionError(method)
 
     async def download_file(self, _file_path, destination, maximum, *, cancel=None):
@@ -201,6 +203,73 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(update("task", chat_type="group"))
         self.assertEqual(self.runner.calls, 0)
         self.assertEqual(self.api.messages, [])
+
+    async def test_language_menu_is_private_and_persisted_per_user(self):
+        await self.handle(update("/language"))
+        self.assertEqual(self.store.get_language(12345), "zh")
+        await self.handle(callback_update("language:en"))
+        self.assertEqual(self.store.get_language(12345), "en")
+        self.assertEqual(self.store.get_language(67890), "zh")
+        await asyncio.sleep(0)
+        menu = [payload for method, payload in self.api.calls
+                if method == "setMyCommands" and payload.get("scope", {}).get("chat_id") == 12345]
+        self.assertTrue(menu)
+        self.assertEqual(menu[-1]["commands"][0]["description"], "Welcome and getting started")
+        await self.handle(update("/start"))
+        self.assertIn("Welcome", self.api.messages[-1][1])
+        await self.handle(callback_update("language:zh"))
+        self.assertEqual(self.store.get_language(12345), "zh")
+
+    async def test_unauthorized_language_callback_cannot_change_preference(self):
+        await self.handle(callback_update("language:en", user=999))
+        self.assertEqual(self.store.get_language(12345), "zh")
+
+    async def test_corrupt_and_revoked_language_preferences(self):
+        self.store.set_language(12345, "en")
+        path = self.settings.state_dir / "language-12345.json"
+        path.write_text("{broken", encoding="utf-8")
+        self.assertEqual(self.store.get_language(12345), "zh")
+        self.store.set_language(67890, "en")
+        self.store.allowed.discard(67890)
+        self.store.maintain()
+        self.assertFalse((self.settings.state_dir / "language-67890.json").exists())
+
+    async def test_english_common_commands_and_other_user_are_independent(self):
+        self.store.set_language(12345, "en")
+        for command, expected in (("/steer", "Usage:"), ("/ls", "Workspace files"),
+                                  ("/whitelist", "Allowlist"), ("/sys", "System status"),
+                                  ("/new", "Conversation context cleared")):
+            with self.subTest(command=command):
+                await self.handle(update(command))
+                self.assertIn(expected, self.api.messages[-1][1])
+        await self.handle(update("/start", user=67890))
+        self.assertIn("欢迎使用", self.api.messages[-1][1])
+
+    async def test_english_model_mode_callbacks_change_owned_labels(self):
+        self.store.set_language(12345, "en")
+        await self.handle(callback_update("mode:plan"))
+        self.assertIn("Mode changed: Plan", self.api.messages[-1][1])
+        await self.handle(callback_update("model:default"))
+        self.assertIn("Default restored", self.api.messages[-1][1])
+
+    async def test_english_status_and_result_preserve_user_text(self):
+        self.store.set_language(12345, "en")
+        await self.handle(update("/status"))
+        self.assertIn("Current status", self.api.messages[-1][1])
+        record = {"outcome": "success", "title": "我的项目", "text": "模型原始回复"}
+        rendered = self.bridge._render_result(12345, record)
+        self.assertIn("Request", rendered)
+        self.assertIn("我的项目", rendered)
+        self.assertIn("模型原始回复", rendered)
+
+    async def test_english_truncation_notice_does_not_rewrite_model_text(self):
+        self.store.set_language(12345, "en")
+        suffix = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
+        genuine = {"outcome": "success", "text": "原文" + suffix}
+        self.assertIn("回复超过保存上限", self.bridge._render_result(12345, genuine))
+        truncated = self.store.prepare_record(12345, {"outcome": "success", "text": "a" * (self.store.max_reply + 1)})
+        self.assertTrue(truncated["text_truncated"])
+        self.assertIn("storage limit", self.bridge._render_result(12345, truncated))
 
     async def test_id_private_without_authorization(self):
         await self.handle(update("/id", user=999))

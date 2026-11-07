@@ -22,6 +22,8 @@ from pathlib import Path
 
 from agy_runner import Result, Runner
 from command_handlers import CommandHandlers
+from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, EN_OUTCOME_HELP, bot_commands, callback_language,
+                  english_activity, english_attachment, english_callback_notice, english_detail, localize_markup)
 from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
                       resolve_model, Settings)
@@ -241,6 +243,36 @@ def history_summary(records: list[dict]) -> tuple[str, dict | None]:
     return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
 
 
+def history_summary_en(records: list[dict]) -> tuple[str, dict | None]:
+    if not records:
+        return "📚 Task history\nℹ️ No completed tasks.", None
+    lines = ["📚 Task history (last 10)", "Times use the server's local timezone " + time.strftime("%z")]
+    keyboard = []
+    for index, record in enumerate(records, 1):
+        title = ui_excerpt(record.get("title"), 80, "Untitled task")
+        outcome = EN_OUTCOMES.get(str(record.get("outcome", "error")), "Review the result")
+        stamp = record.get("updated_at")
+        when = "Unknown time"
+        if type(stamp) in {int, float} and math.isfinite(stamp) and 0 <= stamp <= 253402300799:
+            try:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+            except (OSError, ValueError, OverflowError):
+                pass
+        model = str(record.get("model") or "Default")
+        duration = record.get("duration_seconds")
+        duration_text = (f" | ⏱️ {duration}s" if type(duration) in {int, float}
+                         and math.isfinite(duration) and duration > 0 else "")
+        delivery = {"failed": "Not delivered", "failed_or_partial": "Incomplete delivery",
+                    "unknown": "Delivery unconfirmed", "pending": "Delivery unconfirmed",
+                    "superseded_by_steer": "Replaced by correction"}.get(str(record.get("delivery") or ""), "")
+        lines.append(f"{index}. {outcome} | {when} | {model}{duration_text}" + (f" | {delivery}" if delivery else "") + f"\n   {title}")
+        job_id = record.get("job_id")
+        if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
+            keyboard.append([{"text": f"{index}. {when} {title}"[:60], "callback_data": f"history:{job_id}"}])
+    lines.append("Select a task below to view its saved result.")
+    return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
+
+
 def supports_effort(model: str) -> bool:
     """Only future/custom models may receive the separate CLI --effort flag."""
     return not model or (model not in OFFICIAL_MODEL_IDS and not CATALOG_VARIANT_RE.fullmatch(model))
@@ -383,6 +415,76 @@ def describe_html(record: dict) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def describe_html_en(record: dict) -> str:
+    """Render English interface labels while keeping model and user text unchanged."""
+    title = html.escape(ui_excerpt(record.get("title", ""), fallback="Task"))
+    attachment = english_attachment(str(record.get("attachment_summary") or ""))
+    attachment_line = "\n" + html.escape(ui_excerpt(attachment, 180)) if attachment else ""
+    parts = [f"<blockquote>❓ Request: <b>{title}</b>{attachment_line}</blockquote>"]
+    outcome = str(record.get("outcome", "error"))
+    if outcome != "success":
+        parts.append(html.escape(EN_OUTCOMES.get(outcome, "⚠️ Review the result")))
+    truncation_zh = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
+    truncation_en = "\n\n(The reply exceeded the storage limit and was truncated; /last can retrieve only this truncated copy.)"
+    if record.get("text"):
+        reply = str(record["text"])
+        if record.get("text_truncated") is True and reply.endswith(truncation_zh):
+            reply = reply[:-len(truncation_zh)] + truncation_en
+        parts.append(render_markdown_html(reply))
+    elif record.get("detail"):
+        detail = str(record["detail"])
+        if record.get("detail_truncated") is True and detail.endswith(truncation_zh):
+            detail = detail[:-len(truncation_zh)] + truncation_en
+        parts.append(html.escape(english_detail(detail)))
+    help_text = EN_CATEGORY_HELP.get(record.get("category")) or EN_OUTCOME_HELP.get(outcome)
+    if help_text:
+        parts.append("💡 " + html.escape(help_text))
+    if record.get("metadata_warning"):
+        warning = str(record["metadata_warning"])
+        for original, translation in EN_DETAILS.items():
+            warning = warning.replace(original, translation)
+        parts.append("⚠️ " + html.escape(warning))
+    if record.get("delivery") in {"failed", "failed_or_partial"}:
+        parts.append("⚠️ Previous delivery was incomplete. This saved result was retrieved without rerunning the task.")
+    if record.get("model_fallback_from"):
+        parts.append("⚠️ Model switched due to capacity: "
+                     + html.escape(str(record["model_fallback_from"])) + " → "
+                     + html.escape(str(record.get("model") or "")))
+    if outcome not in {"success", "not_started", "running"}:
+        parts.append("ℹ️ The task was not rerun automatically; cancellation does not undo changes. /last retrieves the saved result.")
+    summary = str(record.get("execution_summary") or "").strip()
+    if summary:
+        translated = "\n".join(english_activity(line) for line in summary.splitlines())
+        parts.append("<blockquote expandable><b>Execution steps</b>\n" + html.escape(translated) + "</blockquote>")
+    duration = record.get("duration_seconds")
+    elapsed = (f"{duration:g}s" if type(duration) in {int, float} and 0 <= duration <= 1e12
+               and math.isfinite(duration) else "Not provided")
+    def count(key: str) -> str:
+        value = record.get(key)
+        return f"{value:,}" if type(value) is int and value >= 0 else "—"
+    model = html.escape(str(record.get("model") or "Default (agy setting)"))
+    effort = str(record.get("effort") or "")
+    if effort:
+        model += " (" + html.escape(effort.capitalize()) + ")"
+    footer = (f"🤖 {model} · ⏱ {elapsed}\n"
+              f"📊 Input {count('input_tokens')} · Output {count('output_tokens')} · Total {count('total_tokens')} tokens")
+    mode = record.get("mode")
+    turns = record.get("num_turns")
+    detail_items = []
+    if mode:
+        detail_items.append("Plan" if mode == "plan" else "Edit" if mode == "accept-edits" else str(mode))
+    if type(turns) is int and turns > 0:
+        detail_items.append(f"Conversation turn {turns}")
+    if detail_items:
+        footer += "\n" + html.escape(" · ".join(detail_items))
+    parts.append("<blockquote>" + footer + "</blockquote>")
+    if record.get("session_token_reminder"):
+        tokens = record.get("session_tokens", 0)
+        cumulative = f"about {tokens:,} tokens" if type(tokens) is int and tokens >= 0 else "a large context"
+        parts.append(f"💡 This conversation has {cumulative}. Use /new if replies slow down or the context becomes confused.")
+    return "\n\n".join(part for part in parts if part)
+
+
 def ui_excerpt(value: object, limit: int = 120, fallback: str = "未命名任务") -> str:
     value = " ".join(str(value or "").split()) or fallback
     return value if len(value) <= limit else value[:limit - 1] + "…"
@@ -472,7 +574,7 @@ def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
     return f"{icon} `{name}` ({size_str}) ｜ {dt_str}"
 
 
-def system_status(workspace: Path, start_time: float) -> str:
+def system_status(workspace: Path, start_time: float, language: str = "zh") -> str:
     import platform
     import shutil
     import socket
@@ -494,7 +596,7 @@ def system_status(workspace: Path, start_time: float) -> str:
     except Exception:
         pass
 
-    uptime_str = "未知"
+    uptime_str = "Unknown" if language == "en" else "未知"
     try:
         with open("/proc/uptime", "r", encoding="utf-8") as f:
             total_seconds = float(f.read().split()[0])
@@ -502,18 +604,22 @@ def system_status(workspace: Path, start_time: float) -> str:
             hours = int((total_seconds % 86400) // 3600)
             mins = int((total_seconds % 3600) // 60)
             uptime_str = f"{days} 天 {hours} 小时 {mins} 分钟" if days > 0 else f"{hours} 小时 {mins} 分钟"
+        if language == "en":
+            uptime_str = f"{days}d {hours}h {mins}m" if days else f"{hours}h {mins}m"
     except Exception:
         pass
 
     cores = os.cpu_count() or 1
-    load_str = "未知"
+    load_str = "Unknown" if language == "en" else "未知"
     try:
         l1, l5, l15 = os.getloadavg()
         load_str = f"{l1:.2f}, {l5:.2f}, {l15:.2f} ({cores} 核)"
+        if language == "en":
+            load_str = f"{l1:.2f}, {l5:.2f}, {l15:.2f} ({cores} cores)"
     except Exception:
         pass
 
-    mem_str = "未知"
+    mem_str = "Unknown" if language == "en" else "未知"
     try:
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
             meminfo = {}
@@ -532,7 +638,7 @@ def system_status(workspace: Path, start_time: float) -> str:
     except Exception:
         pass
 
-    disk_str = "未知"
+    disk_str = "Unknown" if language == "en" else "未知"
     try:
         usage = shutil.disk_usage(workspace)
         free_gb = usage.free / (1024 ** 3)
@@ -540,6 +646,8 @@ def system_status(workspace: Path, start_time: float) -> str:
         used_gb = usage.used / (1024 ** 3)
         pct = (usage.used / usage.total) * 100
         disk_str = f"剩余 {free_gb:.1f} GB / 总计 {total_gb:.1f} GB ({pct:.1f}% 已用)"
+        if language == "en":
+            disk_str = f"{free_gb:.1f} GB free / {total_gb:.1f} GB total ({pct:.1f}% used)"
     except Exception:
         pass
 
@@ -557,9 +665,21 @@ def system_status(workspace: Path, start_time: float) -> str:
             rss_pages = int(f.read().split()[1])
             rss_mb = (rss_pages * pagesize) / (1024 * 1024)
             rss_str = f" ｜ 常驻内存 {rss_mb:.1f} MB"
+        if language == "en":
+            rss_str = f" | RSS {rss_mb:.1f} MB"
     except Exception:
         pass
 
+    if language == "en":
+        return "\n".join([
+            f"🖥️ System status | Host: {hostname}", "━━━━━━━━━━━━━━━━━━━━",
+            f"• 🐧 OS: {distro_name} ({machine})", f"• ⏱️ Uptime: {uptime_str}",
+            f"• ⚡ CPU load: {load_str}", f"• 💾 Memory: {mem_str}",
+            f"• 💽 Workspace disk: {disk_str}",
+            f"• 🤖 Service: PID {pid}{rss_str} | Up {bot_up_str}",
+            f"• 🐍 Python: v{python_ver}", "━━━━━━━━━━━━━━━━━━━━",
+            "💡 Read from Linux /proc and system information.",
+        ])
     lines = [
         f"🖥️ 系统运行状态 ｜ 主机：{hostname}",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -627,6 +747,7 @@ class Bridge(CommandHandlers):
         self.restart_task: asyncio.Task | None = None
         self.steer_tasks: set[asyncio.Task] = set()
         self.callback_tasks: set[asyncio.Task] = set()
+        self.command_menu_tasks: dict[int, asyncio.Task] = {}
         try:
             self.waiting_jobs: deque[tuple[int, int, str]] = deque(store.load_queue(settings.max_prompt))
             self.queue_storage_ok = True
@@ -669,6 +790,8 @@ class Bridge(CommandHandlers):
     def _answer_callback(self, callback_id: str, **kwargs) -> None:
         if len(self.callback_tasks) >= 64 or self.stop.is_set():
             return
+        if callback_language.get() == "en" and isinstance(kwargs.get("text"), str):
+            kwargs["text"] = english_callback_notice(kwargs["text"])
         async def answer() -> None:
             try:
                 await self.api.answer_callback_query(callback_id, **kwargs)
@@ -678,7 +801,31 @@ class Bridge(CommandHandlers):
         self.callback_tasks.add(task)
         task.add_done_callback(self.callback_tasks.discard)
 
+    def _refresh_command_menu(self, user: int) -> None:
+        if user in self.command_menu_tasks or self.stop.is_set():
+            return
+
+        async def refresh() -> None:
+            try:
+                while not self.stop.is_set():
+                    language = self.store.get_language(user)
+                    await self.api.call("setMyCommands", commands=bot_commands(language),
+                                        scope={"type": "chat", "chat_id": user})
+                    if self.store.get_language(user) == language:
+                        return
+            except Exception as error:
+                LOG.warning("telegram_chat_command_menu_failed type=%s", type(error).__name__)
+                self.queue_reply(user, self._text(user, "⚠️ 无法更新 Telegram 命令菜单；可再次选择语言重试。", "⚠️ Could not update the Telegram command menu. Select the language again to retry."))
+
+        task = asyncio.create_task(refresh())
+        self.command_menu_tasks[user] = task
+        self.callback_tasks.add(task)
+        task.add_done_callback(self.callback_tasks.discard)
+        task.add_done_callback(lambda _: self.command_menu_tasks.pop(user, None))
+
     def _status_card(self, user: int, details: bool = False) -> tuple[str, dict]:
+        if self.store.get_language(user) == "en":
+            return self._status_card_en(user, details)
         keyboard = {"inline_keyboard": [[
             {"text": "⬅️ 返回概览" if details else "📋 详细信息",
              "callback_data": "status:summary" if details else "status:details"},
@@ -717,6 +864,73 @@ class Bridge(CommandHandlers):
         lines.append(f"部署版本：{self._deployment_version}")
         lines.append("路径、权限和启动时间可点“详细信息”查看。")
         return self.store.redact("\n".join(lines)), keyboard
+
+    def _status_card_en(self, user: int, details: bool) -> tuple[str, dict]:
+        keyboard = {"inline_keyboard": [[
+            {"text": "⬅️ Overview" if details else "📋 Details",
+             "callback_data": "status:summary" if details else "status:details"},
+            {"text": "🔄 Refresh", "callback_data": "status:details" if details else "status:summary"},
+        ]]}
+        current = self.store.get_model(user) or self.settings.model or "Default (agy setting)"
+        job = self.slot
+        lines = ["📋 Current status"]
+        if self.runner.blocked:
+            lines.append("⚠️ New tasks are paused. Check the server; saved results remain available.")
+        if job is not None and job.user == user:
+            if job.steered and job.steer_task and not job.steer_task.done():
+                stage = "Cleaning up and handing over the correction"
+            elif job.cancel.is_set():
+                stage = "Cancelling and cleaning up"
+            else:
+                stage = {"preparing": "Preparing", "receiving": "Receiving attachments",
+                         "starting": "Starting model", "saving": "Saving result",
+                         "sending": "Sending result", "running": "Running"}.get(job.phase, "Processing")
+            lines.extend([f"Task: {task_title(job.history_title)}", f"Stage: {stage}",
+                          f"Elapsed: {max(0, int(time.monotonic() - job.started_at))} s"])
+            current = job.model or current
+        elif self.model_check_task is not None and not self.model_check_task.done():
+            progress = {"正在准备检测当前模型": "Preparing current model check", "正在读取模型目录": "Reading model list"}.get(self.model_check_progress, self.model_check_progress)
+            lines.append("🔎 Model check: " + ("Cancelling and cleaning up" if self.model_check_cancelling else progress))
+            if self.model_check_started_at:
+                lines.append(f"Elapsed: {max(0, int(time.monotonic() - self.model_check_started_at))} s")
+        elif self.pending_album is not None:
+            lines.append("Receiving your attachments" if self.pending_album["user"] == user
+                         else "The workspace is in use by another user")
+        elif job is not None:
+            lines.append("You have no active task; the workspace is in use by another user.")
+        elif not self.runner.blocked:
+            lines.append("You have no active task. Send a message to begin.")
+        queued = sum(1 for item in self.waiting_jobs if item[0] == user)
+        if queued:
+            lines.append(f"Your waiting tasks: {queued}. Use /queue to view or cancel them.")
+        version = "Unknown (no valid version marker)" if self._deployment_version.startswith("未知") else self._deployment_version
+        lines.extend([f"Model: {current}", f"Deployed version: {version}"])
+        if details:
+            mode = self.store.get_mode(user) or "Follow agy settings"
+            effort = self.store.get_effort(user) or "Default"
+            approval = "enabled" if self.settings.skip_permissions else "disabled"
+            host_mode = "Full root access" if self.settings.host_access == "full" else "Restricted directories"
+            paths = ", ".join(map(str, self.settings.write_paths)) or "None"
+            started = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(self._started_at))
+            lines.extend([f"Mode: {mode}", f"Reasoning effort: {effort}", f"Tool auto-approval: {approval}",
+                          f"Workspace: {self.settings.workspace}", f"Extra writable paths: {paths}",
+                          f"Host access: {host_mode}", f"Service started: {started} (server time)",
+                          "Actual permissions depend on the host and systemd configuration."])
+            conv = self.store.get_conversation(user)
+            if conv and conv.get("conversation_id"):
+                cid = conv["conversation_id"]
+                short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+                lines.append(f"Conversation: `{short_cid}` (turn {conv.get('num_turns', 1)})")
+            try:
+                import shutil
+                free_gb = shutil.disk_usage(self.settings.workspace).free / (1024 ** 3)
+                lines.append(f"Workspace free space: {free_gb:.1f} GB")
+            except OSError:
+                pass
+        else:
+            lines.append("Select Details for paths, permissions, and service start time.")
+        text = self.store.redact("\n".join(lines))
+        return (control_html(text) if details else text), keyboard
 
     def _status_details(self, user: int) -> str:
         current_model = self.store.get_model(user) or self.settings.model
@@ -781,14 +995,14 @@ class Bridge(CommandHandlers):
             if self.stop.is_set():
                 return
             if self._restart_busy():
-                self.queue_reply(self.settings.owner_id, "⚠️ 任务或清理状态发生变化，已取消本次重启。请等待全部结束后重试。")
+                self.queue_reply(self.settings.owner_id, self._text(self.settings.owner_id, "⚠️ 任务或清理状态发生变化，已取消本次重启。请等待全部结束后重试。", "⚠️ Task or cleanup state changed; restart was cancelled. Wait for everything to finish before retrying."))
                 return
             # Exit nonzero so Restart=on-failure cleans the service cgroup and
             # starts a fresh process. Never exit while an active job owns the slot.
             os._exit(75)
         except Exception as error:
             LOG.error("restart_exit_failed type=%s", type(error).__name__)
-            self.queue_reply(self.settings.owner_id, "⚠️ 重新载入失败，请检查服务器后重试。")
+            self.queue_reply(self.settings.owner_id, self._text(self.settings.owner_id, "⚠️ 重新载入失败，请检查服务器后重试。", "⚠️ Restart failed; check the server before retrying."))
         finally:
             self.restart_task = None
 
@@ -836,20 +1050,26 @@ class Bridge(CommandHandlers):
             icon = "✅" if available == len(models) and available > 0 else "⚠️"
             failures = [f"• {display_model(item)}：{model_health_text(results[item])}"
                         for item in models if results[item]["outcome"] != "success"]
-            self._finish_probe_card(
+            en_failures = [f"• {display_model(item)}: {results[item].get('category', 'unknown')}"
+                           for item in models if results[item]["outcome"] != "success"]
+            self._finish_probe_card(self._text(chat_id,
                 f"{icon} {heading}：{available}/{len(models)} 个 CLI 模型已验证可用。\n"
                 + ("\n".join(failures[:12]) + "\n" if failures else "")
                 + (f"另有 {len(failures) - 12} 个未通过，可在模型菜单查看状态。\n" if len(failures) > 12 else "")
-                + "账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。")
+                + "账号无权限或 CLI 不支持的选项隐藏，临时故障保留并标注。",
+                f"{icon} {'Current model check' if model is not None else 'Model availability check'} complete: {available}/{len(models)} CLI models verified available.\n"
+                + ("\n".join(en_failures[:12]) + "\n" if en_failures else "")
+                + (f"{len(en_failures) - 12} more failed; see the model menu.\n" if len(en_failures) > 12 else "")
+                + "Models unavailable to the account or unsupported by the CLI are hidden; temporary failures remain marked."))
         except asyncio.CancelledError:
             if self.runner.blocked:
-                self._finish_probe_card("⚠️ 模型检测清理未确认完成，已暂停新任务；请检查服务器。")
+                self._finish_probe_card(self._text(chat_id, "⚠️ 模型检测清理未确认完成，已暂停新任务；请检查服务器。", "⚠️ Model check cleanup is unconfirmed. New tasks are paused; check the server."))
             else:
-                self._finish_probe_card("🛑 模型检测已取消并完成清理，保留上次完整检测结果。")
+                self._finish_probe_card(self._text(chat_id, "🛑 模型检测已取消并完成清理，保留上次完整检测结果。", "🛑 Model check cancelled and cleaned up; previous complete results are retained."))
             raise
         except Exception as error:
             LOG.warning("model_health_check_failed type=%s", type(error).__name__)
-            self._finish_probe_card("⚠️ 模型目录或可用性检测未完成，保留上次检测结果；请检查 agy 版本和授权后重试。")
+            self._finish_probe_card(self._text(chat_id, "⚠️ 模型目录或可用性检测未完成，保留上次检测结果；请检查 agy 版本和授权后重试。", "⚠️ Model listing or availability check did not finish. Previous results are retained; check the agy version and authorization before retrying."))
         finally:
             if self.model_check_task is asyncio.current_task():
                 self._model_check_finished(self.model_check_task)
@@ -857,7 +1077,7 @@ class Bridge(CommandHandlers):
     def _model_check_finished(self, task: asyncio.Task) -> None:
         if self.model_check_task is task:
             if self.model_check_card is not None and not self.model_check_card.closed:
-                self._finish_probe_card("🛑 模型检测已结束，保留上次完整检测结果。")
+                self._finish_probe_card(self._text(self.model_check_user, "🛑 模型检测已结束，保留上次完整检测结果。", "🛑 Model check ended; previous complete results are retained."))
             self.model_check_task = None
             self.model_check_user = None
             self.model_check_progress = ""
@@ -873,8 +1093,12 @@ class Bridge(CommandHandlers):
             return
         elapsed = max(0, int(time.monotonic() - self.model_check_started_at))
         state = "正在取消并清理" if self.model_check_cancelling else self.model_check_progress
-        self.queue_card(card, f"🔎 模型可用性检测\n{state}\n⏱ 已运行 {elapsed}s\n"
-                        "会消耗模型额度；检测提示要求不用工具、不读写工作目录。", {
+        en_state = ("Cancelling and cleaning up" if self.model_check_cancelling else
+                    {"正在准备检测当前模型": "Preparing current model check", "正在读取模型目录": "Reading model list"}.get(state, state))
+        self.queue_card(card, self._text(self.model_check_user, f"🔎 模型可用性检测\n{state}\n⏱ 已运行 {elapsed}s\n"
+                        "会消耗模型额度；检测提示要求不用工具、不读写工作目录。",
+                        f"🔎 Model availability check\n{en_state}\n⏱ Elapsed {elapsed}s\n"
+                        "This consumes model quota; the probe asks the model not to use tools or read or write the workspace."), {
                             "inline_keyboard": [[
                                 {"text": "🔄 刷新进度", "callback_data": f"probe:progress:{self.model_check_id}"},
                                 {"text": "🛑 取消检测", "callback_data": f"probe:cancel:{self.model_check_id}"},
@@ -897,22 +1121,22 @@ class Bridge(CommandHandlers):
 
     def _start_model_health_refresh(self, chat_id: int, model: str | None = None) -> None:
         if self.runner.blocked:
-            self.queue_reply(chat_id, "⚠️ 新任务已暂停，请先检查服务器状态。")
+            self.queue_reply(chat_id, self._text(chat_id, "⚠️ 新任务已暂停，请先检查服务器状态。", "⚠️ New tasks are paused; check the server first."))
             return
         if model is not None and (not MODEL_RE.fullmatch(model) or is_retired_model(model)):
-            self.queue_reply(chat_id, "⚠️ 请先选择有效的具体模型，再检测当前模型。")
+            self.queue_reply(chat_id, self._text(chat_id, "⚠️ 请先选择有效的具体模型，再检测当前模型。", "⚠️ Select a valid specific model before checking it."))
             return
         if self._restart_pending():
-            self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。")
+            self.queue_reply(chat_id, self._text(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。", "⏳ The service is restarting. Check models later."))
             return
         if (self.slot is not None or self.pending_album is not None
                 or (self.waiting_jobs and not self.queue_paused)
                 or (self.album_task is not None and not self.album_task.done())
                 or any(not task.done() for task in self.steer_tasks)):
-            self.queue_reply(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。")
+            self.queue_reply(chat_id, self._text(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。", "⏳ A task is running. Wait for it to finish before using /model refresh."))
             return
         if self.model_check_task and not self.model_check_task.done():
-            self.queue_reply(chat_id, "⏳ 模型可用性检测正在进行，请稍候。")
+            self.queue_reply(chat_id, self._text(chat_id, "⏳ 模型可用性检测正在进行，请稍候。", "⏳ A model availability check is already running. Please wait."))
             return
         self.model_check_user = chat_id
         self.model_check_cancelling = False
@@ -927,12 +1151,23 @@ class Bridge(CommandHandlers):
     def _is_allowed(self, user: int) -> bool:
         return user in self.settings.allowed or user in self.store.allowed
 
+    def _buttons(self, chat: int, markup: dict | None) -> dict | None:
+        try:
+            language = self.store.get_language(chat)
+        except (OSError, ValueError):
+            language = "zh"
+        return localize_markup(markup, language)
+
+    def _render_result(self, user: int, record: dict) -> str:
+        return describe_html_en(record) if self.store.get_language(user) == "en" else describe_html(record)
+
     async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
+        reply_markup = self._buttons(chat, reply_markup)
         try:
             chunks = chunks_utf16(self.store.redact(text))
             total = len(chunks)
             for i, chunk in enumerate(chunks):
-                suffix = f"\n\n📄 [第 {i+1}/{total} 页]" if total > 1 else ""
+                suffix = self._text(chat, f"\n\n📄 [第 {i+1}/{total} 页]", f"\n\n📄 [Page {i+1}/{total}]") if total > 1 else ""
                 markup = reply_markup if i == total - 1 else None
                 try:
                     await self.api.send(chat, chunk + suffix, reply_markup=markup)
@@ -945,10 +1180,11 @@ class Bridge(CommandHandlers):
 
     async def send_html(self, chat: int, text: str, reply_markup: dict | None = None,
                         message_id: int | None = None, delivery_job: Job | None = None) -> bool:
+        reply_markup = self._buttons(chat, reply_markup)
         chunks = html_chunks(self.store.redact(text))
         total = len(chunks)
         for index, chunk in enumerate(chunks, 1):
-            suffix = f"\n\n📄 [第 {index}/{total} 页]" if total > 1 else ""
+            suffix = self._text(chat, f"\n\n📄 [第 {index}/{total} 页]", f"\n\n📄 [Page {index}/{total}]") if total > 1 else ""
             markup = reply_markup if index == total else None
             replace = index == 1 and type(message_id) is int and message_id > 0
             try:
@@ -1059,7 +1295,7 @@ class Bridge(CommandHandlers):
                 self.store.save_queue(list(self.waiting_jobs))
             except (OSError, ValueError):
                 self.queue_storage_ok = False
-            self.queue_reply(chat, "⚠️ 等待任务未能启动，仍保留在队列中。请检查模型和存储后发送 /queue resume，或使用 /queue cancel 取消。")
+            self.queue_reply(chat, self._text(chat, "⚠️ 等待任务未能启动，仍保留在队列中。请检查模型和存储后发送 /queue resume，或使用 /queue cancel 取消。", "⚠️ The waiting task could not start and remains queued. Check the model and storage, then use /queue resume or /queue cancel."))
             return
 
     def queue_control(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
@@ -1096,6 +1332,7 @@ class Bridge(CommandHandlers):
             return
         revision = card.revision
         text, markup = control_html(self.store.redact(card.text)), card.markup
+        markup = self._buttons(card.chat, markup)
         try:
             if card.message_id is None:
                 result = await self.api.send(card.chat, text, reply_markup=markup, parse_mode="HTML")
@@ -1210,14 +1447,14 @@ class Bridge(CommandHandlers):
             await self._work(job, prompt)
         except Exception as error:
             LOG.error("job_accept_failed id=%s type=%s", job.job_id, type(error).__name__)
-            self.queue_reply(job.chat, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。")
+            self.queue_reply(job.chat, self._text(job.user, "任务准备失败，未启动或未确认结果。请检查服务器，不要直接重跑。", "Task preparation failed; the task did not start or its result is unconfirmed. Check the server before retrying."))
         finally:
             self._cleanup_attachments(job)
             if job.reset_after:
                 try:
                     self.store.reset_conversation(job.user)
                 except (OSError, ValueError):
-                    self.queue_reply(job.chat, "⚠️ 新对话未能建立，请检查服务器状态。")
+                    self.queue_reply(job.chat, self._text(job.user, "⚠️ 新对话未能建立，请检查服务器状态。", "⚠️ Could not start a new conversation; check the server."))
             self._release_job(job)
 
     async def _work(self, job: Job, prompt: str) -> None:
@@ -1256,7 +1493,8 @@ class Bridge(CommandHandlers):
                 except (OSError, ValueError):
                     LOG.warning("emergency_result_save_failed id=%s", job.job_id)
                 LOG.warning("result_save_failed id=%s type=%s", job.job_id, type(error).__name__)
-                await self.send_text(job.chat, f"⚠️ 任务已结束，但结果保存失败，{recovery}，尚未发送。请修复服务器存储后发送 /last 保存并取回。不要重复执行原任务。")
+                en_recovery = "it is also stored in a private recovery file; do not delete it" if recovery.startswith("已额外") else "it is held only in service memory and will be lost on restart"
+                await self.send_text(job.chat, self._text(job.user, f"⚠️ 任务已结束，但结果保存失败，{recovery}，尚未发送。请修复服务器存储后发送 /last 保存并取回。不要重复执行原任务。", f"⚠️ The task ended, but saving its result failed; {en_recovery}. It has not been sent. Repair server storage and use /last to save and retrieve it. Do not rerun the original task."))
                 return
             try:
                 self.store.save_history(job.user, job.history_title, record)
@@ -1270,7 +1508,7 @@ class Bridge(CommandHandlers):
                 except (OSError, ValueError):
                     LOG.warning("emergency_result_save_failed id=%s", job.job_id)
                 LOG.warning("result_history_save_failed id=%s type=%s", job.job_id, type(error).__name__)
-                await self.send_text(job.chat, "⚠️ 结果已保存，但历史记录保存失败。请修复服务器存储后发送 /last 取回并补存历史；不要重复执行任务。")
+                await self.send_text(job.chat, self._text(job.user, "⚠️ 结果已保存，但历史记录保存失败。请修复服务器存储后发送 /last 取回并补存历史；不要重复执行任务。", "⚠️ The result was saved but history could not be saved. Repair server storage and use /last to retrieve it and restore history; do not rerun the task."))
                 return
             warnings = []
             if result.outcome == "success" and getattr(result, "conversation_id", None):
@@ -1304,7 +1542,7 @@ class Bridge(CommandHandlers):
             if job.steered:
                 await self._finish_progress(job, result.outcome)
             delivered = True if job.steered else await self.send_html(
-                job.chat, describe_html(record), reply_markup=self._completion_buttons(job),
+                job.chat, self._render_result(job.user, record), reply_markup=self._completion_buttons(job),
                 message_id=job.status_message_id, delivery_job=job,
             )
             final_record = self.store.save(job.user, record | {
@@ -1317,8 +1555,10 @@ class Bridge(CommandHandlers):
             if not delivered and not card_updated:
                 await self.send_text(
                     job.chat,
-                    f"{LABELS.get(result.outcome, '任务已结束')}\n"
+                    self._text(job.user, f"{LABELS.get(result.outcome, '任务已结束')}\n"
                     "⚠️ 结果发送失败或不完整，已保存。点击“查看结果”或发送 /last 取回，不会重新执行任务。",
+                    f"{EN_OUTCOMES.get(result.outcome, 'Task ended')}\n"
+                    "⚠️ Delivery failed or was incomplete. The result is saved; use View result or /last to retrieve it without rerunning the task."),
                     reply_markup=self._completion_buttons(job),
                 )
         except asyncio.CancelledError:
@@ -1331,8 +1571,9 @@ class Bridge(CommandHandlers):
             LOG.error("worker_failed id=%s type=%s", job.job_id, type(error).__name__)
             await self.send_text(
                 job.chat,
-                f"任务 {job.job_id} 的结果保存或内部处理异常。"
+                self._text(job.user, f"任务 {job.job_id} 的结果保存或内部处理异常。"
                 "请检查服务器和已有结果。不要直接重复原任务。",
+                f"Task {job.job_id} encountered a result storage or internal processing error. Check the server and existing result before retrying."),
             )
         finally:
             if job.progress_task:
@@ -1374,6 +1615,24 @@ class Bridge(CommandHandlers):
             await asyncio.sleep(TYPING_HEARTBEAT_SECONDS)
 
     def _progress_text(self, job: Job) -> str:
+        if self.store.get_language(job.user) == "en":
+            elapsed = max(0, int(time.monotonic() - job.started_at))
+            state = "🛑 Cancelling and cleaning up" if job.cancel.is_set() else "⏳ Task running"
+            activity = "Cleaning up" if job.cancel.is_set() else english_activity(ui_excerpt(job.activity, 90))
+            trace = [english_activity(ui_excerpt(step, 160)) for step in job.execution_steps[-6:]]
+            if not job.progress_expanded:
+                trace = trace[-1:]
+            steps = html.escape("\n".join(trace)) if trace else "Waiting for the first step…"
+            title = html.escape(ui_excerpt(job.history_title or job.original_prompt, fallback="Task"))
+            attachment = english_attachment(job.attachment_feedback)
+            attachment_line = "\n" + html.escape(ui_excerpt(attachment, 180)) if attachment else ""
+            text = (f"❓ Request: <b>{title}</b>{attachment_line}\n\n<b>{state}</b>\n"
+                    f"Stage: {html.escape(activity)}\n"
+                    f"🤖 {html.escape(job.model or 'Default')}{' (' + html.escape(job.effort.capitalize()) + ')' if job.effort else ''} · ⏱ Elapsed: {elapsed}s\n\n"
+                    f"<blockquote><b>Execution steps</b>\n{steps}</blockquote>"
+                    + ("\n📖 Reading mode: content is paused while the task continues. Refresh for updates."
+                       if job.progress_expanded else ""))
+            return self.store.redact(text)
         elapsed = max(0, int(time.monotonic() - job.started_at))
         state = "🛑 正在取消并清理" if job.cancel.is_set() else "⏳ 任务执行中"
         activity = "正在清理资源" if job.cancel.is_set() else ui_excerpt(job.activity, 90)
@@ -1397,13 +1656,13 @@ class Bridge(CommandHandlers):
         return self.store.redact(text)
 
     def _progress_buttons(self, job: Job) -> dict:
-        return {"inline_keyboard": [
+        return self._buttons(job.chat, {"inline_keyboard": [
             [{"text": "📥 收起过程" if job.progress_expanded else "📋 展开过程",
               "callback_data": f"progress:{'collapse' if job.progress_expanded else 'expand'}:{job.job_id}"},
              {"text": "🔄 刷新过程" if job.progress_expanded else "🔄 刷新进度",
               "callback_data": f"progress:refresh:{job.job_id}"}],
             [{"text": "🛑 取消任务", "callback_data": f"cancel:{job.job_id}"}],
-        ]}
+        ]})
 
     async def _refresh_progress(self, job: Job) -> None:
         delay = PROGRESS_UPDATE_SECONDS
@@ -1472,7 +1731,7 @@ class Bridge(CommandHandlers):
                 return
 
     def _completion_buttons(self, job: Job) -> dict:
-        return self._result_buttons(job.job_id)
+        return self._buttons(job.chat, self._result_buttons(job.job_id))
 
     def _result_buttons(self, job_id: str) -> dict:
         return {"inline_keyboard": [
@@ -1495,6 +1754,22 @@ class Bridge(CommandHandlers):
                 if job.steered else
                 f"{LABELS.get(outcome, '任务已结束')}\n\n{delivery_text}"
             )
+            if self.store.get_language(job.user) == "en":
+                label = {
+                    "success": "✅ Task completed", "no_text": "⚠️ No final reply",
+                    "permission": "🚫 Permission denied", "invalid": "⚠️ Invalid result",
+                    "error": "❌ Task failed", "timed_out": "⏱️ Task timed out",
+                    "cancelled": "🛑 Task cancelled", "interrupted": "⚠️ Task interrupted",
+                    "output_limit": "📏 Output limit reached", "cleanup_failed": "⚠️ Cleanup not confirmed",
+                    "not_started": "⏹️ Task did not start", "running": "⏳ Task running",
+                }.get(outcome, "⚠️ Task ended")
+                delivery_text = {
+                    "pending": "The result is saved and is being sent; you may also retrieve it below.",
+                    "sent": "The result was sent. Use the buttons below to retrieve it or start a conversation.",
+                    "failed_or_partial": "⚠️ Delivery failed or was incomplete. The result is saved; use /last to retrieve it without rerunning the task.",
+                }.get(delivery, "The result is saved; use the buttons below to view it.")
+                completion = ("⚡ The task stopped and will restart with your correction."
+                              if job.steered else f"{label}\n\n{delivery_text}")
             await self.api.edit(job.chat, job.status_message_id, completion,
                                 {"inline_keyboard": []} if job.steered else self._completion_buttons(job))
             return True
@@ -1508,20 +1783,20 @@ class Bridge(CommandHandlers):
             if job.worker:
                 await asyncio.gather(job.worker, return_exceptions=True)
             if self.stop.is_set() or self.runner.blocked:
-                self.queue_reply(job.chat, "⚠️ 原任务已停止，但服务当前不能安全重启修正任务。请检查 /status 后重试。")
+                self.queue_reply(job.chat, self._text(job.user, "⚠️ 原任务已停止，但服务当前不能安全重启修正任务。请检查 /status 后重试。", "⚠️ The original task stopped, but the corrected task cannot safely start. Check /status before retrying."))
                 return
             if job.user in self.unsaved_results and not self._recover_unsaved(job.user):
-                self.queue_reply(job.chat, "⚠️ 原任务的结果尚未保存，修正任务没有启动。请修复存储并发送 /last 取回，再决定是否重新提交修正。")
+                self.queue_reply(job.chat, self._text(job.user, "⚠️ 原任务的结果尚未保存，修正任务没有启动。请修复存储并发送 /last 取回，再决定是否重新提交修正。", "⚠️ The original result has not been saved; the corrected task did not start. Repair storage and use /last before deciding whether to resubmit."))
                 return
             if job.steer_cancelled:
-                self.queue_reply(job.chat, "🛑 已取消修正任务，没有重新执行。")
+                self.queue_reply(job.chat, self._text(job.user, "🛑 已取消修正任务，没有重新执行。", "🛑 Corrected task cancelled; it was not rerun."))
                 return
             if self.slot is not job:
-                self.queue_reply(job.chat, "⚠️ 任务位置已变化，未启动修正任务；请检查 /status。")
+                self.queue_reply(job.chat, self._text(job.user, "⚠️ 任务位置已变化，未启动修正任务；请检查 /status。", "⚠️ The task state changed. The corrected task did not start; check /status."))
                 return
             prompt = correction_prompt(job, correction)
             if len(prompt) > self.settings.max_prompt:
-                self.queue_reply(job.chat, "⚠️ 原任务和修正合并后过长；请重新发送一条精简后的完整任务。")
+                self.queue_reply(job.chat, self._text(job.user, "⚠️ 原任务和修正合并后过长；请重新发送一条精简后的完整任务。", "⚠️ The original task and correction are too long together. Resend a shorter complete task."))
                 return
             next_job = Job(
                 job.user, job.chat, model=job.model,
@@ -1542,7 +1817,7 @@ class Bridge(CommandHandlers):
             if next_job is not None and self.slot is next_job:
                 self.slot = None
             LOG.error("job_steer_failed id=%s", job.job_id)
-            self.queue_reply(job.chat, "⚠️ 修正任务准备失败，未自动重试。请检查服务器后重新发送完整任务。")
+            self.queue_reply(job.chat, self._text(job.user, "⚠️ 修正任务准备失败，未自动重试。请检查服务器后重新发送完整任务。", "⚠️ Corrected task preparation failed; it was not retried automatically. Check the server and resend the complete task."))
         finally:
             if self.slot is job:
                 self.slot = None
@@ -1671,6 +1946,7 @@ class Bridge(CommandHandlers):
         return model or "默认（由 agy 决定）"
 
     def _model_picker(self, user: int) -> tuple[str, dict]:
+        english = self.store.get_language(user) == "en"
         current = self.store.get_model(user) or self.settings.model or ""
         buttons = []
         notices = []
@@ -1687,13 +1963,15 @@ class Bridge(CommandHandlers):
             buttons.append({"text": ("✓ " if current in variants else "") + ("⚠️ " if failed else icon + " ") + label,
                             "callback_data": f"model:{target}"})
             if failed:
-                notices.append(f"{label}：{model_health_text(health[target])}")
+                notices.append(f"{label}: check failed ({health[target].get('category', 'unknown')})"
+                               if english else f"{label}：{model_health_text(health[target])}")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         rows.append([{"text": "🔎 检测当前模型", "callback_data": "probe:current"},
                      {"text": "🔎 检测全部", "callback_data": "probe:all"}])
         rows.append([{"text": "↩️ 恢复默认", "callback_data": "model:default"},
                      {"text": "✖️ 关闭", "callback_data": "selector:close"}])
-        text = f"选择模型\n当前：{self._model_label(current)}"
+        text = (f"Select a model\nCurrent: {current or 'Default (agy setting)'}" if english
+                else f"选择模型\n当前：{self._model_label(current)}")
         stamp = health.get(current, {}).get("checked_at", 0)
         if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0:
             age = max(0, int(time.time() - stamp))
@@ -1701,9 +1979,19 @@ class Bridge(CommandHandlers):
                        else f"{age // 3600} 小时前" if age < 86400 else record_time_label(stamp))
         else:
             checked = "未检测"
-        text += f"\n当前模型上次检测：{checked}\n检测会消耗模型额度，不更改选定模型。"
+        if english:
+            try:
+                checked = (time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(stamp))
+                           if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0
+                           else "Not checked")
+            except (OSError, OverflowError, ValueError):
+                checked = "Unknown"
+            text += f"\nLast checked: {checked}\nChecks consume model quota and do not change your selection."
+        else:
+            text += f"\n当前模型上次检测：{checked}\n检测会消耗模型额度，不更改选定模型。"
         if notices:
-            text += "\n\n上次检测（不代表套餐无权限）：\n" + "\n".join(notices)
+            text += ("\n\nLast checks (failure does not necessarily mean ineligible):\n" if english
+                     else "\n\n上次检测（不代表套餐无权限）：\n") + "\n".join(notices)
         return text, {"inline_keyboard": rows}
 
     def _effort_picker(self, user: int, model_label: str, *, model: str | None = None) -> tuple[str, dict]:
@@ -1728,7 +2016,8 @@ class Bridge(CommandHandlers):
             {"text": "✖️ 关闭", "callback_data": "selector:close"},
         ]]}
         label = next((label for label, variants in self._model_choices() if model in variants), model_label)
-        return f"{label}\n选择思考强度后生效", keyboard
+        return (f"{label}\nChoose reasoning effort to apply" if self.store.get_language(user) == "en"
+                else f"{label}\n选择思考强度后生效"), keyboard
 
     def _show_effort_picker(self, chat_id: int, user: int, model_label: str) -> None:
         text, keyboard = self._effort_picker(user, model_label)
@@ -1736,6 +2025,7 @@ class Bridge(CommandHandlers):
 
     async def _collapse_selector(self, chat_id: int, message: dict, text: str,
                                  reply_markup: dict | None = None, *, html_mode: bool = False) -> bool:
+        reply_markup = self._buttons(chat_id, reply_markup)
         message_id = message.get("message_id")
         if type(message_id) is not int or message_id <= 0:
             return False
@@ -1767,9 +2057,9 @@ class Bridge(CommandHandlers):
     def _reset_conversation(self, user: int) -> str:
         if self.slot is not None and self.slot.user == user:
             self.slot.reset_after = True
-            return "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。"
+            return self._text(user, "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。", "🧠 A new conversation is scheduled. Context will be cleared after the current task; your next message starts a new conversation.")
         self.store.reset_conversation(user)
-        return "🧠 对话记忆已重置！\n已清空当前上下文，下一条消息将开启全新对话。\n历史结果与累计用量仍保留。"
+        return self._text(user, "🧠 对话记忆已重置！\n已清空当前上下文，下一条消息将开启全新对话。\n历史结果与累计用量仍保留。", "🧠 Conversation context cleared. Your next message starts a new conversation. History and cumulative usage are retained.")
 
     def _close_reset_confirmation(self, user: int, text: str) -> None:
         pending = self.reset_confirmations.pop(user, None)
@@ -1787,17 +2077,20 @@ class Bridge(CommandHandlers):
         token = uuid.uuid4().hex[:12]
         pending = ResetConfirmation(token, self._reset_context(user), card, time.monotonic() + 90)
         pending.timer = asyncio.get_running_loop().call_later(
-            90, self._close_reset_confirmation, user, "⌛ 新建对话确认已过期，当前对话未改变。")
+            90, self._close_reset_confirmation, user, self._text(user, "⌛ 新建对话确认已过期，当前对话未改变。", "⌛ New conversation confirmation expired; the current conversation is unchanged."))
         self.reset_confirmations[user] = pending
-        self.queue_card(card, "🧠 确认新建对话？\n"
+        self.queue_card(card, self._text(user, "🧠 确认新建对话？\n"
                         "将清空当前对话记忆，历史结果和累计用量仍保留。\n"
-                        "如果有任务运行，会在该任务结束后重置。\n90 秒内确认生效。", {
+                        "如果有任务运行，会在该任务结束后重置。\n90 秒内确认生效。",
+                        "🧠 Start a new conversation?\nCurrent conversation context will be cleared; history and cumulative usage remain.\nIf a task is running, context will be reset after it finishes.\nConfirm within 90 seconds."), {
                             "inline_keyboard": [[
                                 {"text": "🧠 确认新建", "callback_data": f"dialog:confirm:{token}"},
                                 {"text": "↩️ 保留当前对话", "callback_data": f"dialog:dismiss:{token}"},
                             ]]})
 
     def _forget_correction(self, job: Job, reason: str = "ℹ️ 任务已结束，这条补充未执行。") -> None:
+        if reason == "ℹ️ 任务已结束，这条补充未执行。":
+            reason = self._text(job.user, reason, "ℹ️ The task ended; this addition was not run.")
         if job.correction_timer is not None:
             job.correction_timer.cancel()
             job.correction_timer = None
@@ -1816,7 +2109,7 @@ class Bridge(CommandHandlers):
                 or job.phase in {"saving", "sending"} or not job.original_prompt):
             return False
         if not text.strip() or "\x00" in text or len(correction_prompt(job, text)) > self.settings.max_prompt:
-            self.queue_reply(user, "⚠️ 补充与原任务合并后过长或格式无效。当前任务未改变，请精简补充内容。")
+            self.queue_reply(user, self._text(user, "⚠️ 补充与原任务合并后过长或格式无效。当前任务未改变，请精简补充内容。", "⚠️ The combined task and addition are too long or invalid. The current task is unchanged; shorten the addition."))
             return True
         job.pending_correction = text
         job.correction_token = uuid.uuid4().hex[:12]
@@ -1824,15 +2117,19 @@ class Bridge(CommandHandlers):
         if job.correction_timer is not None:
             job.correction_timer.cancel()
         job.correction_timer = asyncio.get_running_loop().call_later(
-            CORRECTION_TTL_SECONDS, self._forget_correction, job, "⌛ 补充已过期，当前任务未改变。")
+            CORRECTION_TTL_SECONDS, self._forget_correction, job, self._text(user, "⌛ 补充已过期，当前任务未改变。", "⌛ The addition expired; the current task is unchanged."))
         if job.correction_card is None:
             job.correction_card = ControlCard(user)
         prefix = f"correction:{{}}:{job.job_id}:{job.correction_token}"
         self.queue_card(job.correction_card,
-                         "💬 收到一条待确认补充，当前任务仍在运行。\n"
+                         self._text(user, "💬 收到一条待确认补充，当前任务仍在运行。\n"
                          "点击“作为修正”会先停止并清理当前任务，再按原需求和这段补充执行。\n"
                          f"补充预览：{self.store.redact(task_title(text))}\n"
                          "仅最新一条待确认补充有效，5 分钟后失效；不会自动执行。",
+                         "💬 An addition awaits confirmation while the current task continues.\n"
+                         "Apply correction stops and cleans up the current task, then runs the original request with this addition.\n"
+                         f"Preview: {self.store.redact(task_title(text))}\n"
+                         "Only the latest addition is valid. It expires after 5 minutes and will not run automatically."),
                          {"inline_keyboard": [[
                              {"text": "✏️ 作为修正", "callback_data": prefix.format("apply")},
                              {"text": "✖️ 忽略补充", "callback_data": prefix.format("dismiss")},
@@ -1840,6 +2137,16 @@ class Bridge(CommandHandlers):
         return True
 
     async def handle_callback(self, cq: dict) -> None:
+        sender = cq.get("from")
+        user = sender.get("id") if isinstance(sender, dict) else None
+        language = self.store.get_language(user) if type(user) is int and self._is_allowed(user) else "zh"
+        token = callback_language.set(language)
+        try:
+            await self._handle_callback(cq)
+        finally:
+            callback_language.reset(token)
+
+    async def _handle_callback(self, cq: dict) -> None:
         cq_id = str(cq.get("id") or "")
         sender = cq.get("from") or {}
         user = sender.get("id")
@@ -1852,6 +2159,19 @@ class Bridge(CommandHandlers):
                 or chat.get("type") != "private" or type(chat_id) is not int or chat_id != user):
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id, text="⚠️ 无操作权限", show_alert=True)
+            return
+
+        if data in {"language:zh", "language:en"}:
+            language = data.split(":", 1)[1]
+            try:
+                self.store.set_language(user, language)
+            except (OSError, ValueError):
+                self._answer_callback(cq_id, text="Could not save language" if language == "en" else "无法保存语言", show_alert=True)
+                return
+            notice = "已选择中文" if language == "zh" else "English selected."
+            self._answer_callback(cq_id, text=notice)
+            self.queue_selector_edit(chat_id, message, notice)
+            self._refresh_command_menu(user)
             return
 
         if data.startswith("progress:"):
@@ -1889,10 +2209,10 @@ class Bridge(CommandHandlers):
                      and parts[2] == pending.token and time.monotonic() < pending.expires)
             notice = "确认已失效，请重新点击“新建对话”。"
             if valid and parts[1] == "dismiss":
-                self._close_reset_confirmation(user, "↩️ 已保留当前对话，没有清空记忆。")
+                self._close_reset_confirmation(user, self._text(user, "↩️ 已保留当前对话，没有清空记忆。", "↩️ Current conversation retained; context was not cleared."))
                 notice = "已保留当前对话"
             elif valid and pending.context != self._reset_context(user):
-                self._close_reset_confirmation(user, "ℹ️ 当前对话已发生变化，请重新点击“新建对话”后确认。")
+                self._close_reset_confirmation(user, self._text(user, "ℹ️ 当前对话已发生变化，请重新点击“新建对话”后确认。", "ℹ️ The conversation changed. Select New conversation and confirm again."))
                 notice = "对话已变化，请重新确认"
             elif valid:
                 # Invalidate before any await so repeated taps cannot reset twice.
@@ -1914,7 +2234,7 @@ class Bridge(CommandHandlers):
         if data in {"probe:current", "probe:all"}:
             current = self.store.get_model(user) or self.settings.model or ""
             if data == "probe:current" and not current:
-                self.queue_reply(chat_id, "💡 请先在 /model 选择具体模型，再检测当前模型；默认模型由 CLI 决定。")
+                self.queue_reply(chat_id, self._text(user, "💡 请先在 /model 选择具体模型，再检测当前模型；默认模型由 CLI 决定。", "💡 Select a specific model with /model before checking it; the CLI chooses the default model."))
             else:
                 self._start_model_health_refresh(chat_id, current if data == "probe:current" else None)
             if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -1945,7 +2265,7 @@ class Bridge(CommandHandlers):
                     self._answer_callback(cq_id, text="补充已失效，请确认当前任务后重新发送。", show_alert=True)
                 return
             correction = job.pending_correction
-            text = "⚡ 已提交修正，正在等待清理和交接。" if parts[1] == "apply" else "已忽略这条补充，当前任务未改变。"
+            text = (self._text(user, "⚡ 已提交修正，正在等待清理和交接。", "⚡ Correction submitted; waiting for cleanup and handover.") if parts[1] == "apply" else self._text(user, "已忽略这条补充，当前任务未改变。", "Addition ignored; the current task is unchanged."))
             self._forget_correction(job, text)
             # Reserve the correction through the ordinary /steer path before
             # awaiting any Telegram acknowledgement, so double taps cannot replay.
@@ -1963,7 +2283,7 @@ class Bridge(CommandHandlers):
                 job.steer_cancelled = True
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🛑 已请求取消")
-                self.queue_reply(chat_id, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。")
+                self.queue_reply(chat_id, self._text(user, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。", "🛑 Cancellation requested. Task processes are being cleaned up; existing changes are not undone."))
             elif cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id, text="该任务已结束或不可取消")
             return
@@ -1979,7 +2299,7 @@ class Bridge(CommandHandlers):
             removed = self._remove_queued(lambda item: item is entry[1])
             if cq_id:
                 self._answer_callback(cq_id, text="已取消等待任务" if removed else "保存失败，请检查存储")
-            self.queue_reply(chat_id, "🛑 已取消这条等待任务。" if removed else "⚠️ 无法保存取消操作，请检查服务器存储。")
+            self.queue_reply(chat_id, self._text(user, "🛑 已取消这条等待任务。", "🛑 Waiting task cancelled.") if removed else self._text(user, "⚠️ 无法保存取消操作，请检查服务器存储。", "⚠️ Could not save the cancellation; check server storage."))
             return
 
         if data.startswith("history:"):
@@ -1990,11 +2310,11 @@ class Bridge(CommandHandlers):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(
                         cq_id, text="无法读取任务历史，请检查服务器状态。", show_alert=True)
-                self.queue_reply(chat_id, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。", "⚠️ Could not read task history; check the server. The original record is retained and the task was not rerun."))
                 return
             opened = False
             if record:
-                opened = self.queue_reply(chat_id, describe_html(record), html_mode=True,
+                opened = self.queue_reply(chat_id, self._render_result(user, record), html_mode=True,
                                           reply_markup=self._result_buttons(record["job_id"]),
                                           result_key=(user, record["job_id"]))
             if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -2021,7 +2341,7 @@ class Bridge(CommandHandlers):
                 text, keyboard = self._model_picker(user)
             else:
                 current = self.store.get_model(user) or self.settings.model or ""
-                text, keyboard = f"已关闭选择\n当前：{self._model_label(current)}", {"inline_keyboard": []}
+                text, keyboard = self._text(user, f"已关闭选择\n当前：{self._model_label(current)}", f"Selection closed\nCurrent: {current or 'Default (agy setting)'}"), {"inline_keyboard": []}
             self.queue_selector_edit(chat_id, message, text, keyboard)
             return
 
@@ -2057,6 +2377,8 @@ class Bridge(CommandHandlers):
                 self.queue_selector_edit(chat_id, message, picker, keyboard)
                 return
             text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
+            if self.store.get_language(user) == "en":
+                text = f"{'Default restored' if reset else 'Model changed'}\nCurrent: {current or 'Default (agy setting)'}\nApplies to future tasks"
             keyboard = {"inline_keyboard": [[
                 {"text": "🤖 更换模型", "callback_data": "selector:models"},
                 {"text": "✖️ 关闭", "callback_data": "selector:close"},
@@ -2082,6 +2404,8 @@ class Bridge(CommandHandlers):
                     self.store.set_model(user, variant)
                     self.store.set_effort(user, None)
                     collapsed = f"✅ 已切换至：{variant}｜思考强度：{effort_label(None, variant)}"
+                    if self.store.get_language(user) == "en":
+                        collapsed = f"✅ Switched to: {variant} | Reasoning effort: {target.capitalize()}"
                     if cq_id and hasattr(self.api, "answer_callback_query"):
                         self._answer_callback(cq_id, text=f"🎯 已切换至 {variant}")
                     self.queue_selector_edit(chat_id, message, collapsed)
@@ -2093,6 +2417,8 @@ class Bridge(CommandHandlers):
             if not supports_effort(model):
                 self.store.set_effort(user, None)
                 collapsed = f"✅ 已切换至：{model}｜思考强度：模型内置"
+                if self.store.get_language(user) == "en":
+                    collapsed = f"✅ Switched to: {model} | Reasoning effort: built in"
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="该模型使用内置思考强度")
                 self.queue_selector_edit(chat_id, message, collapsed)
@@ -2102,6 +2428,8 @@ class Bridge(CommandHandlers):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🔄 已恢复默认思考强度")
                 collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：默认"
+                if self.store.get_language(user) == "en":
+                    collapsed = f"✅ Switched to: {model or 'Default model'} | Reasoning effort: default"
                 self.queue_selector_edit(chat_id, message, collapsed)
                 return
             if target in {"low", "medium", "high"}:
@@ -2109,6 +2437,8 @@ class Bridge(CommandHandlers):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text=f"🎯 已设置思考强度为: {target.capitalize()}")
                 collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：{effort_label(target, model)}"
+                if self.store.get_language(user) == "en":
+                    collapsed = f"✅ Switched to: {model or 'Default model'} | Reasoning effort: {target.capitalize()}"
                 self.queue_selector_edit(chat_id, message, collapsed)
                 return
 
@@ -2118,14 +2448,16 @@ class Bridge(CommandHandlers):
                 self.store.set_mode(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🔄 已恢复默认执行模式")
-                self.queue_selector_edit(chat_id, message, "已恢复默认执行模式\n后续任务跟随 agy 设置")
+                self.queue_selector_edit(chat_id, message, self._text(user, "已恢复默认执行模式\n后续任务跟随 agy 设置", "Default execution mode restored\nFuture tasks use agy settings"))
                 return
             if target in {"plan", "accept-edits"}:
                 self.store.set_mode(user, target)
                 name = "推演规划模式 (Plan)" if target == "plan" else "落地编辑模式 (Accept-Edits)"
+                if self.store.get_language(user) == "en":
+                    name = "Plan" if target == "plan" else "Accept-Edits"
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text=f"🎯 已切换为: {name}")
-                text = f"已切换模式：{name}\n后续任务生效"
+                text = self._text(user, f"已切换模式：{name}\n后续任务生效", f"Mode changed: {name}\nApplies to future tasks")
                 self.queue_selector_edit(chat_id, message, text)
                 return
 
@@ -2152,7 +2484,7 @@ class Bridge(CommandHandlers):
                       attachment: dict, is_photo: bool, caption: str) -> None:
         album = self.pending_album
         if album is not None and (album["user"], album["group_id"]) != (user, group_id):
-            self.queue_reply(user, "⏳ 正在接收上一组附件，请稍后再发送新任务。")
+            self.queue_reply(user, self._text(user, "⏳ 正在接收上一组附件，请稍后再发送新任务。", "⏳ The previous attachment group is still being received. Send a new task later."))
             return
         if album is None:
             album = {"user": user, "group_id": group_id, "update": update,
@@ -2204,7 +2536,7 @@ class Bridge(CommandHandlers):
             if now < self._next_id_reply:
                 return
             self._next_id_reply = now + 2.0
-            self.queue_reply(chat_id, f"🆔 你的 Telegram 数字 ID：{user}")
+            self.queue_reply(chat_id, self._text(user, f"🆔 你的 Telegram 数字 ID：{user}", f"🆔 Your Telegram numeric ID: {user}"))
             return
         if not self._is_allowed(user) or sender.get("is_bot") is True:
             return
@@ -2212,15 +2544,15 @@ class Bridge(CommandHandlers):
         if command == "/queue" and text.startswith("/queue add "):
             text = text[len("/queue add "):].strip()
             if not text or text.startswith("/"):
-                self.queue_reply(chat_id, "💡 用法：/queue add <文字任务>。")
+                self.queue_reply(chat_id, self._text(user, "💡 用法：/queue add <文字任务>。", "💡 Usage: /queue add <text task>."))
                 return
             command = ""
             force_queue = True
         if not command and self._restart_pending():
-            self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再发送任务或附件。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在重新载入服务，请稍后再发送任务或附件。", "⏳ The service is restarting. Send the task or attachment again later."))
             return
         if not command and any(not task.done() for task in self.steer_tasks):
-            self.queue_reply(chat_id, "⏳ 正在交接修正任务，请等待清理和交接完成。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在交接修正任务，请等待清理和交接完成。", "⏳ A corrected task is being handed over. Wait for cleanup to finish."))
             return
         group_id = message.get("media_group_id")
         if (album_items is None and isinstance(group_id, str) and group_id
@@ -2230,7 +2562,7 @@ class Bridge(CommandHandlers):
                         if type(entry.get("file_size")) is int else 0, default=None)
                     if has_photo else document)
             if not isinstance(item, dict):
-                self.queue_reply(chat_id, "⚠️ 无法识别这组附件，请重新发送。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法识别这组附件，请重新发送。", "⚠️ Could not identify these attachments. Send them again."))
                 return
             self._buffer_album(update, user, group_id, item, has_photo, text)
             return
@@ -2242,7 +2574,7 @@ class Bridge(CommandHandlers):
         if has_photo:
             candidates = [entry for entry in photo_list if isinstance(entry, dict)]
             if not candidates:
-                self.queue_reply(chat_id, "⚠️ 无法识别这张图片，请重新发送原图或截图。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法识别这张图片，请重新发送原图或截图。", "⚠️ Could not identify the image. Resend the original or screenshot."))
                 return
             attachment = max(candidates, key=lambda entry: entry.get("file_size", 0) if type(entry.get("file_size")) is int else 0)
             is_photo = True
@@ -2253,50 +2585,51 @@ class Bridge(CommandHandlers):
         if (len(items) > MAX_ALBUM_FILES or
                 sum(item.get("file_size", 0) if type(item.get("file_size")) is int else 0
                     for item, _ in items) > MAX_ALBUM_BYTES):
-            self.queue_reply(chat_id, "⚠️ 一次最多发送 10 个附件，总大小不超过 30 MB。请分批发送。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 一次最多发送 10 个附件，总大小不超过 30 MB。请分批发送。", "⚠️ Send at most 10 attachments totaling 30 MB at a time. Split them into batches."))
             return
         if len(text) > self.settings.max_prompt or "\x00" in text:
-            self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+            self.queue_reply(chat_id, self._text(user, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。", f"⚠️ The task is too long or contains invalid characters. Maximum: {self.settings.max_prompt} characters."))
             return
         if self.runner.blocked:
-            self.queue_reply(chat_id, "⚠️ 新任务已暂停，请检查服务器并重启服务。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 新任务已暂停，请检查服务器并重启服务。", "⚠️ New tasks are paused. Check the server and restart the service."))
             return
         if self.model_check_task and not self.model_check_task.done():
-            self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在进行模型可用性检测，请完成后再提交任务。", "⏳ Model availability is being checked. Wait until it finishes before submitting a task."))
             return
         if user in self.unsaved_results or user in self.unreadable_recovery:
             if not self._recover_unsaved(user):
-                self.queue_reply(chat_id, "⚠️ 上一个结果尚未保存，请修复服务器存储并发送 /last 取回；新任务尚未启动。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 上一个结果尚未保存，请修复服务器存储并发送 /last 取回；新任务尚未启动。", "⚠️ The previous result has not been saved. Repair server storage and use /last to retrieve it. No new task was started."))
                 return
-            self.queue_reply(chat_id, "✅ 上一个结果已恢复保存，可通过 /history 查看。")
+            self.queue_reply(chat_id, self._text(user, "✅ 上一个结果已恢复保存，可通过 /history 查看。", "✅ The previous result has been recovered and saved; view it with /history."))
         if self.slot is not None or self.pending_album is not None or (self.waiting_jobs and not from_queue):
             if (not items and not force_queue and self.slot is not None and self.slot.user == user
                     and self._offer_correction(user, text)):
                 return
             if not force_queue and self.slot is not None and self.slot.user == user:
-                self.queue_reply(chat_id, "⏳ 当前任务尚未结束。发送 /queue add <文字任务> 可排队，或等待清理完成。")
+                self.queue_reply(chat_id, self._text(user, "⏳ 当前任务尚未结束。发送 /queue add <文字任务> 可排队，或等待清理完成。", "⏳ The current task has not finished. Use /queue add <text task> to queue a task, or wait for cleanup."))
             elif items:
-                self.queue_reply(chat_id, "⚠️ 附件暂不支持排队，请等待当前任务完成后重新发送。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 附件暂不支持排队，请等待当前任务完成后重新发送。", "⚠️ Attachments cannot be queued. Wait for the current task to finish, then resend them."))
             elif len(self.waiting_jobs) >= 3:
-                self.queue_reply(chat_id, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。", "⚠️ The queue is full (maximum 3). This task was not accepted; resend it later."))
             elif not self.queue_storage_ok:
-                self.queue_reply(chat_id, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。", "⚠️ Queue storage is unavailable. This task was not accepted; check server storage."))
             else:
                 entry = (user, chat_id, text)
                 try:
                     self.store.save_queue([*self.waiting_jobs, entry])
                 except (OSError, ValueError):
-                    self.queue_reply(chat_id, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。")
+                    self.queue_reply(chat_id, self._text(user, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。", "⚠️ Could not save the waiting task. It was not accepted; check server storage."))
                     return
                 self.waiting_jobs.append(entry)
                 state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
-                self.queue_reply(chat_id, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。")
+                en_state = "The queue is paused; the first task's owner must send /queue resume." if self.queue_paused else "It will start after the previous task is cleaned up."
+                self.queue_reply(chat_id, self._text(user, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。", f"⏳ Added to the queue at position {len(self.waiting_jobs)}. {en_state} Use /queue cancel to cancel. After a service restart the first task's owner must confirm resumption."))
                 self._wake_queue()
             return
 
         user_model = self.store.get_model(user) or self.settings.model or ""
         if is_retired_model(user_model):
-            self.queue_reply(chat_id, "当前保存的模型已移除，请先发送 /model 重新选择；本次没有启动任务。")
+            self.queue_reply(chat_id, self._text(user, "当前保存的模型已移除，请先发送 /model 重新选择；本次没有启动任务。", "The saved model was removed. Select another with /model; the task was not started."))
             return
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
@@ -2306,7 +2639,9 @@ class Bridge(CommandHandlers):
             effort = ""
             self.store.set_effort(user, None)
         mode = self.store.get_mode(user) or ""
-        fallback_title = f"分析附件：{items[0][0].get('file_name', '截图')}" if items else "未命名任务"
+        fallback_title = (self._text(user, f"分析附件：{items[0][0].get('file_name', '截图')}",
+                                    f"Analyze attachment: {items[0][0].get('file_name', 'screenshot')}")
+                          if items else self._text(user, "未命名任务", "Untitled task"))
         job = Job(user, chat_id, model=user_model, conversation_id=conv_id, effort=effort,
                   mode=mode, history_title=task_title(text, fallback_title), original_prompt=text,
                   has_attachment=bool(items))
@@ -2323,10 +2658,11 @@ class Bridge(CommandHandlers):
         except Exception:
             self.slot = None
             LOG.error("job_prepare_failed id=%s", job.job_id)
-            self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+            self.queue_reply(chat_id, self._text(user, "任务准备失败，未启动 agy。请检查服务器存储和权限。", "Task preparation failed; agy was not started. Check server storage and permissions."))
 
     async def _prepare_and_work(self, job: Job, text: str, items: list[tuple[dict, bool]]) -> None:
         """Download outside polling; retain the slot until all writes and cleanup finish."""
+        user = job.user
         job.phase = "receiving" if items else "preparing"
         chat_id = job.chat
         accepted = False
@@ -2336,7 +2672,7 @@ class Bridge(CommandHandlers):
                 try:
                     received = []
                     total_bytes = 0
-                    self.queue_reply(chat_id, f"📎 正在接收 {len(items)} 个附件；发送 /status 查看进度，或发送 /cancel 取消。")
+                    self.queue_reply(chat_id, self._text(user, f"📎 正在接收 {len(items)} 个附件；发送 /status 查看进度，或发送 /cancel 取消。", f"📎 Receiving {len(items)} attachments. Use /status for progress or /cancel to stop."))
                     for index, (item, photo) in enumerate(items, 1):
                         job.activity = f"接收附件 {index}/{len(items)}"
                         if job.cancel.is_set() or self.stop.is_set():
@@ -2350,27 +2686,27 @@ class Bridge(CommandHandlers):
                     self._cleanup_attachments(job)
                     reason = str(error)
                     if job.cancel.is_set():
-                        message = "🛑 已取消附件接收，没有启动任务。"
+                        message = self._text(user, "🛑 已取消附件接收，没有启动任务。", "🛑 Attachment intake cancelled; no task was started.")
                     elif reason in {"oversized file", "album too large"}:
-                        message = "⚠️ 附件过大：单文件最多 10 MB，整组最多 30 MB；本组没有启动任务。"
+                        message = self._text(user, "⚠️ 附件过大：单文件最多 10 MB，整组最多 30 MB；本组没有启动任务。", "⚠️ Attachments are too large: maximum 10 MB per file and 30 MB per group. No task was started.")
                     elif reason == "unsupported document":
-                        message = "⚠️ 不支持这种附件格式，请发送截图或常见的文本、日志、代码文件；本组没有启动任务。"
+                        message = self._text(user, "⚠️ 不支持这种附件格式，请发送截图或常见的文本、日志、代码文件；本组没有启动任务。", "⚠️ Unsupported attachment format. Send a screenshot or a common text, log, or code file. No task was started.")
                     else:
-                        message = "⚠️ 附件接收失败，请检查网络、文件信息和服务器存储后重新发送；本组没有启动任务。"
+                        message = self._text(user, "⚠️ 附件接收失败，请检查网络、文件信息和服务器存储后重新发送；本组没有启动任务。", "⚠️ Could not receive the attachments. Check network, file information, and server storage before resending. No task was started.")
                     self.queue_reply(chat_id, message)
                     return
-                instruction = text or "请读取并分析该附件，说明发现的问题和建议。"
+                instruction = text or self._text(user, "请读取并分析该附件，说明发现的问题和建议。", "Read and analyze the attachments, explaining your findings and recommendations.")
                 paths = "\n".join(f"- {name}: {path}" for path, name in received)
-                prompt = f"用户上传了 {len(received)} 个附件，路径如下：\n{paths}\n请先读取这些文件，再完成用户要求：{instruction}"
+                prompt = self._text(user, f"用户上传了 {len(received)} 个附件，路径如下：\n{paths}\n请先读取这些文件，再完成用户要求：{instruction}", f"The user uploaded {len(received)} attachments at these paths:\n{paths}\nRead these files first, then complete the user's request: {instruction}")
                 if len(received) > 1:
                     names = "、".join(name for _, name in received)
                     job.attachment_feedback = f"📎 已收到 {len(received)} 个附件：{names}。本次任务会读取它们。"
             if len(prompt) > self.settings.max_prompt or "\x00" in prompt:
                 self._cleanup_attachments(job)
-                self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+                self.queue_reply(chat_id, self._text(user, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。", f"⚠️ The task is too long or contains invalid characters. Maximum: {self.settings.max_prompt} characters."))
                 return
             if job.cancel.is_set() or self.stop.is_set():
-                self.queue_reply(chat_id, "🛑 已取消附件接收，没有启动任务。")
+                self.queue_reply(chat_id, self._text(user, "🛑 已取消附件接收，没有启动任务。", "🛑 Attachment intake cancelled; no task was started."))
                 return
             accepted = True
             await self._accept_and_work(job, prompt)
@@ -2379,7 +2715,7 @@ class Bridge(CommandHandlers):
             raise
         except Exception as error:
             LOG.error("job_prepare_failed id=%s type=%s", job.job_id, type(error).__name__)
-            self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+            self.queue_reply(chat_id, self._text(user, "任务准备失败，未启动 agy。请检查服务器存储和权限。", "Task preparation failed; agy was not started. Check server storage and permissions."))
         finally:
             self._cleanup_attachments(job)
             if not accepted:
@@ -2395,7 +2731,7 @@ class Bridge(CommandHandlers):
                         self.store.reset_conversation(job.user)
                 except (OSError, ValueError):
                     LOG.error("job_prepare_record_failed id=%s", job.job_id)
-                    self.queue_reply(chat_id, "任务准备记录保存失败；请检查服务器。")
+                    self.queue_reply(chat_id, self._text(user, "任务准备记录保存失败；请检查服务器。", "Could not save the task preparation record; check the server."))
             self._release_job(job)
 
     async def consume_updates(self, updates: object) -> None:
@@ -2424,19 +2760,7 @@ class Bridge(CommandHandlers):
         if not isinstance(me, dict) or me.get("is_bot") is not True:
             raise TelegramError()
         try:
-            await self.api.set_commands([
-                {"command": "start", "description": "欢迎页与快速开始"},
-                {"command": "help", "description": "查看帮助与使用说明"},
-                {"command": "status", "description": "查看当前任务状态"},
-                {"command": "cancel", "description": "取消正在执行的任务"},
-                {"command": "queue", "description": "查看或取消等待任务"},
-                {"command": "steer", "description": "停止当前任务并按修正重做"},
-                {"command": "model", "description": "选择模型与思考强度"},
-                {"command": "new", "description": "新建对话并清除上下文"},
-                {"command": "usage", "description": "查看 Token 用量"},
-                {"command": "last", "description": "查看最近一次结果"},
-                {"command": "history", "description": "查看最近 10 条任务"},
-            ])
+            await self.api.set_commands(bot_commands("zh"))
         except (TelegramError, AttributeError):
             LOG.warning("telegram_command_menu_unavailable")
         webhook = await self.api.call("getWebhookInfo")
