@@ -1,7 +1,7 @@
 """Known interface buttons must be translated without rewriting user labels."""
 import unittest
 
-from i18n import english_activity, english_callback_notice, localize_markup
+from i18n import english_activity, english_callback_notice, english_detail, localize_markup
 
 
 class LanguageMarkupTests(unittest.TestCase):
@@ -32,3 +32,7 @@ class LanguageMarkupTests(unittest.TestCase):
         self.assertEqual(english_callback_notice("🎯 已切换至 gemini-3.8"),
                          "🎯 Switched to gemini-3.8")
         self.assertEqual(english_callback_notice("已请求取消"), "Cancellation requested")
+
+    def test_error_detail_keeps_external_error_text(self):
+        self.assertEqual(english_detail("agy 返回异常状态 (failed)：模型报告中文"),
+                         "agy returned an error status (failed): 模型报告中文")

@@ -22,8 +22,8 @@ from pathlib import Path
 
 from agy_runner import Result, Runner
 from command_handlers import CommandHandlers
-from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, bot_commands, callback_language,
-                  english_activity, english_attachment, english_callback_notice, localize_markup)
+from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, EN_OUTCOME_HELP, bot_commands, callback_language,
+                  english_activity, english_attachment, english_callback_notice, english_detail, localize_markup)
 from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
                       resolve_model, Settings)
@@ -259,10 +259,13 @@ def history_summary_en(records: list[dict]) -> tuple[str, dict | None]:
             except (OSError, ValueError, OverflowError):
                 pass
         model = str(record.get("model") or "Default")
+        duration = record.get("duration_seconds")
+        duration_text = (f" | ⏱️ {duration}s" if type(duration) in {int, float}
+                         and math.isfinite(duration) and duration > 0 else "")
         delivery = {"failed": "Not delivered", "failed_or_partial": "Incomplete delivery",
                     "unknown": "Delivery unconfirmed", "pending": "Delivery unconfirmed",
                     "superseded_by_steer": "Replaced by correction"}.get(str(record.get("delivery") or ""), "")
-        lines.append(f"{index}. {outcome} | {when} | {model}" + (f" | {delivery}" if delivery else "") + f"\n   {title}")
+        lines.append(f"{index}. {outcome} | {when} | {model}{duration_text}" + (f" | {delivery}" if delivery else "") + f"\n   {title}")
         job_id = record.get("job_id")
         if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
             keyboard.append([{"text": f"{index}. {when} {title}"[:60], "callback_data": f"history:{job_id}"}])
@@ -421,12 +424,19 @@ def describe_html_en(record: dict) -> str:
     outcome = str(record.get("outcome", "error"))
     if outcome != "success":
         parts.append(html.escape(EN_OUTCOMES.get(outcome, "⚠️ Review the result")))
+    truncation_zh = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
+    truncation_en = "\n\n(The reply exceeded the storage limit and was truncated; /last can retrieve only this truncated copy.)"
     if record.get("text"):
-        parts.append(render_markdown_html(str(record["text"])))
+        reply = str(record["text"])
+        if record.get("text_truncated") is True and reply.endswith(truncation_zh):
+            reply = reply[:-len(truncation_zh)] + truncation_en
+        parts.append(render_markdown_html(reply))
     elif record.get("detail"):
         detail = str(record["detail"])
-        parts.append(html.escape(EN_DETAILS.get(detail, detail)))
-    help_text = EN_CATEGORY_HELP.get(record.get("category"))
+        if record.get("detail_truncated") is True and detail.endswith(truncation_zh):
+            detail = detail[:-len(truncation_zh)] + truncation_en
+        parts.append(html.escape(english_detail(detail)))
+    help_text = EN_CATEGORY_HELP.get(record.get("category")) or EN_OUTCOME_HELP.get(outcome)
     if help_text:
         parts.append("💡 " + html.escape(help_text))
     if record.get("metadata_warning"):
@@ -2156,9 +2166,9 @@ class Bridge(CommandHandlers):
             try:
                 self.store.set_language(user, language)
             except (OSError, ValueError):
-                self._answer_callback(cq_id, text="无法保存语言 / Could not save language", show_alert=True)
+                self._answer_callback(cq_id, text="Could not save language" if language == "en" else "无法保存语言", show_alert=True)
                 return
-            notice = "已选择中文" if language == "zh" else "English selected; translation is in progress."
+            notice = "已选择中文" if language == "zh" else "English selected."
             self._answer_callback(cq_id, text=notice)
             self.queue_selector_edit(chat_id, message, notice)
             self._refresh_command_menu(user)
@@ -2685,9 +2695,9 @@ class Bridge(CommandHandlers):
                         message = self._text(user, "⚠️ 附件接收失败，请检查网络、文件信息和服务器存储后重新发送；本组没有启动任务。", "⚠️ Could not receive the attachments. Check network, file information, and server storage before resending. No task was started.")
                     self.queue_reply(chat_id, message)
                     return
-                instruction = text or "请读取并分析该附件，说明发现的问题和建议。"
+                instruction = text or self._text(user, "请读取并分析该附件，说明发现的问题和建议。", "Read and analyze the attachments, explaining your findings and recommendations.")
                 paths = "\n".join(f"- {name}: {path}" for path, name in received)
-                prompt = f"用户上传了 {len(received)} 个附件，路径如下：\n{paths}\n请先读取这些文件，再完成用户要求：{instruction}"
+                prompt = self._text(user, f"用户上传了 {len(received)} 个附件，路径如下：\n{paths}\n请先读取这些文件，再完成用户要求：{instruction}", f"The user uploaded {len(received)} attachments at these paths:\n{paths}\nRead these files first, then complete the user's request: {instruction}")
                 if len(received) > 1:
                     names = "、".join(name for _, name in received)
                     job.attachment_feedback = f"📎 已收到 {len(received)} 个附件：{names}。本次任务会读取它们。"

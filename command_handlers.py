@@ -23,14 +23,16 @@ class CommandHandlers:
             {"text": ("✓ " if current == "zh" else "") + "中文", "callback_data": "language:zh"},
             {"text": ("✓ " if current == "en" else "") + "English", "callback_data": "language:en"},
         ]]}
-        self.queue_reply(chat_id, "🌐 选择界面语言 / Choose interface language:", reply_markup=keyboard)
+        self.queue_reply(chat_id, self._text(user, "🌐 选择界面语言：", "🌐 Choose interface language:"), reply_markup=keyboard)
 
     async def _command_start(self, text, user, chat_id, helpers):
         if self.store.get_language(user) == "en":
             self.queue_reply(chat_id, "👋 Welcome to Antigravity Telegram Remote\n\n"
                              "Send a task to run it in your server workspace. Use /model to choose a model, "
-                             "/status to check progress, /cancel to stop a task, and /help for commands.\n"
-                             "English translation is in progress; some messages may still appear in Chinese.")
+                             "/status to check progress, /cancel to stop a task, and /help for commands.\n\n"
+                             "📎 Send up to 10 attachments per group, 10 MB each and 30 MB total.\n"
+                             "🔒 Only authorized users in private chats can use the bot; tasks run in your server workspace.\n"
+                             "Use /language to change the interface language.")
             return
         self.queue_reply(
             chat_id,
@@ -60,8 +62,7 @@ class CommandHandlers:
                                "/sys or /system — server status\n/whitelist — manage authorized users\n"
                                "/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
                                "/language — select language\n/help — this menu\n"
-                               "Attachments: up to 10 files, 10 MB each and 30 MB per group. "
-                               "Some messages are not translated yet.")
+                               "Attachments: up to 10 files, 10 MB each and 30 MB per group.")
             return
         self.queue_control(
             chat_id,

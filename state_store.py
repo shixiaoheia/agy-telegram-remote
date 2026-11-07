@@ -172,10 +172,11 @@ class Store:
             if len(text) > self.max_reply:
                 suffix = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
                 text = text[:self.max_reply - len(suffix)] + suffix
+                record[key + "_truncated"] = True
             record[key] = text
         # No prompt, raw stdout/stderr, or credentials are stored here.
         record = {key: record[key] for key in (
-            "user_id", "updated_at", "job_id", "outcome", "text", "detail",
+            "user_id", "updated_at", "job_id", "outcome", "text", "detail", "text_truncated", "detail_truncated",
             "category", "agy_status", "exit_code", "stdout_bytes", "stderr_bytes",
             "cleanup_ok", "delivery", "model", "effort", "mode", "duration_seconds",
             "input_tokens", "output_tokens", "thinking_tokens", "total_tokens",

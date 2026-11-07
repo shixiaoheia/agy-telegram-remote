@@ -39,7 +39,7 @@ Send a text task, or attach screenshots, logs, or code files. Individual attachm
 | Command | Purpose |
 | --- | --- |
 | `/start`, `/help` | Welcome and command list |
-| `/language` | Select the interface language (English translation is in progress) |
+| `/language` | Select Chinese or English for your interface |
 | `/model`, `/model refresh` | Select a model or explicitly check available models |
 | `/mode` | Select execution mode |
 | `/status` | Check the current task |
@@ -53,6 +53,8 @@ Send a text task, or attach screenshots, logs, or code files. Individual attachm
 | `/restart` | Restart the service when idle (owner only) |
 
 Up to three text tasks can wait in the queue; attachments cannot be queued. Saved waiting tasks are paused after a restart until their owners confirm. A crash can still lose a queued task. Messages received while the service is offline may be discarded at startup and are not automatically executed.
+
+Language preference is saved per authorized user. Your task text, file names, model replies, and externally supplied error text remain in their original language. Historical records created before this update may contain older Chinese labels. The installer remains in Chinese.
 
 ## Troubleshooting
 

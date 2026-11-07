@@ -122,6 +122,12 @@ EN_CATEGORY_HELP = {
     "network": "Server network error. Check DNS, proxy, and Google connectivity.",
     "process": "Could not start agy. Check its installation and permissions.",
 }
+EN_OUTCOME_HELP = {
+    "timed_out": "The task timed out and may have made partial changes. Check the workspace before deciding whether to retry.",
+    "output_limit": "Output exceeded the limit. Narrow the task or inspect the workspace changes.",
+    "invalid": "The result format was invalid; the task may have partially run. Check the workspace and /last.",
+    "no_text": "No final text reply was received. Check the workspace and /last first.",
+}
 EN_DETAILS = {
     "agy 未返回完整、有效的 JSON 结果；任务可能已产生修改。": "agy did not return a complete valid JSON result; the task may already have made changes.",
     "agy 结果不是 JSON 对象。": "The agy result is not a JSON object.",
@@ -153,7 +159,17 @@ EN_DETAILS = {
     "正在按用户修正重新执行；服务中断时不会自动重试。": "Running again with the user's correction; no automatic retry will occur if the service stops.",
     "任务结果已保存，但会话记录更新失败；请检查服务器。": "The result was saved but the conversation record could not be updated; check the server.",
     "任务结果已保存，但累计用量更新失败，本次统计可能缺失。": "The result was saved but cumulative usage could not be updated; this task's usage may be missing.",
+    "服务在上次任务期间中断；任务可能产生了修改，没有自动重跑。": "The service stopped during the previous task. It may have made changes; it was not rerun automatically.",
 }
+
+
+def english_detail(value: str) -> str:
+    if value in EN_DETAILS:
+        return EN_DETAILS[value]
+    match = re.fullmatch(r"agy 返回异常状态 \((.*?)\)：(.*)", value, flags=re.DOTALL)
+    if match:
+        return f"agy returned an error status ({match.group(1)}): {match.group(2)}"
+    return value
 
 
 def english_activity(value: str) -> str:

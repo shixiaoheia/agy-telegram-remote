@@ -224,6 +224,16 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(callback_update("language:en", user=999))
         self.assertEqual(self.store.get_language(12345), "zh")
 
+    async def test_corrupt_and_revoked_language_preferences(self):
+        self.store.set_language(12345, "en")
+        path = self.settings.state_dir / "language-12345.json"
+        path.write_text("{broken", encoding="utf-8")
+        self.assertEqual(self.store.get_language(12345), "zh")
+        self.store.set_language(67890, "en")
+        self.store.allowed.discard(67890)
+        self.store.maintain()
+        self.assertFalse((self.settings.state_dir / "language-67890.json").exists())
+
     async def test_english_common_commands_and_other_user_are_independent(self):
         self.store.set_language(12345, "en")
         for command, expected in (("/steer", "Usage:"), ("/ls", "Workspace files"),
@@ -251,6 +261,15 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Request", rendered)
         self.assertIn("我的项目", rendered)
         self.assertIn("模型原始回复", rendered)
+
+    async def test_english_truncation_notice_does_not_rewrite_model_text(self):
+        self.store.set_language(12345, "en")
+        suffix = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
+        genuine = {"outcome": "success", "text": "原文" + suffix}
+        self.assertIn("回复超过保存上限", self.bridge._render_result(12345, genuine))
+        truncated = self.store.prepare_record(12345, {"outcome": "success", "text": "a" * (self.store.max_reply + 1)})
+        self.assertTrue(truncated["text_truncated"])
+        self.assertIn("storage limit", self.bridge._render_result(12345, truncated))
 
     async def test_id_private_without_authorization(self):
         await self.handle(update("/id", user=999))
