@@ -1,7 +1,7 @@
 """Known interface buttons must be translated without rewriting user labels."""
 import unittest
 
-from i18n import english_activity, localize_markup
+from i18n import english_activity, english_callback_notice, localize_markup
 
 
 class LanguageMarkupTests(unittest.TestCase):
@@ -27,3 +27,8 @@ class LanguageMarkupTests(unittest.TestCase):
         self.assertEqual(english_activity("正在调用工具：read_file"), "Calling tool: read_file")
         self.assertEqual(english_activity("✅ 💻 执行命令 「echo 中文」（耗时 1.0 秒）"),
                          "✅ 💻 Executed command 「echo 中文」 (1.0 s)")
+
+    def test_callback_notice_retains_selected_identifier(self):
+        self.assertEqual(english_callback_notice("🎯 已切换至 gemini-3.8"),
+                         "🎯 Switched to gemini-3.8")
+        self.assertEqual(english_callback_notice("已请求取消"), "Cancellation requested")

@@ -2,6 +2,77 @@
 from __future__ import annotations
 
 import re
+from contextvars import ContextVar
+
+callback_language: ContextVar[str] = ContextVar("callback_language", default="zh")
+
+_COMMANDS = (
+    ("start", "欢迎页与快速开始", "Welcome and getting started"),
+    ("language", "中文 / English", "Choose interface language"),
+    ("help", "查看帮助与使用说明", "Help and usage"),
+    ("status", "查看当前任务状态", "Current task status"),
+    ("cancel", "取消正在执行的任务", "Cancel the current task"),
+    ("queue", "查看或取消等待任务", "View or cancel waiting tasks"),
+    ("steer", "停止当前任务并按修正重做", "Stop and rerun with a correction"),
+    ("model", "选择模型与思考强度", "Choose model and reasoning effort"),
+    ("new", "新建对话并清除上下文", "Start a new conversation"),
+    ("usage", "查看 Token 用量", "Token usage"),
+    ("last", "查看最近一次结果", "Latest result"),
+    ("history", "查看最近 10 条任务", "Recent tasks"),
+)
+
+
+def bot_commands(language: str) -> list[dict[str, str]]:
+    return [{"command": name, "description": en if language == "en" else zh}
+            for name, zh, en in _COMMANDS]
+_CALLBACK_NOTICES = {
+    "任务已结束或这张进度卡已失效。": "This task or progress card has expired.",
+    "正在展开过程，任务继续执行": "Expanding steps; the task continues",
+    "正在收起过程并恢复自动刷新": "Collapsing steps and resuming automatic refresh",
+    "正在刷新，保持当前展开状态": "Refreshing without changing the expanded state",
+    "确认已失效，请重新点击“新建对话”。": "Confirmation expired; select New conversation again.",
+    "已保留当前对话": "Current conversation retained",
+    "对话已变化，请重新确认": "The conversation changed; confirm again",
+    "已确认新建对话": "New conversation confirmed",
+    "进度已刷新": "Progress refreshed",
+    "检测已结束": "Check has ended",
+    "已请求取消": "Cancellation requested",
+    "检测已结束、按钮已失效或无取消权限": "Check ended, button expired, or cancellation is not permitted",
+    "补充已失效，请确认当前任务后重新发送。": "The correction expired; review the current task and send it again.",
+    "已提交修正": "Correction submitted",
+    "已忽略补充": "Additional message ignored",
+    "🛑 已请求取消": "🛑 Cancellation requested",
+    "该任务已结束或不可取消": "This task has ended or cannot be cancelled",
+    "这条等待任务已失效。": "This queued task is no longer available.",
+    "已取消等待任务": "Queued task cancelled",
+    "保存失败，请检查存储": "Could not save; check storage",
+    "无法读取任务历史，请检查服务器状态。": "Could not read task history; check the server.",
+    "📖 正在打开任务结果": "📖 Opening the task result",
+    "⏳ 结果正在打开或刚刚已发送": "⏳ Result is opening or was just sent",
+    "该历史记录不存在或已过期": "This history record is missing or expired",
+    "模型选项已失效，请重新打开 /model": "This model option expired; reopen /model",
+    "该选项上次检测不可用，可用 /model refresh 重新检测": "This option failed its last check; use /model refresh to check again",
+    "该思考档位当前检测为不可用": "This reasoning level is marked unavailable",
+    "该模型暂不提供这一思考档位": "This model does not offer that reasoning level",
+    "该模型使用内置思考强度": "This model uses its built-in reasoning level",
+    "模型已切换": "Model changed",
+    "已切换模型": "Model changed",
+    "已恢复默认": "Default restored",
+    "已恢复默认执行模式": "Default execution mode restored",
+    "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。":
+        "🛑 Cancellation requested. Processes are being cleaned up; existing changes are not automatically undone.",
+}
+
+
+def english_callback_notice(value: str) -> str:
+    if value in _CALLBACK_NOTICES:
+        return _CALLBACK_NOTICES[value]
+    for prefix, replacement in (("🎯 已切换至 ", "🎯 Switched to "),
+                                ("🎯 已切换为: ", "🎯 Switched to: "),
+                                ("🎯 已设置思考强度为: ", "🎯 Reasoning effort set to: ")):
+        if value.startswith(prefix):
+            return replacement + value[len(prefix):]
+    return value
 
 _BUTTONS = {
     "⬅️ 返回概览": "⬅️ Overview", "📋 详细信息": "📋 Details", "🔄 刷新状态": "🔄 Refresh",

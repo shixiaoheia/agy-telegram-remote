@@ -90,6 +90,20 @@ class CommandHandlers:
         control_html = helpers.control_html
         usage = self.store.get_usage(user)
         conv = self.store.get_conversation(user)
+        if self.store.get_language(user) == "en":
+            cid = conv.get("conversation_id", "") if conv else ""
+            short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+            conv_info = f"`{short_cid}` (turn {conv.get('num_turns', 1)})" if cid else "No active conversation"
+            report = control_html(f"📊 Token usage\n💬 Current conversation: {conv_info}")
+            inp, out = usage.get("total_input_tokens", 0), usage.get("total_output_tokens", 0)
+            self.queue_reply(chat_id, report + "\n\n<blockquote>📈 Cumulative usage:\n"
+                             f"• Conversation turns: {html.escape(str(usage.get('total_turns', 0)))}\n"
+                             f"• Input: {inp:,}\n• Output: {out:,}\n"
+                             f"• Thinking: {usage.get('total_thinking_tokens', 0):,}\n"
+                             f"• Total: {inp + out:,}\n</blockquote>\n"
+                             "💡 Use /new or /reset to reset the conversation.",
+                             html_mode=True)
+            return
         conv_info = "无活跃上下文（发送任意消息自动开启）"
         if conv and conv.get("conversation_id"):
             cid = conv["conversation_id"]
@@ -208,29 +222,29 @@ class CommandHandlers:
         parts = text.split(maxsplit=1)
         correction = parts[1].strip() if len(parts) > 1 else ""
         if not correction or "\x00" in correction or len(correction) > self.settings.max_prompt:
-            self.queue_reply(chat_id, "💡 用法：/steer <修正内容>。修正内容不能为空，且不能超过任务长度限制。")
+            self.queue_reply(chat_id, self._text(user, "💡 用法：/steer <修正内容>。修正内容不能为空，且不能超过任务长度限制。", "💡 Usage: /steer <correction>. The correction must not be empty or exceed the task length limit."))
             return
         job = self.slot
         if job is None:
-            self.queue_reply(chat_id, "ℹ️ 当前没有运行中的任务，直接发送完整需求即可。")
+            self.queue_reply(chat_id, self._text(user, "ℹ️ 当前没有运行中的任务，直接发送完整需求即可。", "ℹ️ No task is running. Send your complete request directly."))
             return
         if job.user != user:
-            self.queue_reply(chat_id, "⚠️ 当前任务由其他白名单用户发起，不能由你修改。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 当前任务由其他白名单用户发起，不能由你修改。", "⚠️ Another authorized user started this task; you cannot modify it."))
             return
         if job.has_attachment or job.attachments:
-            self.queue_reply(chat_id, "📎 当前任务含附件。请先发送 /cancel，随后重新发送附件和完整的修正要求，避免误用已清理的临时文件。")
+            self.queue_reply(chat_id, self._text(user, "📎 当前任务含附件。请先发送 /cancel，随后重新发送附件和完整的修正要求，避免误用已清理的临时文件。", "📎 This task has attachments. Send /cancel, then resend the attachments and complete revised request to avoid reusing deleted temporary files."))
             return
         if job.steer_task is not None or job.cancel.is_set():
-            self.queue_reply(chat_id, "⏳ 正在停止并清理当前任务；请等待新的任务卡出现后再继续修正。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在停止并清理当前任务；请等待新的任务卡出现后再继续修正。", "⏳ Stopping and cleaning up the current task. Wait for the new task card before submitting another correction."))
             return
         if not job.original_prompt:
-            self.queue_reply(chat_id, "⚠️ 当前任务缺少可安全重用的原始内容。请取消后重新发送完整任务。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 当前任务缺少可安全重用的原始内容。请取消后重新发送完整任务。", "⚠️ The original task cannot be safely reused. Cancel it and resend the complete task."))
             return
         if job.phase in {"saving", "sending"}:
-            self.queue_reply(chat_id, "ℹ️ 当前任务已完成，正在保存或发送结果；请等待结束后发送新需求。")
+            self.queue_reply(chat_id, self._text(user, "ℹ️ 当前任务已完成，正在保存或发送结果；请等待结束后发送新需求。", "ℹ️ The task has finished and its result is being saved or sent. Wait before sending a new request."))
             return
         if len(correction_prompt(job, correction)) > self.settings.max_prompt:
-            self.queue_reply(chat_id, "⚠️ 原任务与修正合并后过长，当前任务未改变；请精简修正内容。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 原任务与修正合并后过长，当前任务未改变；请精简修正内容。", "⚠️ The combined task and correction are too long. The current task is unchanged; shorten your correction."))
             return
         self._forget_correction(job, "⚡ 已提交修正，正在等待清理和交接。")
         job.steered = True
@@ -240,16 +254,17 @@ class CommandHandlers:
         self.steer_tasks.add(job.steer_task)
         job.steer_task.add_done_callback(self.steer_tasks.discard)
         job.steer_task.add_done_callback(lambda _: self._wake_queue())
-        self.queue_reply(chat_id, "⚡ 已收到修正：正在安全停止当前任务，清理完成后会自动按新要求重新执行。")
+        self.queue_reply(chat_id, self._text(user, "⚡ 已收到修正：正在安全停止当前任务，清理完成后会自动按新要求重新执行。", "⚡ Correction received. The current task is stopping safely and will restart with the revised request after cleanup."))
         return
 
     async def _command_history(self, text, user, chat_id, helpers):
-        history_summary = helpers.history_summary
+        history_summary = helpers.history_summary_en if self.store.get_language(user) == "en" else helpers.history_summary
         try:
             summary, keyboard = history_summary(self.store.history(user))
             self.queue_reply(chat_id, summary, reply_markup=keyboard)
         except (OSError, ValueError):
-            self.queue_reply(chat_id, "⚠️ 无法读取任务历史，请检查服务器状态。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取任务历史，请检查服务器状态。",
+                                               "⚠️ Could not read task history; check the server."))
         return
 
     async def _command_model(self, text, user, chat_id, helpers):
@@ -292,7 +307,8 @@ class CommandHandlers:
             )
             return
         self.store.set_model(user, resolved)
-        alias_note = f"（由别名 '{target}' 解析）" if resolved != target else ""
+        alias_note = (self._text(user, f"（由别名 '{target}' 解析）", f" (resolved from alias '{target}')")
+                      if resolved != target else "")
         if not has_effort_picker(resolved):
             self.store.set_effort(user, None)
             self.queue_reply(chat_id, self._text(user, f"✅ 已切换至：{resolved}｜思考强度：模型内置",
@@ -303,26 +319,33 @@ class CommandHandlers:
 
     async def _command_sys(self, text, user, chat_id, helpers):
         system_status = helpers.system_status
-        self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at))
+        self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at, self.store.get_language(user)))
         return
 
     async def _command_restart(self, text, user, chat_id, helpers):
         admin_id = self.settings.owner_id
         if user != admin_id:
-            self.queue_reply(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。")
+            self.queue_reply(chat_id, self._text(user, f"⚠️ 仅主管理员（ID: {admin_id}）可以重启守护进程。",
+                                               f"⚠️ Only the owner (ID: {admin_id}) can restart the service."))
             return
         if self._restart_busy():
             self.queue_reply(
                 chat_id,
-                "⚠️ 当前有正在执行的任务或资源尚未清理完成（含附件接收、模型检测）。请等待全部结束后再重启。"
+                self._text(user, "⚠️ 当前有正在执行的任务或资源尚未清理完成（含附件接收、模型检测）。请等待全部结束后再重启。",
+                           "⚠️ A task or cleanup is still in progress, including attachment intake or model checking. Wait for it to finish before restarting.")
             )
             return
         if self._restart_pending():
-            self.queue_reply(chat_id, "⏳ 重启已安排，请稍候，不需要重复发送。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 重启已安排，请稍候，不需要重复发送。",
+                                               "⏳ Restart is already scheduled; please wait."))
             return
-        self.queue_reply(chat_id, "🔄 服务将退出并由 systemd 重新启动，请稍后发送 /status 验证。"
+        zh = ("🔄 服务将退出并由 systemd 重新启动，请稍后发送 /status 验证。"
                          + ("注意：等待队列会暂停，重启后由队首发起者确认恢复。" if self.waiting_jobs else "")
                          + ("注意：仍有未恢复的结果；若私有恢复文件不可用，重启会丢失内存副本。" if self.unsaved_results else ""))
+        en = ("🔄 The service will exit and systemd will restart it. Use /status to verify afterward."
+              + (" Waiting tasks will be paused until the first task's owner confirms." if self.waiting_jobs else "")
+              + (" Some results are still unrecovered; restarting will lose in-memory copies if private recovery files are unavailable." if self.unsaved_results else ""))
+        self.queue_reply(chat_id, self._text(user, zh, en))
 
         self.restart_task = asyncio.create_task(self._do_restart())
         return
@@ -337,39 +360,39 @@ class CommandHandlers:
             base_users = sorted(self.settings.allowed)
             extra_users = self.store.get_extra_whitelist()
             lines = [
-                "👥 白名单管理 ｜ 授权用户列表",
+                self._text(user, "👥 白名单管理 ｜ 授权用户列表", "👥 Allowlist | Authorized users"),
                 "━━━━━━━━━━━━━━━━━━━━",
-                "【🔒 基础配置白名单 (config.env)】",
+                self._text(user, "【🔒 基础配置白名单 (config.env)】", "【🔒 Base allowlist (config.env)】"),
             ]
             for uid in base_users:
-                tag = " 👑 (主管理员)" if uid == admin_id else ""
+                tag = self._text(user, " 👑 (主管理员)", " 👑 (owner)") if uid == admin_id else ""
                 lines.append(f"• ID: `{uid}`{tag}")
-            lines.append("\n【➕ 动态授权白名单 (whitelist.json)】")
+            lines.append(self._text(user, "\n【➕ 动态授权白名单 (whitelist.json)】", "\n【➕ Additional users (whitelist.json)】"))
             if extra_users:
                 for uid in extra_users:
                     lines.append(f"• ID: `{uid}`")
             else:
-                lines.append("• 暂无动态添加的用户")
+                lines.append(self._text(user, "• 暂无动态添加的用户", "• No additional users"))
             lines.extend([
                 "━━━━━━━━━━━━━━━━━━━━",
-                "💡 权限管理指令（仅主管理员可用）：",
-                "• ➕ 添加用户：/whitelist add <数字ID>",
-                "• 🗑️ 移除用户：/whitelist remove <数字ID>",
+                self._text(user, "💡 权限管理指令（仅主管理员可用）：", "💡 Access management (owner only):"),
+                self._text(user, "• ➕ 添加用户：/whitelist add <数字ID>", "• ➕ Add: /whitelist add <numeric ID>"),
+                self._text(user, "• 🗑️ 移除用户：/whitelist remove <数字ID>", "• 🗑️ Remove: /whitelist remove <numeric ID>"),
             ])
             self.queue_control(chat_id, "\n".join(lines))
             return
 
         if user != admin_id:
-            self.queue_control(chat_id, f"⚠️ 仅主管理员（ID: {admin_id}）可管理动态白名单。")
+            self.queue_control(chat_id, self._text(user, f"⚠️ 仅主管理员（ID: {admin_id}）可管理动态白名单。", f"⚠️ Only the owner (ID: {admin_id}) can manage additional users."))
             return
 
         if subcmd == "add":
             if not target_str.isdigit() or not (5 <= len(target_str) <= 16):
-                self.queue_control(chat_id, "⚠️ 请输入合法的 Telegram 数字用户 ID（5-16 位正整数）。\n例如：/whitelist add 123456789")
+                self.queue_control(chat_id, self._text(user, "⚠️ 请输入合法的 Telegram 数字用户 ID（5-16 位正整数）。\n例如：/whitelist add 123456789", "⚠️ Enter a valid numeric Telegram user ID (5–16 digits).\nExample: /whitelist add 123456789"))
                 return
             target_id = int(target_str)
             if target_id in self.settings.allowed:
-                self.queue_control(chat_id, f"ℹ️ 用户 `{target_id}` 已在 config.env 基础配置中，无需重复添加。")
+                self.queue_control(chat_id, self._text(user, f"ℹ️ 用户 `{target_id}` 已在 config.env 基础配置中，无需重复添加。", f"ℹ️ User `{target_id}` is already in config.env."))
                 return
             ok = self.store.add_whitelist(target_id)
             if ok:
@@ -380,18 +403,18 @@ class CommandHandlers:
                         self.unsaved_results[target_id] = record
                 except (OSError, ValueError):
                     self.unreadable_recovery.add(target_id)
-                self.queue_control(chat_id, f"✅ 已成功添加用户 `{target_id}` 到授权白名单！该用户现在可以私聊使用此 Bot。")
+                self.queue_control(chat_id, self._text(user, f"✅ 已成功添加用户 `{target_id}` 到授权白名单！该用户现在可以私聊使用此 Bot。", f"✅ Added user `{target_id}`. They can now use this bot in a private chat."))
             else:
-                self.queue_control(chat_id, f"ℹ️ 用户 `{target_id}` 已经在动态白名单中了。")
+                self.queue_control(chat_id, self._text(user, f"ℹ️ 用户 `{target_id}` 已经在动态白名单中了。", f"ℹ️ User `{target_id}` is already on the additional allowlist."))
             return
 
         if subcmd in {"remove", "del", "delete", "rm"}:
             if not target_str.isdigit():
-                self.queue_control(chat_id, "⚠️ 请指定要移除的 Telegram 数字用户 ID。\n例如：/whitelist remove 123456789")
+                self.queue_control(chat_id, self._text(user, "⚠️ 请指定要移除的 Telegram 数字用户 ID。\n例如：/whitelist remove 123456789", "⚠️ Specify the numeric Telegram user ID to remove.\nExample: /whitelist remove 123456789"))
                 return
             target_id = int(target_str)
             if target_id in self.settings.allowed:
-                self.queue_control(chat_id, f"⚠️ 用户 `{target_id}` 属于 config.env 基础配置白名单，无法通过指令移除。")
+                self.queue_control(chat_id, self._text(user, f"⚠️ 用户 `{target_id}` 属于 config.env 基础配置白名单，无法通过指令移除。", f"⚠️ User `{target_id}` is in config.env and cannot be removed with this command."))
                 return
             ok = self.store.remove_whitelist(target_id)
             if ok:
@@ -401,14 +424,14 @@ class CommandHandlers:
                     self.waiting_jobs = deque(item for item in self.waiting_jobs if item[0] != target_id)
                     self.queue_paused = True
                     self.queue_storage_ok = False
-                    self.queue_control(chat_id, f"🗑️ 已移除用户 `{target_id}`。队列存储异常，已暂停；请检查服务器。")
+                    self.queue_control(chat_id, self._text(user, f"🗑️ 已移除用户 `{target_id}`。队列存储异常，已暂停；请检查服务器。", f"🗑️ Removed user `{target_id}`. Queue storage failed and the queue is paused; check the server."))
                 else:
-                    self.queue_control(chat_id, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`，并移除其 {removed} 个等待任务。正在执行的任务不受影响。")
+                    self.queue_control(chat_id, self._text(user, f"🗑️ 已成功从动态白名单中移除用户 `{target_id}`，并移除其 {removed} 个等待任务。正在执行的任务不受影响。", f"🗑️ Removed user `{target_id}` and {removed} waiting tasks. Running tasks are unaffected."))
             else:
-                self.queue_control(chat_id, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。")
+                self.queue_control(chat_id, self._text(user, f"⚠️ 未在动态白名单中找到用户 `{target_id}`。", f"⚠️ User `{target_id}` was not found on the additional allowlist."))
             return
 
-        self.queue_control(chat_id, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>")
+        self.queue_control(chat_id, self._text(user, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>", "⚠️ Unknown allowlist command. Use /whitelist, /whitelist add <ID>, or /whitelist remove <ID>."))
         return
 
     async def _command_mode(self, text, user, chat_id, helpers):
@@ -472,10 +495,10 @@ class CommandHandlers:
             try:
                 candidate.relative_to(workspace.resolve())
             except ValueError:
-                self.queue_control(chat_id, "⚠️ 路径不合法：严禁越权访问工作空间以外的目录。")
+                self.queue_control(chat_id, self._text(user, "⚠️ 路径不合法：严禁越权访问工作空间以外的目录。", "⚠️ Invalid path: access outside the workspace is not permitted."))
                 return
             if not candidate.exists() or not candidate.is_dir():
-                self.queue_control(chat_id, f"⚠️ 子目录 `{subpath}` 不存在或并非目录。")
+                self.queue_control(chat_id, self._text(user, f"⚠️ 子目录 `{subpath}` 不存在或并非目录。", f"⚠️ Subdirectory `{subpath}` does not exist or is not a directory."))
                 return
             target_dir = candidate
 
@@ -493,11 +516,11 @@ class CommandHandlers:
 
             sub_tag = f" ｜ `{target_dir.relative_to(workspace)}/`" if target_dir != workspace else ""
             lines = [
-                f"📁 工作空间文件速览 ｜ `{workspace}`{sub_tag}",
+                self._text(user, f"📁 工作空间文件速览 ｜ `{workspace}`{sub_tag}", f"📁 Workspace files | `{workspace}`{sub_tag}"),
                 "━━━━━━━━━━━━━━━━━━━━",
             ]
             if not display_items:
-                lines.append("（当前目录为空）")
+                lines.append(self._text(user, "（当前目录为空）", "(This directory is empty)"))
             else:
                 for mtime, is_dir, size, name in display_items:
                     lines.append(format_file_entry(is_dir, name, size, mtime))
@@ -506,14 +529,14 @@ class CommandHandlers:
             import shutil
             try:
                 free_gb = shutil.disk_usage(workspace).free / (1024 ** 3)
-                lines.append(f"📊 目录总计 {total_count} 个项目 ｜ 💾 剩余可用磁盘：{free_gb:.1f} GB")
+                lines.append(self._text(user, f"📊 目录总计 {total_count} 个项目 ｜ 💾 剩余可用磁盘：{free_gb:.1f} GB", f"📊 {total_count} items | 💾 {free_gb:.1f} GB free"))
             except Exception:
-                lines.append(f"📊 目录总计 {total_count} 个项目")
+                lines.append(self._text(user, f"📊 目录总计 {total_count} 个项目", f"📊 {total_count} items"))
             if target_dir == workspace and any(e[1] for e in entries):
-                lines.append("💡 发送 /ls <子目录> 可展开查看指定子目录。")
+                lines.append(self._text(user, "💡 发送 /ls <子目录> 可展开查看指定子目录。", "💡 Send /ls <subdirectory> to browse a subdirectory."))
             self.queue_control(chat_id, "\n".join(lines))
         except Exception:
-            self.queue_control(chat_id, "⚠️ 无法读取工作空间目录，请检查服务器权限。")
+            self.queue_control(chat_id, self._text(user, "⚠️ 无法读取工作空间目录，请检查服务器权限。", "⚠️ Could not read the workspace directory. Check server permissions."))
         return
 
     async def dispatch_command(self, command, text, user, chat_id, helpers):
@@ -541,6 +564,6 @@ class CommandHandlers:
         }
         handler = handlers.get(command)
         if handler is None:
-            self.queue_reply(chat_id, "⚠️ 不支持这个控制命令。发送 /help 查看可用指令。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 不支持这个控制命令。发送 /help 查看可用指令。", "⚠️ Unsupported command. Send /help to see available commands."))
             return
         await handler(text, user, chat_id, helpers)

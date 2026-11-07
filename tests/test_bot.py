@@ -116,6 +116,8 @@ class FakeAPI:
             return {"file_path": "documents/fixture.txt", "file_size": 4}
         if method == "sendChatAction":
             return True
+        if method == "setMyCommands":
+            return True
         raise AssertionError(method)
 
     async def download_file(self, _file_path, destination, maximum, *, cancel=None):
@@ -208,6 +210,11 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(callback_update("language:en"))
         self.assertEqual(self.store.get_language(12345), "en")
         self.assertEqual(self.store.get_language(67890), "zh")
+        await asyncio.sleep(0)
+        menu = [payload for method, payload in self.api.calls
+                if method == "setMyCommands" and payload.get("scope", {}).get("chat_id") == 12345]
+        self.assertTrue(menu)
+        self.assertEqual(menu[-1]["commands"][0]["description"], "Welcome and getting started")
         await self.handle(update("/start"))
         self.assertIn("Welcome", self.api.messages[-1][1])
         await self.handle(callback_update("language:zh"))

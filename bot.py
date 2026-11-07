@@ -22,8 +22,8 @@ from pathlib import Path
 
 from agy_runner import Result, Runner
 from command_handlers import CommandHandlers
-from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, english_activity,
-                  english_attachment, localize_markup)
+from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, bot_commands, callback_language,
+                  english_activity, english_attachment, english_callback_notice, localize_markup)
 from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
                       resolve_model, Settings)
@@ -240,6 +240,33 @@ def history_summary(records: list[dict]) -> tuple[str, dict | None]:
             label = f"{index}. {stamp} {title}"[:60]
             keyboard.append([{"text": label, "callback_data": f"history:{job_id}"}])
     lines.append("━━━━━━━━━━━━━━━━━━━━\n点击下方任务可查看完整结果。")
+    return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
+
+
+def history_summary_en(records: list[dict]) -> tuple[str, dict | None]:
+    if not records:
+        return "📚 Task history\nℹ️ No completed tasks.", None
+    lines = ["📚 Task history (last 10)", "Times use the server's local timezone " + time.strftime("%z")]
+    keyboard = []
+    for index, record in enumerate(records, 1):
+        title = ui_excerpt(record.get("title"), 80, "Untitled task")
+        outcome = EN_OUTCOMES.get(str(record.get("outcome", "error")), "Review the result")
+        stamp = record.get("updated_at")
+        when = "Unknown time"
+        if type(stamp) in {int, float} and math.isfinite(stamp) and 0 <= stamp <= 253402300799:
+            try:
+                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+            except (OSError, ValueError, OverflowError):
+                pass
+        model = str(record.get("model") or "Default")
+        delivery = {"failed": "Not delivered", "failed_or_partial": "Incomplete delivery",
+                    "unknown": "Delivery unconfirmed", "pending": "Delivery unconfirmed",
+                    "superseded_by_steer": "Replaced by correction"}.get(str(record.get("delivery") or ""), "")
+        lines.append(f"{index}. {outcome} | {when} | {model}" + (f" | {delivery}" if delivery else "") + f"\n   {title}")
+        job_id = record.get("job_id")
+        if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
+            keyboard.append([{"text": f"{index}. {when} {title}"[:60], "callback_data": f"history:{job_id}"}])
+    lines.append("Select a task below to view its saved result.")
     return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
 
 
@@ -531,7 +558,7 @@ def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
     return f"{icon} `{name}` ({size_str}) ｜ {dt_str}"
 
 
-def system_status(workspace: Path, start_time: float) -> str:
+def system_status(workspace: Path, start_time: float, language: str = "zh") -> str:
     import platform
     import shutil
     import socket
@@ -553,7 +580,7 @@ def system_status(workspace: Path, start_time: float) -> str:
     except Exception:
         pass
 
-    uptime_str = "未知"
+    uptime_str = "Unknown" if language == "en" else "未知"
     try:
         with open("/proc/uptime", "r", encoding="utf-8") as f:
             total_seconds = float(f.read().split()[0])
@@ -561,18 +588,22 @@ def system_status(workspace: Path, start_time: float) -> str:
             hours = int((total_seconds % 86400) // 3600)
             mins = int((total_seconds % 3600) // 60)
             uptime_str = f"{days} 天 {hours} 小时 {mins} 分钟" if days > 0 else f"{hours} 小时 {mins} 分钟"
+        if language == "en":
+            uptime_str = f"{days}d {hours}h {mins}m" if days else f"{hours}h {mins}m"
     except Exception:
         pass
 
     cores = os.cpu_count() or 1
-    load_str = "未知"
+    load_str = "Unknown" if language == "en" else "未知"
     try:
         l1, l5, l15 = os.getloadavg()
         load_str = f"{l1:.2f}, {l5:.2f}, {l15:.2f} ({cores} 核)"
+        if language == "en":
+            load_str = f"{l1:.2f}, {l5:.2f}, {l15:.2f} ({cores} cores)"
     except Exception:
         pass
 
-    mem_str = "未知"
+    mem_str = "Unknown" if language == "en" else "未知"
     try:
         with open("/proc/meminfo", "r", encoding="utf-8") as f:
             meminfo = {}
@@ -591,7 +622,7 @@ def system_status(workspace: Path, start_time: float) -> str:
     except Exception:
         pass
 
-    disk_str = "未知"
+    disk_str = "Unknown" if language == "en" else "未知"
     try:
         usage = shutil.disk_usage(workspace)
         free_gb = usage.free / (1024 ** 3)
@@ -599,6 +630,8 @@ def system_status(workspace: Path, start_time: float) -> str:
         used_gb = usage.used / (1024 ** 3)
         pct = (usage.used / usage.total) * 100
         disk_str = f"剩余 {free_gb:.1f} GB / 总计 {total_gb:.1f} GB ({pct:.1f}% 已用)"
+        if language == "en":
+            disk_str = f"{free_gb:.1f} GB free / {total_gb:.1f} GB total ({pct:.1f}% used)"
     except Exception:
         pass
 
@@ -616,9 +649,21 @@ def system_status(workspace: Path, start_time: float) -> str:
             rss_pages = int(f.read().split()[1])
             rss_mb = (rss_pages * pagesize) / (1024 * 1024)
             rss_str = f" ｜ 常驻内存 {rss_mb:.1f} MB"
+        if language == "en":
+            rss_str = f" | RSS {rss_mb:.1f} MB"
     except Exception:
         pass
 
+    if language == "en":
+        return "\n".join([
+            f"🖥️ System status | Host: {hostname}", "━━━━━━━━━━━━━━━━━━━━",
+            f"• 🐧 OS: {distro_name} ({machine})", f"• ⏱️ Uptime: {uptime_str}",
+            f"• ⚡ CPU load: {load_str}", f"• 💾 Memory: {mem_str}",
+            f"• 💽 Workspace disk: {disk_str}",
+            f"• 🤖 Service: PID {pid}{rss_str} | Up {bot_up_str}",
+            f"• 🐍 Python: v{python_ver}", "━━━━━━━━━━━━━━━━━━━━",
+            "💡 Read from Linux /proc and system information.",
+        ])
     lines = [
         f"🖥️ 系统运行状态 ｜ 主机：{hostname}",
         "━━━━━━━━━━━━━━━━━━━━",
@@ -686,6 +731,7 @@ class Bridge(CommandHandlers):
         self.restart_task: asyncio.Task | None = None
         self.steer_tasks: set[asyncio.Task] = set()
         self.callback_tasks: set[asyncio.Task] = set()
+        self.command_menu_tasks: dict[int, asyncio.Task] = {}
         try:
             self.waiting_jobs: deque[tuple[int, int, str]] = deque(store.load_queue(settings.max_prompt))
             self.queue_storage_ok = True
@@ -728,6 +774,8 @@ class Bridge(CommandHandlers):
     def _answer_callback(self, callback_id: str, **kwargs) -> None:
         if len(self.callback_tasks) >= 64 or self.stop.is_set():
             return
+        if callback_language.get() == "en" and isinstance(kwargs.get("text"), str):
+            kwargs["text"] = english_callback_notice(kwargs["text"])
         async def answer() -> None:
             try:
                 await self.api.answer_callback_query(callback_id, **kwargs)
@@ -736,6 +784,28 @@ class Bridge(CommandHandlers):
         task = asyncio.create_task(answer())
         self.callback_tasks.add(task)
         task.add_done_callback(self.callback_tasks.discard)
+
+    def _refresh_command_menu(self, user: int) -> None:
+        if user in self.command_menu_tasks or self.stop.is_set():
+            return
+
+        async def refresh() -> None:
+            try:
+                while not self.stop.is_set():
+                    language = self.store.get_language(user)
+                    await self.api.call("setMyCommands", commands=bot_commands(language),
+                                        scope={"type": "chat", "chat_id": user})
+                    if self.store.get_language(user) == language:
+                        return
+            except Exception as error:
+                LOG.warning("telegram_chat_command_menu_failed type=%s", type(error).__name__)
+                self.queue_reply(user, self._text(user, "⚠️ 无法更新 Telegram 命令菜单；可再次选择语言重试。", "⚠️ Could not update the Telegram command menu. Select the language again to retry."))
+
+        task = asyncio.create_task(refresh())
+        self.command_menu_tasks[user] = task
+        self.callback_tasks.add(task)
+        task.add_done_callback(self.callback_tasks.discard)
+        task.add_done_callback(lambda _: self.command_menu_tasks.pop(user, None))
 
     def _status_card(self, user: int, details: bool = False) -> tuple[str, dict]:
         if self.store.get_language(user) == "en":
@@ -1950,9 +2020,9 @@ class Bridge(CommandHandlers):
     def _reset_conversation(self, user: int) -> str:
         if self.slot is not None and self.slot.user == user:
             self.slot.reset_after = True
-            return "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。"
+            return self._text(user, "🧠 已安排新对话：当前任务结束后清空上下文，下一条消息将开启全新对话。", "🧠 A new conversation is scheduled. Context will be cleared after the current task; your next message starts a new conversation.")
         self.store.reset_conversation(user)
-        return "🧠 对话记忆已重置！\n已清空当前上下文，下一条消息将开启全新对话。\n历史结果与累计用量仍保留。"
+        return self._text(user, "🧠 对话记忆已重置！\n已清空当前上下文，下一条消息将开启全新对话。\n历史结果与累计用量仍保留。", "🧠 Conversation context cleared. Your next message starts a new conversation. History and cumulative usage are retained.")
 
     def _close_reset_confirmation(self, user: int, text: str) -> None:
         pending = self.reset_confirmations.pop(user, None)
@@ -2023,6 +2093,16 @@ class Bridge(CommandHandlers):
         return True
 
     async def handle_callback(self, cq: dict) -> None:
+        sender = cq.get("from")
+        user = sender.get("id") if isinstance(sender, dict) else None
+        language = self.store.get_language(user) if type(user) is int and self._is_allowed(user) else "zh"
+        token = callback_language.set(language)
+        try:
+            await self._handle_callback(cq)
+        finally:
+            callback_language.reset(token)
+
+    async def _handle_callback(self, cq: dict) -> None:
         cq_id = str(cq.get("id") or "")
         sender = cq.get("from") or {}
         user = sender.get("id")
@@ -2047,6 +2127,7 @@ class Bridge(CommandHandlers):
             notice = "已选择中文" if language == "zh" else "English selected; translation is in progress."
             self._answer_callback(cq_id, text=notice)
             self.queue_selector_edit(chat_id, message, notice)
+            self._refresh_command_menu(user)
             return
 
         if data.startswith("progress:"):
@@ -2109,7 +2190,7 @@ class Bridge(CommandHandlers):
         if data in {"probe:current", "probe:all"}:
             current = self.store.get_model(user) or self.settings.model or ""
             if data == "probe:current" and not current:
-                self.queue_reply(chat_id, "💡 请先在 /model 选择具体模型，再检测当前模型；默认模型由 CLI 决定。")
+                self.queue_reply(chat_id, self._text(user, "💡 请先在 /model 选择具体模型，再检测当前模型；默认模型由 CLI 决定。", "💡 Select a specific model with /model before checking it; the CLI chooses the default model."))
             else:
                 self._start_model_health_refresh(chat_id, current if data == "probe:current" else None)
             if cq_id and hasattr(self.api, "answer_callback_query"):
@@ -2158,7 +2239,7 @@ class Bridge(CommandHandlers):
                 job.steer_cancelled = True
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🛑 已请求取消")
-                self.queue_reply(chat_id, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。")
+                self.queue_reply(chat_id, self._text(user, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。", "🛑 Cancellation requested. Task processes are being cleaned up; existing changes are not undone."))
             elif cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id, text="该任务已结束或不可取消")
             return
@@ -2174,7 +2255,7 @@ class Bridge(CommandHandlers):
             removed = self._remove_queued(lambda item: item is entry[1])
             if cq_id:
                 self._answer_callback(cq_id, text="已取消等待任务" if removed else "保存失败，请检查存储")
-            self.queue_reply(chat_id, "🛑 已取消这条等待任务。" if removed else "⚠️ 无法保存取消操作，请检查服务器存储。")
+            self.queue_reply(chat_id, self._text(user, "🛑 已取消这条等待任务。", "🛑 Waiting task cancelled.") if removed else self._text(user, "⚠️ 无法保存取消操作，请检查服务器存储。", "⚠️ Could not save the cancellation; check server storage."))
             return
 
         if data.startswith("history:"):
@@ -2185,7 +2266,7 @@ class Bridge(CommandHandlers):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(
                         cq_id, text="无法读取任务历史，请检查服务器状态。", show_alert=True)
-                self.queue_reply(chat_id, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。", "⚠️ Could not read task history; check the server. The original record is retained and the task was not rerun."))
                 return
             opened = False
             if record:
@@ -2313,7 +2394,7 @@ class Bridge(CommandHandlers):
                 self.store.set_mode(user, None)
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="🔄 已恢复默认执行模式")
-                self.queue_selector_edit(chat_id, message, "已恢复默认执行模式\n后续任务跟随 agy 设置")
+                self.queue_selector_edit(chat_id, message, self._text(user, "已恢复默认执行模式\n后续任务跟随 agy 设置", "Default execution mode restored\nFuture tasks use agy settings"))
                 return
             if target in {"plan", "accept-edits"}:
                 self.store.set_mode(user, target)
@@ -2399,7 +2480,7 @@ class Bridge(CommandHandlers):
             if now < self._next_id_reply:
                 return
             self._next_id_reply = now + 2.0
-            self.queue_reply(chat_id, f"🆔 你的 Telegram 数字 ID：{user}")
+            self.queue_reply(chat_id, self._text(user, f"🆔 你的 Telegram 数字 ID：{user}", f"🆔 Your Telegram numeric ID: {user}"))
             return
         if not self._is_allowed(user) or sender.get("is_bot") is True:
             return
@@ -2407,15 +2488,15 @@ class Bridge(CommandHandlers):
         if command == "/queue" and text.startswith("/queue add "):
             text = text[len("/queue add "):].strip()
             if not text or text.startswith("/"):
-                self.queue_reply(chat_id, "💡 用法：/queue add <文字任务>。")
+                self.queue_reply(chat_id, self._text(user, "💡 用法：/queue add <文字任务>。", "💡 Usage: /queue add <text task>."))
                 return
             command = ""
             force_queue = True
         if not command and self._restart_pending():
-            self.queue_reply(chat_id, "⏳ 正在重新载入服务，请稍后再发送任务或附件。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在重新载入服务，请稍后再发送任务或附件。", "⏳ The service is restarting. Send the task or attachment again later."))
             return
         if not command and any(not task.done() for task in self.steer_tasks):
-            self.queue_reply(chat_id, "⏳ 正在交接修正任务，请等待清理和交接完成。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在交接修正任务，请等待清理和交接完成。", "⏳ A corrected task is being handed over. Wait for cleanup to finish."))
             return
         group_id = message.get("media_group_id")
         if (album_items is None and isinstance(group_id, str) and group_id
@@ -2425,7 +2506,7 @@ class Bridge(CommandHandlers):
                         if type(entry.get("file_size")) is int else 0, default=None)
                     if has_photo else document)
             if not isinstance(item, dict):
-                self.queue_reply(chat_id, "⚠️ 无法识别这组附件，请重新发送。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法识别这组附件，请重新发送。", "⚠️ Could not identify these attachments. Send them again."))
                 return
             self._buffer_album(update, user, group_id, item, has_photo, text)
             return
@@ -2437,7 +2518,7 @@ class Bridge(CommandHandlers):
         if has_photo:
             candidates = [entry for entry in photo_list if isinstance(entry, dict)]
             if not candidates:
-                self.queue_reply(chat_id, "⚠️ 无法识别这张图片，请重新发送原图或截图。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法识别这张图片，请重新发送原图或截图。", "⚠️ Could not identify the image. Resend the original or screenshot."))
                 return
             attachment = max(candidates, key=lambda entry: entry.get("file_size", 0) if type(entry.get("file_size")) is int else 0)
             is_photo = True
@@ -2448,40 +2529,40 @@ class Bridge(CommandHandlers):
         if (len(items) > MAX_ALBUM_FILES or
                 sum(item.get("file_size", 0) if type(item.get("file_size")) is int else 0
                     for item, _ in items) > MAX_ALBUM_BYTES):
-            self.queue_reply(chat_id, "⚠️ 一次最多发送 10 个附件，总大小不超过 30 MB。请分批发送。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 一次最多发送 10 个附件，总大小不超过 30 MB。请分批发送。", "⚠️ Send at most 10 attachments totaling 30 MB at a time. Split them into batches."))
             return
         if len(text) > self.settings.max_prompt or "\x00" in text:
-            self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+            self.queue_reply(chat_id, self._text(user, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。", f"⚠️ The task is too long or contains invalid characters. Maximum: {self.settings.max_prompt} characters."))
             return
         if self.runner.blocked:
-            self.queue_reply(chat_id, "⚠️ 新任务已暂停，请检查服务器并重启服务。")
+            self.queue_reply(chat_id, self._text(user, "⚠️ 新任务已暂停，请检查服务器并重启服务。", "⚠️ New tasks are paused. Check the server and restart the service."))
             return
         if self.model_check_task and not self.model_check_task.done():
-            self.queue_reply(chat_id, "⏳ 正在进行模型可用性检测，请完成后再提交任务。")
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在进行模型可用性检测，请完成后再提交任务。", "⏳ Model availability is being checked. Wait until it finishes before submitting a task."))
             return
         if user in self.unsaved_results or user in self.unreadable_recovery:
             if not self._recover_unsaved(user):
-                self.queue_reply(chat_id, "⚠️ 上一个结果尚未保存，请修复服务器存储并发送 /last 取回；新任务尚未启动。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 上一个结果尚未保存，请修复服务器存储并发送 /last 取回；新任务尚未启动。", "⚠️ The previous result has not been saved. Repair server storage and use /last to retrieve it. No new task was started."))
                 return
-            self.queue_reply(chat_id, "✅ 上一个结果已恢复保存，可通过 /history 查看。")
+            self.queue_reply(chat_id, self._text(user, "✅ 上一个结果已恢复保存，可通过 /history 查看。", "✅ The previous result has been recovered and saved; view it with /history."))
         if self.slot is not None or self.pending_album is not None or (self.waiting_jobs and not from_queue):
             if (not items and not force_queue and self.slot is not None and self.slot.user == user
                     and self._offer_correction(user, text)):
                 return
             if not force_queue and self.slot is not None and self.slot.user == user:
-                self.queue_reply(chat_id, "⏳ 当前任务尚未结束。发送 /queue add <文字任务> 可排队，或等待清理完成。")
+                self.queue_reply(chat_id, self._text(user, "⏳ 当前任务尚未结束。发送 /queue add <文字任务> 可排队，或等待清理完成。", "⏳ The current task has not finished. Use /queue add <text task> to queue a task, or wait for cleanup."))
             elif items:
-                self.queue_reply(chat_id, "⚠️ 附件暂不支持排队，请等待当前任务完成后重新发送。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 附件暂不支持排队，请等待当前任务完成后重新发送。", "⚠️ Attachments cannot be queued. Wait for the current task to finish, then resend them."))
             elif len(self.waiting_jobs) >= 3:
-                self.queue_reply(chat_id, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。", "⚠️ The queue is full (maximum 3). This task was not accepted; resend it later."))
             elif not self.queue_storage_ok:
-                self.queue_reply(chat_id, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。")
+                self.queue_reply(chat_id, self._text(user, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。", "⚠️ Queue storage is unavailable. This task was not accepted; check server storage."))
             else:
                 entry = (user, chat_id, text)
                 try:
                     self.store.save_queue([*self.waiting_jobs, entry])
                 except (OSError, ValueError):
-                    self.queue_reply(chat_id, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。")
+                    self.queue_reply(chat_id, self._text(user, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。", "⚠️ Could not save the waiting task. It was not accepted; check server storage."))
                     return
                 self.waiting_jobs.append(entry)
                 state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
@@ -2491,7 +2572,7 @@ class Bridge(CommandHandlers):
 
         user_model = self.store.get_model(user) or self.settings.model or ""
         if is_retired_model(user_model):
-            self.queue_reply(chat_id, "当前保存的模型已移除，请先发送 /model 重新选择；本次没有启动任务。")
+            self.queue_reply(chat_id, self._text(user, "当前保存的模型已移除，请先发送 /model 重新选择；本次没有启动任务。", "The saved model was removed. Select another with /model; the task was not started."))
             return
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
@@ -2518,7 +2599,7 @@ class Bridge(CommandHandlers):
         except Exception:
             self.slot = None
             LOG.error("job_prepare_failed id=%s", job.job_id)
-            self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+            self.queue_reply(chat_id, self._text(user, "任务准备失败，未启动 agy。请检查服务器存储和权限。", "Task preparation failed; agy was not started. Check server storage and permissions."))
 
     async def _prepare_and_work(self, job: Job, text: str, items: list[tuple[dict, bool]]) -> None:
         """Download outside polling; retain the slot until all writes and cleanup finish."""
@@ -2531,7 +2612,7 @@ class Bridge(CommandHandlers):
                 try:
                     received = []
                     total_bytes = 0
-                    self.queue_reply(chat_id, f"📎 正在接收 {len(items)} 个附件；发送 /status 查看进度，或发送 /cancel 取消。")
+                    self.queue_reply(chat_id, self._text(user, f"📎 正在接收 {len(items)} 个附件；发送 /status 查看进度，或发送 /cancel 取消。", f"📎 Receiving {len(items)} attachments. Use /status for progress or /cancel to stop."))
                     for index, (item, photo) in enumerate(items, 1):
                         job.activity = f"接收附件 {index}/{len(items)}"
                         if job.cancel.is_set() or self.stop.is_set():
@@ -2562,10 +2643,10 @@ class Bridge(CommandHandlers):
                     job.attachment_feedback = f"📎 已收到 {len(received)} 个附件：{names}。本次任务会读取它们。"
             if len(prompt) > self.settings.max_prompt or "\x00" in prompt:
                 self._cleanup_attachments(job)
-                self.queue_reply(chat_id, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。")
+                self.queue_reply(chat_id, self._text(user, f"⚠️ 任务过长或含非法字符，最多 {self.settings.max_prompt} 个字符。", f"⚠️ The task is too long or contains invalid characters. Maximum: {self.settings.max_prompt} characters."))
                 return
             if job.cancel.is_set() or self.stop.is_set():
-                self.queue_reply(chat_id, "🛑 已取消附件接收，没有启动任务。")
+                self.queue_reply(chat_id, self._text(user, "🛑 已取消附件接收，没有启动任务。", "🛑 Attachment intake cancelled; no task was started."))
                 return
             accepted = True
             await self._accept_and_work(job, prompt)
@@ -2574,7 +2655,7 @@ class Bridge(CommandHandlers):
             raise
         except Exception as error:
             LOG.error("job_prepare_failed id=%s type=%s", job.job_id, type(error).__name__)
-            self.queue_reply(chat_id, "任务准备失败，未启动 agy。请检查服务器存储和权限。")
+            self.queue_reply(chat_id, self._text(user, "任务准备失败，未启动 agy。请检查服务器存储和权限。", "Task preparation failed; agy was not started. Check server storage and permissions."))
         finally:
             self._cleanup_attachments(job)
             if not accepted:
@@ -2590,7 +2671,7 @@ class Bridge(CommandHandlers):
                         self.store.reset_conversation(job.user)
                 except (OSError, ValueError):
                     LOG.error("job_prepare_record_failed id=%s", job.job_id)
-                    self.queue_reply(chat_id, "任务准备记录保存失败；请检查服务器。")
+                    self.queue_reply(chat_id, self._text(user, "任务准备记录保存失败；请检查服务器。", "Could not save the task preparation record; check the server."))
             self._release_job(job)
 
     async def consume_updates(self, updates: object) -> None:
@@ -2619,20 +2700,7 @@ class Bridge(CommandHandlers):
         if not isinstance(me, dict) or me.get("is_bot") is not True:
             raise TelegramError()
         try:
-            await self.api.set_commands([
-                {"command": "start", "description": "欢迎页与快速开始"},
-                {"command": "language", "description": "中文 / English"},
-                {"command": "help", "description": "查看帮助与使用说明"},
-                {"command": "status", "description": "查看当前任务状态"},
-                {"command": "cancel", "description": "取消正在执行的任务"},
-                {"command": "queue", "description": "查看或取消等待任务"},
-                {"command": "steer", "description": "停止当前任务并按修正重做"},
-                {"command": "model", "description": "选择模型与思考强度"},
-                {"command": "new", "description": "新建对话并清除上下文"},
-                {"command": "usage", "description": "查看 Token 用量"},
-                {"command": "last", "description": "查看最近一次结果"},
-                {"command": "history", "description": "查看最近 10 条任务"},
-            ])
+            await self.api.set_commands(bot_commands("zh"))
         except (TelegramError, AttributeError):
             LOG.warning("telegram_command_menu_unavailable")
         webhook = await self.api.call("getWebhookInfo")
