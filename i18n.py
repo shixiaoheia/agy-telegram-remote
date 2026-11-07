@@ -56,6 +56,9 @@ _CALLBACK_NOTICES = {
     "该模型暂不提供这一思考档位": "This model does not offer that reasoning level",
     "该模型使用内置思考强度": "This model uses its built-in reasoning level",
     "模型已切换": "Model changed",
+    "该模型已移除，请重新打开 /model": "This model was removed; reopen /model",
+    "🔄 已恢复默认思考强度": "🔄 Default reasoning effort restored",
+    "🔄 已恢复默认执行模式": "🔄 Default execution mode restored",
     "已切换模型": "Model changed",
     "已恢复默认": "Default restored",
     "已恢复默认执行模式": "Default execution mode restored",
@@ -90,11 +93,13 @@ _BUTTONS = {
 _EFFORTS = {"极速": "Fast", "均衡": "Balanced", "深度": "Deep", "最高": "Maximum"}
 _ACTIVITIES = {
     "模型会话已启动": "Model session started",
+    "正在准备任务": "Preparing the task",
     "正在调用工具": "Calling a tool",
     "正在分析并生成回复": "Analyzing and generating a reply",
     "正在启动模型": "Starting the model",
     "正在继续处理任务": "Processing the task",
     "正在清理资源": "Cleaning up",
+    "正在停止当前任务并应用你的修正": "Stopping the current task to apply your correction",
 }
 EN_OUTCOMES = {
     "success": "✅ Task completed", "no_text": "⚠️ No final reply",
@@ -140,6 +145,14 @@ EN_DETAILS = {
     "任务输入或输出读取未确认完成；请核对已有修改。": "Task input or output could not be fully confirmed; check existing changes.",
     "输出超过上限；没有解析或转发截断数据。": "Output exceeded the limit; truncated data was not parsed or forwarded.",
     "任务已取消，请核对已有修改。": "The task was cancelled; check any changes already made.",
+    "结果曾因存储异常暂存，恢复后已保存；本次会话和用量记录可能缺失。": "The result was temporarily held after a storage error and has now been saved; conversation and usage records may be missing.",
+    "结果已保存，历史记录曾写入失败，恢复后已补存；会话和用量可能缺失。": "The result and recovered history are saved; conversation and usage records may be missing.",
+    "任务准备或执行中；服务中断时不会自动重试。": "Task preparation or execution is in progress; it will not automatically retry if the service stops.",
+    "附件或任务准备未完成，没有启动 agy。": "Attachment or task preparation did not finish; agy was not started.",
+    "确认消息未成功投递、任务已取消或服务正在停止；没有启动 agy。": "The confirmation was not delivered, the task was cancelled, or the service is stopping; agy was not started.",
+    "正在按用户修正重新执行；服务中断时不会自动重试。": "Running again with the user's correction; no automatic retry will occur if the service stops.",
+    "任务结果已保存，但会话记录更新失败；请检查服务器。": "The result was saved but the conversation record could not be updated; check the server.",
+    "任务结果已保存，但累计用量更新失败，本次统计可能缺失。": "The result was saved but cumulative usage could not be updated; this task's usage may be missing.",
 }
 
 

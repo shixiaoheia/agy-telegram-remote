@@ -199,7 +199,7 @@ class Store:
         self._path(user)
         try:
             value = read_json(self.directory / f"language-{user}.json", 1024)
-        except FileNotFoundError:
+        except (OSError, ValueError):
             return "zh"
         if isinstance(value, dict) and value.get("user_id") == user and value.get("language") in {"zh", "en"}:
             return value["language"]
@@ -547,6 +547,14 @@ class Store:
             match_model = re.fullmatch(r"model-([0-9]+)\.json", path.name)
             if match_model:
                 user = int(match_model[1])
+                if path.is_symlink():
+                    raise ValueError("Linked state record")
+                if user not in self.allowed:
+                    path.unlink()
+                continue
+            match_language = re.fullmatch(r"language-([0-9]+)\.json", path.name)
+            if match_language:
+                user = int(match_language[1])
                 if path.is_symlink():
                     raise ValueError("Linked state record")
                 if user not in self.allowed:

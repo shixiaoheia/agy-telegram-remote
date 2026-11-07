@@ -49,11 +49,18 @@ class CommandHandlers:
     async def _command_help(self, text, user, chat_id, helpers):
         if self.store.get_language(user) == "en":
             self.queue_control(chat_id, "🤖 Commands\n"
-                               "/model — choose or check models\n/mode — select execution mode\n"
-                               "/status — current task\n/cancel — cancel a task\n"
-                               "/queue — view waiting tasks\n/steer — correct the current task\n"
-                               "/history — recent tasks\n/last — latest result\n/new — new conversation\n"
+                               "Send a message to submit a task.\n\n"
+                               "/model — select or check models\n/mode — choose execution mode\n"
+                               "/status — current task and workspace status\n/cancel — cancel a task\n"
+                               "/queue — view waiting tasks; /queue add <task> queues text, "
+                               "/queue cancel cancels waiting tasks, /queue resume resumes\n"
+                               "/steer <correction> — stop and rerun the current text task with a correction\n"
+                               "/history — recent tasks\n/last — latest result\n/new or /reset — new conversation\n"
+                               "/usage — usage statistics\n/ls or /files — browse workspace files\n"
+                               "/sys or /system — server status\n/whitelist — manage authorized users\n"
+                               "/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
                                "/language — select language\n/help — this menu\n"
+                               "Attachments: up to 10 files, 10 MB each and 30 MB per group. "
                                "Some messages are not translated yet.")
             return
         self.queue_control(
@@ -86,7 +93,7 @@ class CommandHandlers:
         return
 
     async def _command_new(self, text, user, chat_id, helpers):
-        self._close_reset_confirmation(user, "🧠 已通过命令新建对话。")
+        self._close_reset_confirmation(user, self._text(user, "🧠 已通过命令新建对话。", "🧠 New conversation started by command."))
         self.queue_control(chat_id, self._reset_conversation(user))
         return
 
@@ -250,7 +257,7 @@ class CommandHandlers:
         if len(correction_prompt(job, correction)) > self.settings.max_prompt:
             self.queue_reply(chat_id, self._text(user, "⚠️ 原任务与修正合并后过长，当前任务未改变；请精简修正内容。", "⚠️ The combined task and correction are too long. The current task is unchanged; shorten your correction."))
             return
-        self._forget_correction(job, "⚡ 已提交修正，正在等待清理和交接。")
+        self._forget_correction(job, self._text(user, "⚡ 已提交修正，正在等待清理和交接。", "⚡ Correction submitted; waiting for cleanup and handover."))
         job.steered = True
         job.cancel.set()
         job.activity = "正在停止当前任务并应用你的修正"

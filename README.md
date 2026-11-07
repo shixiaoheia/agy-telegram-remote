@@ -165,6 +165,7 @@ pid=$(systemctl show agy-telegram-remote -p MainPID --value)
 | `/history` | 查看最近 10 条任务并打开完整结果 |
 | `/last` | 重新查看最近一次任务结果 |
 | `/usage` | 查看当前会话信息与历史累计 Token 统计 |
+| `/language` | 选择当前用户的机器人界面语言（英文翻译仍在完善中） |
 | `/help` | 查看完整指令说明 |
 
 ## 执行与恢复

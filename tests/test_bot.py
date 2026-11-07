@@ -224,6 +224,24 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(callback_update("language:en", user=999))
         self.assertEqual(self.store.get_language(12345), "zh")
 
+    async def test_english_common_commands_and_other_user_are_independent(self):
+        self.store.set_language(12345, "en")
+        for command, expected in (("/steer", "Usage:"), ("/ls", "Workspace files"),
+                                  ("/whitelist", "Allowlist"), ("/sys", "System status"),
+                                  ("/new", "Conversation context cleared")):
+            with self.subTest(command=command):
+                await self.handle(update(command))
+                self.assertIn(expected, self.api.messages[-1][1])
+        await self.handle(update("/start", user=67890))
+        self.assertIn("欢迎使用", self.api.messages[-1][1])
+
+    async def test_english_model_mode_callbacks_change_owned_labels(self):
+        self.store.set_language(12345, "en")
+        await self.handle(callback_update("mode:plan"))
+        self.assertIn("Mode changed: Plan", self.api.messages[-1][1])
+        await self.handle(callback_update("model:default"))
+        self.assertIn("Default restored", self.api.messages[-1][1])
+
     async def test_english_status_and_result_preserve_user_text(self):
         self.store.set_language(12345, "en")
         await self.handle(update("/status"))
