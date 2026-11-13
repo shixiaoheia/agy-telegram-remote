@@ -11,6 +11,7 @@ bash scripts/verify.sh
 ### 安装器权限环境回归
 
 安装器会设置 `umask 077`，并通过 `runuser` 以非 root 账户运行离线测试。
+自检的标准输入固定为 `/dev/null`，测试及子进程不会等待 SSH 终端输入，也不会消耗后续菜单回答。回归覆盖保持打开的伪终端、安装器输入保留，以及实际 root/nobody 自检中的标准输入 EOF。
 CI 现在对每个 Python 版本分别运行常规测试和 `umask 077` 测试。
 本地可在非 root 账户下复验：
 

@@ -6,7 +6,7 @@ Control the Google Antigravity CLI (`agy`) in a private Telegram chat on your VP
 
 > This is a tool for you and people you fully trust. It can execute tasks on your server. Keep the bot token and whitelist private.
 
-**Current release: [v2026.11.13.2](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.2)** · [Changelog](CHANGELOG.md)
+**Current release: [v2026.11.13.3](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.3)** · [Changelog](CHANGELOG.md)
 
 This release adds account-based dynamic model discovery and owner-only `/update` from Telegram. Existing installations need one VPS update with the new installer before remote updates are available.
 
@@ -112,7 +112,7 @@ Configuration, proxy, Google login, permissions, history and model choices are r
 To bootstrap this release on an existing VPS with its saved configuration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.2/install.sh -o install.sh && bash install.sh --ref v2026.11.13.2
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.3/install.sh -o install.sh && bash install.sh --ref v2026.11.13.3
 ```
 
 The explicit `--ref` bypasses the menu. Verify `/status` and `/model` afterward; future updates merged into `main` can be installed through `/update`.

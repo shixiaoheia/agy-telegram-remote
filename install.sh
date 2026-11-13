@@ -250,10 +250,12 @@ run_offline_tests() (
   command -v runuser >/dev/null || fail '缺少非 root 自检工具 runuser；未停止旧服务。'
   id -u nobody >/dev/null 2>&1 || fail '缺少 nobody 自检账户；未停止旧服务。'
   cd -- "$stage"
+  # Tests and their child processes must not read the operator's SSH terminal
+  # or consume answers intended for the installer menu.
   runuser -u nobody -- /usr/bin/env -i \
     HOME=/nonexistent USER=nobody LOGNAME=nobody PATH=/usr/bin:/bin \
     LANG=C.UTF-8 TERM=dumb \
-    /usr/bin/python3 -I -B -m unittest discover -s "$stage/tests" -q
+    /usr/bin/python3 -I -B -m unittest discover -s "$stage/tests" -q </dev/null
 )
 
 report_service_state() {

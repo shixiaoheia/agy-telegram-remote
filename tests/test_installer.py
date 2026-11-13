@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import io
 import os
+import pty
 import subprocess
 import tempfile
 import unittest
@@ -105,6 +106,50 @@ run_offline_tests "$2"
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("-u\nnobody\n--\n/usr/bin/env\n-i\n", result.stdout)
         self.assertIn("/usr/bin/python3\n-I\n-B\n-m\nunittest", result.stdout)
+
+    def test_offline_launcher_does_not_consume_installer_answers(self):
+        script = r'''
+source "$1"
+runuser() {
+  if IFS= read -r answer; then return 90; fi
+  printf 'TEST_STDIN_EOF\n'
+}
+run_offline_tests "$2"
+IFS= read -r answer
+[[ "$answer" == installer-answer ]] || exit 91
+printf 'INSTALLER_INPUT_PRESERVED\n'
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                    input="installer-answer\n", capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TEST_STDIN_EOF", result.stdout)
+        self.assertIn("INSTALLER_INPUT_PRESERVED", result.stdout)
+
+    def test_offline_launcher_detaches_from_an_open_terminal_but_keeps_menu_interactive(self):
+        script = r'''
+source "$1"
+runuser() {
+  [[ ! -t 0 ]] || return 90
+  if IFS= read -r answer; then return 91; fi
+  printf 'TEST_STDIN_EOF\n'
+}
+[[ -t 0 ]] || exit 92
+run_offline_tests "$2"
+[[ -t 0 ]] || exit 93
+printf 'MENU_TERMINAL_PRESERVED\n'
+'''
+        master, slave = pty.openpty()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                        stdin=slave, capture_output=True, text=True, timeout=5)
+        finally:
+            os.close(slave)
+            os.close(master)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("TEST_STDIN_EOF", result.stdout)
+        self.assertIn("MENU_TERMINAL_PRESERVED", result.stdout)
 
     def test_purge_removes_all_project_components_but_not_workspace(self):
         with tempfile.TemporaryDirectory() as temp:
