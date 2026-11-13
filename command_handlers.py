@@ -6,7 +6,7 @@ import html
 import re
 import uuid
 from collections import deque
-from settings import MODEL_RE, is_retired_model, resolve_model
+from settings import MODEL_RE
 
 
 class CommandHandlers:
@@ -60,7 +60,7 @@ class CommandHandlers:
                                "/history — recent tasks\n/last — latest result\n/new or /reset — new conversation\n"
                                "/usage — usage statistics\n/ls or /files — browse workspace files\n"
                                "/sys or /system — server status\n/whitelist — manage authorized users\n"
-                               "/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
+                               "/update — update from GitHub (owner only)\n/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
                                "/language — select language\n/help — this menu\n"
                                "Attachments: up to 10 files, 10 MB each and 30 MB per group.")
             return
@@ -79,7 +79,7 @@ class CommandHandlers:
             "• 📁 /ls 或 /files - 速览工作空间最近修改的文件列表\n"
             "• 🖥️ /sys 或 /system - 实时查看 VPS 硬件负载、CPU、内存与运行时间\n"
             "• 👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
-            "• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
+            "• 📥 /update - 从 GitHub 更新机器人（仅主管理员）\n• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
             "【🛑 任务控制与基础】\n"
             "• 🛑 /cancel - 立即取消正在执行的任务\n"
             "• ⏳ /queue - 查看等待任务；/queue add <内容> 排队，/queue cancel 取消等待\n"
@@ -280,14 +280,20 @@ class CommandHandlers:
         return
 
     async def _command_model(self, text, user, chat_id, helpers):
-        has_effort_picker = helpers.has_effort_picker
+        has_effort_picker = self._has_model_effort_picker
         model_health_text = helpers.model_health_text
         parts = text.split(maxsplit=1)
         target = parts[1].strip() if len(parts) > 1 else ""
-        if target.lower() in {"refresh", "check", "probe"}:
-            self._start_model_health_refresh(chat_id)
+        if target.lower() == "refresh":
+            await self._ensure_model_catalog(force=True)
+            picker, keyboard = self._model_picker(user)
+            self.queue_reply(chat_id, picker, reply_markup=keyboard)
+            return
+        if target.lower() in {"check", "probe"}:
+            self._start_model_health_refresh(chat_id, self.store.get_model(user) or self.settings.model or "")
             return
         if not target or target.lower() in {"show", "current", "status", "list", "help"}:
+            await self._ensure_model_catalog()
             picker, keyboard = self._model_picker(user)
             self.queue_reply(chat_id, picker, reply_markup=keyboard)
             return
@@ -297,11 +303,8 @@ class CommandHandlers:
             self.queue_reply(chat_id, self._text(user, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model <模型名或别名>",
                                                "🔄 Reset to the default model selected by agy.\n💡 Use /model <name or alias> to choose another model."))
             return
-        resolved = resolve_model(target)
-        if is_retired_model(resolved):
-            self.queue_reply(chat_id, self._text(user, "该模型已从项目移除，请发送 /model 选择其他模型。",
-                                               "This model was removed from the project. Use /model to choose another."))
-            return
+        await self._ensure_model_catalog()
+        resolved = self._resolve_model(target)
         if not MODEL_RE.fullmatch(resolved):
             self.queue_reply(
                 chat_id,
@@ -318,7 +321,7 @@ class CommandHandlers:
                            f"⚠️ {resolved} is currently marked unavailable. Run /model refresh to check again or choose an available model."),
             )
             return
-        self.store.set_model(user, resolved)
+        self.store.set_model(user, resolved, exact=resolved in self._variant_ids())
         alias_note = (self._text(user, f"（由别名 '{target}' 解析）", f" (resolved from alias '{target}')")
                       if resolved != target else "")
         if not has_effort_picker(resolved):
@@ -333,6 +336,30 @@ class CommandHandlers:
         system_status = helpers.system_status
         self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at, self.store.get_language(user)))
         return
+
+    async def _command_update(self, text, user, chat_id, helpers):
+        if user != self.settings.owner_id:
+            self.queue_reply(chat_id, self._text(user, "⚠️ 仅主管理员可以更新机器人。", "⚠️ Only the owner can update the bot."))
+            return
+        parts = text.split()
+        if len(parts) == 2 and parts[1].lower() == "status":
+            try:
+                status = helpers.read_update_status(self.settings.state_dir)
+                self.queue_reply(chat_id, helpers.update_status_text(status, self.store.get_language(user)))
+            except (OSError, ValueError):
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取更新记录，请检查 VPS。", "⚠️ Cannot read the update record; check the VPS."))
+            return
+        if len(parts) != 1:
+            self.queue_reply(chat_id, self._text(user, "用法：/update 更新 GitHub main；/update status 查看结果。", "Use /update for GitHub main or /update status for the result."))
+            return
+        if self._restart_pending():
+            self.queue_reply(chat_id, self._text(user, "⏳ 更新或重启已经安排，请稍候。", "⏳ An update or restart is already scheduled."))
+            return
+        if (self._restart_busy() or self.waiting_jobs or self.unsaved_results or self.unreadable_recovery
+                or self.runner.blocked):
+            self.queue_reply(chat_id, self._text(user, "⚠️ 请先完成任务、清空等待队列并保存未恢复的结果，再更新机器人。", "⚠️ Finish active tasks, clear the waiting queue and save unrecovered results before updating."))
+            return
+        self.restart_task = asyncio.create_task(self._do_update(user, chat_id))
 
     async def _command_restart(self, text, user, chat_id, helpers):
         admin_id = self.settings.owner_id
@@ -569,6 +596,7 @@ class CommandHandlers:
             '/sys': self._command_sys,
             '/system': self._command_sys,
             '/restart': self._command_restart,
+            '/update': self._command_update,
             '/whitelist': self._command_whitelist,
             '/mode': self._command_mode,
             '/ls': self._command_ls,

@@ -15,7 +15,7 @@ except ImportError:
     from common import settings_at
     from test_bot import FakeAPI, FakeRunner, callback_update, update
 from bot import Bridge, Job, history_summary, record_time_label
-from settings import OFFICIAL_MODELS
+from tests.model_fixture import OFFICIAL_MODELS
 from state_store import Store, atomic_json
 
 
@@ -27,6 +27,7 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
                            self.settings.max_reply, 7, self.settings.token)
         self.api, self.runner = FakeAPI(), FakeRunner()
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        await self.bridge._ensure_model_catalog()
 
     async def asyncTearDown(self):
         if self.bridge.model_check_task is not None:
@@ -269,7 +270,8 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2 小时前", text)
         actions = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
         self.assertIn("probe:current", actions)
-        self.assertIn("probe:all", actions)
+        self.assertIn("selector:refresh", actions)
+        self.assertNotIn("probe:all", actions)
         self.assertIn("消耗模型额度", text)
         self.assertEqual(self.runner.calls, 0)
 

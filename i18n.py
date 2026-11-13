@@ -19,6 +19,7 @@ _COMMANDS = (
     ("usage", "查看 Token 用量", "Token usage"),
     ("last", "查看最近一次结果", "Latest result"),
     ("history", "查看最近 10 条任务", "Recent tasks"),
+    ("update", "从 GitHub 更新机器人（仅主管理员）", "Update from GitHub (owner only)"),
 )
 
 
@@ -86,11 +87,12 @@ _BUTTONS = {
     "📖 查看结果": "📖 View result", "📚 最近任务": "📚 Recent tasks",
     "🧠 新建对话": "🧠 New conversation", "🔎 检测当前模型": "🔎 Check current model",
     "🔎 检测全部": "🔎 Check all", "↩️ 恢复默认": "↩️ Reset to default",
+    "🔄 立即刷新": "🔄 Refresh now",
     "🧠 确认新建": "🧠 Confirm new conversation", "↩️ 保留当前对话": "↩️ Keep conversation",
     "✏️ 作为修正": "✏️ Apply correction", "✖️ 忽略补充": "✖️ Ignore",
     "🤖 更换模型": "🤖 Change model", "编辑": "Edit", "规划": "Plan", "跟随默认": "Default",
 }
-_EFFORTS = {"极速": "Fast", "均衡": "Balanced", "深度": "Deep", "最高": "Maximum"}
+_EFFORTS = {"极速": "Fast", "均衡": "Balanced", "深度": "Deep", "超高": "Extra high", "最高": "Maximum"}
 _ACTIVITIES = {
     "模型会话已启动": "Model session started",
     "正在准备任务": "Preparing the task",

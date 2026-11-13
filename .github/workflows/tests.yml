@@ -89,4 +89,9 @@ jobs:
         run: |
           sudo env GITHUB_ACTIONS=true CI=true AGY_TEST_ISOLATED_SYSTEMD=1 \
             AGY_TEST_SING_BOX="$RUNNER_TEMP/sing-box" /usr/bin/python3 scripts/test_proxy_systemd.py
+      - name: Verify independent bot updater handoff
+        timeout-minutes: 2
+        run: |
+          sudo env GITHUB_ACTIONS=true CI=true AGY_TEST_ISOLATED_SYSTEMD=1 \
+            /usr/bin/python3 scripts/test_update_systemd.py
 

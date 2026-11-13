@@ -223,20 +223,48 @@ class Store:
             return None
         model = value.get("model")
         if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
-            return resolve_model(model)
+            return model if value.get("exact") is True else resolve_model(model)
         return None
 
-    def set_model(self, user: int, model: str | None) -> None:
+    def set_model(self, user: int, model: str | None, *, exact: bool = False) -> None:
         path = self._model_path(user)
         if model is None:
             path.unlink(missing_ok=True)
             return
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
             raise ValueError("Invalid model name")
-        atomic_json(path, {"user_id": user, "model": model, "updated_at": time.time()})
+        atomic_json(path, {"user_id": user, "model": model, "exact": exact, "updated_at": time.time()})
 
     def _model_health_path(self) -> Path:
         return self.directory / "model-health.json"
+
+    def get_model_catalog(self) -> dict:
+        """A separate snapshot: historical probe results are never a model list."""
+        try:
+            value = read_json(self.directory / "model-catalog.json", 16384)
+        except FileNotFoundError:
+            return {"checked_at": 0.0, "models": []}
+        if not isinstance(value, dict):
+            raise ValueError("Invalid model catalog")
+        stamp, models = value.get("checked_at"), value.get("models")
+        if (type(stamp) not in {int, float} or not math.isfinite(stamp)
+                or not 0 < stamp <= 253402300799):
+            raise ValueError("Invalid model catalog timestamp")
+        self._validate_catalog(models)
+        return {"checked_at": float(stamp), "models": list(models)}
+
+    @staticmethod
+    def _validate_catalog(models) -> None:
+        if (not isinstance(models, (list, tuple)) or not 1 <= len(models) <= 128
+                or any(not isinstance(model, str)
+                       or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model) for model in models)
+                or len(set(models)) != len(models)):
+            raise ValueError("Invalid model catalog entries")
+
+    def set_model_catalog(self, models) -> None:
+        self._validate_catalog(models)
+        atomic_json(self.directory / "model-catalog.json",
+                    {"checked_at": time.time(), "models": list(models)})
 
     def get_model_health(self) -> dict:
         """Return the bounded, account-wide result of explicit model probes."""

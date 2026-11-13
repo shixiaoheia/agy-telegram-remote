@@ -14,7 +14,8 @@ except ImportError:
     from test_bot import FakeAPI, FakeRunner, attachment_update, callback_update, update
 from bot import Bridge, Job, deployment_version
 from agy_runner import Result
-from settings import OFFICIAL_MODELS, is_retired_model, resolve_model
+from settings import resolve_model
+from tests.model_fixture import OFFICIAL_MODELS
 from state_store import Store
 from telegram_api import TelegramError
 
@@ -33,6 +34,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
                            self.settings.max_reply, 7, self.settings.token)
         self.api, self.runner = FakeAPI(), FakeRunner()
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        await self.bridge._ensure_model_catalog()
 
     async def asyncTearDown(self):
         if self.bridge.model_check_task is not None:
@@ -141,7 +143,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 cleaning.set()
                 await release.wait()
         self.runner.run = AsyncMock(side_effect=probe)
-        await self.bridge.handle(update("/model refresh"))
+        await self.bridge.handle(callback_update("probe:all"))
         task = self.bridge.model_check_task
         await started.wait()
         try:
@@ -174,7 +176,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 cleaned.set()
         self.runner.list_models = discover
-        await self.bridge.handle(update("/model refresh"))
+        await self.bridge.handle(callback_update("probe:all"))
         task = self.bridge.model_check_task
         await entered.wait()
         await self.bridge.handle(update("/cancel"))
@@ -184,7 +186,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bridge.model_check_task)
 
     async def test_immediate_model_cancel_clears_reservation(self):
-        await self.bridge.handle(update("/model refresh"))
+        self.bridge._start_model_health_refresh(12345)
         task = self.bridge.model_check_task
         await self.bridge.handle(update("/cancel"))
         await asyncio.gather(task, return_exceptions=True)
@@ -203,7 +205,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
                 cleaning.set()
                 await release.wait()
         self.runner.list_models = discover
-        await self.bridge.handle(update("/model refresh"))
+        await self.bridge.handle(callback_update("probe:all"))
         check = self.bridge.model_check_task
         await entered.wait()
         await self.bridge.handle(update("/cancel"))
@@ -223,7 +225,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_shutdown_cancels_active_model_probe(self):
         self.runner.hold = True
-        await self.bridge.handle(update("/model refresh"))
+        await self.bridge.handle(callback_update("probe:all"))
         check = self.bridge.model_check_task
         await self.runner.started.wait()
         self.bridge.stop.set()
@@ -370,7 +372,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             await self.bridge.handle(attachment_update(
                 photo=[{"file_id": "photo", "file_size": 4}], media_group_id="album",
             ))
-            await self.bridge.handle(update("/model refresh"))
+            await self.bridge.handle(callback_update("probe:all"))
             await self.bridge.handle(update("/restart"))
             self.assertIs(self.bridge.restart_task, restart)
             self.assertIsNone(self.bridge.slot)
@@ -682,30 +684,22 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(history["mode"], "plan")
         self.assertEqual(self.runner.calls, 2)
 
-    async def test_removed_models_cannot_reappear_or_be_selected_or_run(self):
-        self.assertTrue(all(not is_retired_model(model) for _, model, _ in OFFICIAL_MODELS))
-        self.store.set_model_health({model: {"outcome": "success"} for model in REMOVED})
-        _, keyboard = self.bridge._model_picker(12345)
-        buttons = [b["callback_data"] for row in keyboard["inline_keyboard"] for b in row]
-        self.assertTrue(all(not is_retired_model(b.split(":", 1)[1]) for b in buttons))
-        for model in (*REMOVED, "3.7", "3.6-low", "gpt", "120b"):
-            await self.bridge.handle(update(f"/model {model}"))
-            self.assertIsNone(self.store.get_model(12345))
-            for prefix in ("model", "choose"):
-                await self.bridge.handle(callback_update(f"{prefix}:{model}"))
-                self.assertIsNone(self.store.get_model(12345))
-        for model in REMOVED:
-            self.store.set_model(12345, model)
-            await self.bridge.handle(update("check the server"))
-            self.assertIsNone(self.bridge.slot)
-            self.assertEqual(self.store.get_model(12345), model)
-        self.assertEqual(self.runner.calls, 0)
-        self.assertEqual(resolve_model("sonnet"), "claude-sonnet-5-5-medium")
-        self.assertEqual(resolve_model("opus"), "claude-opus-5-5-medium")
+    async def test_catalog_membership_replaces_static_retirement_rules(self):
+        self.runner.list_models = AsyncMock(return_value=REMOVED)
+        await self.bridge._ensure_model_catalog(force=True)
+        ids = self.bridge._variant_ids()
+        self.assertEqual(ids, frozenset(REMOVED))
+        await self.bridge.handle(callback_update(f"model:{REMOVED[0]}"))
+        self.assertTrue(self.api.edits)
+        # A stale button for an entry absent from the new snapshot is rejected.
+        self.runner.list_models = AsyncMock(return_value=("future-model-high",))
+        await self.bridge._ensure_model_catalog(force=True)
+        self.store.set_model(12345, None)
+        await self.bridge.handle(callback_update(f"choose:{REMOVED[0]}"))
+        self.assertIsNone(self.store.get_model(12345))
 
-    async def test_refresh_never_probes_removed_models(self):
+    async def test_explicit_all_probe_follows_catalog_without_version_blacklist(self):
         self.runner.list_models = AsyncMock(return_value=(*REMOVED, "gemini-3.8-flash-high"))
         await self.bridge._refresh_model_health(12345)
-        self.assertEqual(self.runner.calls, 1)
-        self.assertEqual(self.runner.last_model, "gemini-3.8-flash-high")
-        self.assertFalse(set(REMOVED) & self.store.get_model_health()["models"].keys())
+        self.assertEqual(self.runner.calls, len(REMOVED) + 1)
+        self.assertTrue(set(REMOVED) <= self.store.get_model_health()["models"].keys())

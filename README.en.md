@@ -6,6 +6,10 @@ Control the Google Antigravity CLI (`agy`) in a private Telegram chat on your VP
 
 > This is a tool for you and people you fully trust. It can execute tasks on your server. Keep the bot token and whitelist private.
 
+**Current release: [v2026.11.13](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13)** · [Changelog](CHANGELOG.md)
+
+This release adds account-based dynamic model discovery and owner-only `/update` from Telegram. Existing installations need one VPS update with the new installer before remote updates are available.
+
 ## Requirements
 
 - A Debian 12+ or Ubuntu 22.04+ VPS with root access and systemd.
@@ -40,7 +44,7 @@ Send a text task, or attach screenshots, logs, or code files. Individual attachm
 | --- | --- |
 | `/start`, `/help` | Welcome and command list |
 | `/language` | Select Chinese or English for your interface |
-| `/model`, `/model refresh` | Select a model or explicitly check available models |
+| `/model`, `/model refresh` | Select from the signed-in account catalog or refresh it without probing models |
 | `/mode` | Select execution mode |
 | `/status` | Check the current task |
 | `/cancel` | Cancel the current task |
@@ -86,3 +90,27 @@ The project uses the Python standard library at runtime. Offline tests do not pr
 Thanks to [whypuss/agy-telegram-bot](https://github.com/whypuss/agy-telegram-bot), [Google agy documentation](https://antigravity.google/docs/cli/install/), and the [Telegram Bot API](https://core.telegram.org/bots/api).
 
 Join the [Telegram community](https://t.me/xiaoheidemimi). The project also lists a [BandwagonHost referral link](https://bandwagonhost.com/aff.php?aff=80815) in the Chinese README.
+
+### Dynamic model menu
+
+`/model` reads `agy models` using the server's signed-in account. The bot ships no fixed model catalog or version blacklist. New models and reasoning variants appear automatically when the CLI returns them. Menus refresh on opening with a 60-second cache; `/model refresh` or **Refresh now** bypasses it. Restarting the service triggers a fresh lookup on the first open.
+
+Listing sends no chat prompts. Visibility does not guarantee quota, regional eligibility, or a successful request. Failed lookups preserve a clearly marked cached snapshot; without a snapshot, no candidate models are invented. Busy tasks defer lookup until the menu is reopened while idle. Failed automatic lookups have a 15-second cooldown. An upstream CLI interface/format change can still require a software update.
+
+The optional **Check current model** / `/model check` consumes quota and remains separate from catalog refresh. Existing selections, permissions, history and running tasks are preserved. Stale buttons cannot select models missing from the refreshed catalog. Large catalogs are paginated. Legacy version aliases are retained for old settings; family shortcuts follow the current catalog.
+
+### Update from Telegram
+
+After installing a version with this feature on the VPS once, the owner can send `/update` in private chat. It checks the fixed repository's `main` branch, pins its current commit, runs offline tests and a Telegram identity check before stopping the old bot, then deploys and verifies initialization and polling readiness. Up-to-date installations are not restarted. An independent systemd updater survives bot shutdown, reuses the installer's deployment lock and rollback, and sends the final result to the owner. `/update status` retrieves the durable result if notification fails.
+
+Active tasks, attachments, model checks, waiting queues and unrecovered results block updates. Duplicate requests do not create concurrent deployments, and the new bot waits for readiness verification before accepting work. Only merged `main` code is used; arbitrary sources/arguments and unmerged PRs are not accepted. This is an explicit command, not a scheduled or push-triggered update.
+
+Configuration, proxy, Google login, permissions, history and model choices are retained. No model prompts, Google CLI upgrade, OS package upgrade or reauthentication runs during a bot update. Changes to dependencies or login can still require VPS maintenance. Failure retains or restores the previous bot; unconfirmed recovery is reported explicitly.
+
+To bootstrap this release on an existing VPS with its saved configuration:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13/install.sh -o install.sh && bash install.sh --ref v2026.11.13
+```
+
+The explicit `--ref` bypasses the menu. Verify `/status` and `/model` afterward; future updates merged into `main` can be installed through `/update`.

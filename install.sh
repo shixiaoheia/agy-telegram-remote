@@ -14,6 +14,9 @@ STATE_BASE=/var/lib/agy-telegram-remote
 BACKUPS=/var/backups/agy-telegram-remote
 UNIT=/etc/systemd/system/agy-telegram-remote.service
 SERVICE='agy-telegram-remote'
+UPDATE_UNIT=/etc/systemd/system/agy-telegram-update.service
+UPDATE_UNIT_CHANGED=0
+BOT_UPDATE=0
 REPO=https://github.com/shixiaoheia/agy-telegram-remote.git
 RUNTIME_DIR=/run/agy-telegram-remote
 INPUT_DIR="$APP_HOME/.agy-telegram-inputs"
@@ -288,6 +291,13 @@ rollback() {
       rm -f -- "$UNIT"
     fi
   fi
+  if [[ "$UPDATE_UNIT_CHANGED" == 1 ]]; then
+    if [[ -f "$BACKUP/update-service" ]]; then
+      cp -p -- "$BACKUP/update-service" "$UPDATE_UNIT"
+    else
+      rm -f -- "$UPDATE_UNIT"
+    fi
+  fi
   systemctl daemon-reload || true
   if [[ "$OLD_ENABLED" == 1 ]]; then
     systemctl enable "$SERVICE" >/dev/null 2>&1 || true
@@ -315,6 +325,35 @@ write_commit_record() {
     rm -f -- "$temporary"
     return 1
   fi
+}
+
+# Install a separate updater cgroup so stopping the bot cannot kill deployment.
+install_update_unit() {
+  local release="$1"
+  [[ ! -L "$UPDATE_UNIT" ]] || fail '更新服务文件是符号链接。'
+  if [[ -e "$UPDATE_UNIT" ]]; then
+    [[ -f "$UPDATE_UNIT" && "$(stat -c %u "$UPDATE_UNIT")" == 0 ]] || fail '更新服务文件不受 root 管理。'
+    head -n 1 "$UPDATE_UNIT" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.' \
+      || fail '更新服务文件并非本项目管理，请先人工检查。'
+    cp -p -- "$UPDATE_UNIT" "$BACKUP/update-service"
+  fi
+  if [[ -f "$release/updater.py" ]]; then
+    /usr/bin/python3 -E -s -B "$release/updater.py" unit > "$BACKUP/new-update.service"
+    UPDATE_UNIT_CHANGED=1
+    install -o root -g root -m 0644 "$BACKUP/new-update.service" "$UPDATE_UNIT"
+  elif [[ -f "$UPDATE_UNIT" ]]; then
+    UPDATE_UNIT_CHANGED=1
+    rm -f -- "$UPDATE_UNIT"
+  fi
+}
+
+validate_bot_update() {
+  [[ "$EUID" == 0 && "$MODE" == install && "$REF" =~ ^[0-9a-f]{40}$ ]] \
+    || fail '机器人更新必须由 root 使用固定提交执行。'
+  [[ "$REAUTH" == 0 && "$RECONFIGURE" == 0 && "$ENABLE_AUTO" == 0 && -z "$HOST_ACCESS" && "$WRITE_PATHS_SET" == 0 ]] \
+    || fail '机器人更新不能更改账号、权限或配置。'
+  [[ -f "$CONFIG" && ! -L "$CONFIG" && -L "$APP" && -f "$UNIT" && ! -L "$UNIT" ]] \
+    || fail '机器人更新需要完整的已有托管安装。'
 }
 
 on_exit() {
@@ -554,6 +593,9 @@ validate_release_files() {
   if grep -Eq '^[[:space:]]*(from[[:space:]]+i18n[[:space:]]+import|import[[:space:]]+i18n([[:space:]]|$))' "$stage/bot.py"; then
     [[ -f "$stage/i18n.py" ]] || fail '所选提交缺少界面语言所需文件。'
   fi
+  if grep -Eq '^[[:space:]]*(from[[:space:]]+updater[[:space:]]+import|import[[:space:]]+updater([[:space:]]|$))' "$stage/bot.py"; then
+    [[ -f "$stage/updater.py" ]] || fail '所选提交缺少机器人更新所需文件。'
+  fi
 }
 
 uninstall() {
@@ -628,6 +670,14 @@ uninstall() {
       done
     fi
   fi
+  local managed_update=0
+  if [[ -e "$UPDATE_UNIT" || -L "$UPDATE_UNIT" ]]; then
+    [[ -f "$UPDATE_UNIT" && ! -L "$UPDATE_UNIT" && "$(stat -c %u "$UPDATE_UNIT")" == 0 ]] \
+      || fail '更新服务文件类型异常；未停止服务。'
+    head -n 1 "$UPDATE_UNIT" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.' \
+      || fail '更新服务不是本项目管理；未停止服务。'
+    managed_update=1
+  fi
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     fail '服务未能停止；未移除服务文件。'
@@ -644,6 +694,10 @@ uninstall() {
   if [[ "$PURGE" == 1 ]]; then
     [[ "$managed_drop" == 0 ]] || rm -f -- "$proxy_drop"
     [[ "$managed_engine" == 0 ]] || rm -rf -- "$proxy_engine"
+  fi
+  if [[ "$managed_update" == 1 ]]; then
+    systemctl stop agy-telegram-update.service >/dev/null 2>&1 || true
+    rm -f -- "$UPDATE_UNIT"
   fi
   rm -f -- "$UNIT"
   systemctl daemon-reload
@@ -678,6 +732,7 @@ main() {
         direct_install=1
         ;;
       --reauth) REAUTH=1; direct_install=1 ;;
+      --bot-update) BOT_UPDATE=1; MODE=install; direct_install=1 ;;
       --uninstall) MODE=uninstall ;;
       --proxy) MODE=proxy ;;
       --diagnose) MODE=diagnose ;;
@@ -697,7 +752,11 @@ main() {
     MODE=install
   fi
   [[ "$MODE" == uninstall || "$PURGE" == 0 ]] || fail '--purge 必须与 --uninstall 一起使用。'
-  [[ -t 0 && -t 1 ]] || fail '请在可交互 SSH 终端运行，不要把脚本通过管道传给 bash。'
+  if [[ "$BOT_UPDATE" == 1 ]]; then
+    validate_bot_update
+  else
+    [[ -t 0 && -t 1 ]] || fail '请在可交互 SSH 终端运行，不要把脚本通过管道传给 bash。'
+  fi
   if [[ "$MODE" == menu ]]; then
     choose_operation
   fi
@@ -751,9 +810,11 @@ main() {
   echo '👑 运行模式：个人 VPS 极简 Root 模式（运行账户: root，工作目录: /root）'
   echo '⚡ 特性支持：默认开启自动审批（无头运行不挂起），仅供信任的白名单用户使用。'
   echo '📦 正在准备系统依赖与核心运行环境……'
+  if [[ "$BOT_UPDATE" == 0 ]]; then
   apt-get update -y
   DEBIAN_FRONTEND=noninteractive apt-get install -y \
     python3 git curl ca-certificates procps util-linux
+  fi
   /usr/bin/python3 -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
     || fail '需要 Python 3.10+。'
   user_dir "$APP_HOME"
@@ -788,6 +849,10 @@ main() {
   find "$STAGE" -type d -exec chmod 0755 {} +
   find "$STAGE" -type f -exec chmod 0644 {} +
   validate_release_files "$STAGE"
+  if [[ "$BOT_UPDATE" == 1 ]]; then
+    [[ -f "$STAGE/updater.py" ]] || fail '目标版本不支持机器人更新；旧服务尚未停止。'
+    [[ "$commit" == "$REF" ]] || fail '获取的提交与固定目标不一致。'
+  fi
   echo "采用提交：$commit"
 
   if [[ "$NEW_PROXY" == 1 ]]; then
@@ -831,7 +896,7 @@ main() {
   rm -f -- "$test_log"
   as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" check-token --config "$CANDIDATE"
 
-  if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+  if [[ "$BOT_UPDATE" == 0 ]] && systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     if ! confirm_service_stop; then
       echo '已取消更新，旧服务保持运行。'
       rm -rf -- "$STAGE"
@@ -864,6 +929,7 @@ main() {
   fi
 
   local installed_now=0
+  if [[ "$BOT_UPDATE" == 0 ]]; then
   if [[ ! -x "$agy" ]]; then
     [[ "$agy" == "$APP_HOME/.local/bin/agy" ]] || fail '自定义 AGY_PATH 不存在，请先人工安装。'
     echo '正在安装 Google 官方 agy……'
@@ -949,6 +1015,9 @@ _ONBOARDING_EOF
   fi
   [[ "$smoke_rc" == 0 ]] || fail \
     "agy 自检未通过（代码 $smoke_rc）。配额、网络和协议问题不能靠反复重新授权解决。"
+  else
+    [[ -x "$agy" ]] || fail '已有 agy 不存在；机器人更新不会安装或修改 Google CLI。'
+  fi
   as_user /usr/bin/python3 -E -s -B "$STAGE/manage.py" check-local --config "$CANDIDATE"
 
   release="$RELEASES/$commit-$(date +%s)-$$"
@@ -970,6 +1039,7 @@ _ONBOARDING_EOF
   /usr/bin/python3 -E -s -B "$release/manage.py" unit --config "$CONFIG" --user root > "$BACKUP/new.service"
   UNIT_CHANGED=1
   install -o root -g root -m 0644 "$BACKUP/new.service" "$UNIT"
+  install_update_unit "$release"
   systemctl daemon-reload
   systemctl enable "$SERVICE" >/dev/null 2>&1 || true
   systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
