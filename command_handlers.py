@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import html
 import re
+import shutil
 import uuid
 from collections import deque
 from settings import MODEL_RE
@@ -26,121 +27,120 @@ class CommandHandlers:
         self.queue_reply(chat_id, self._text(user, "🌐 选择界面语言：", "🌐 Choose interface language:"), reply_markup=keyboard)
 
     async def _command_start(self, text, user, chat_id, helpers):
-        if self.store.get_language(user) == "en":
-            self.queue_reply(chat_id, "👋 Welcome to Antigravity Telegram Remote\n\n"
-                             "Send a task to run it in your server workspace. Use /model to choose a model, "
-                             "/status to check progress, /cancel to stop a task, and /help for commands.\n\n"
-                             "📎 Send up to 10 attachments per group, 10 MB each and 30 MB total.\n"
-                             "🔒 Only authorized users in private chats can use the bot; tasks run in your server workspace.\n"
-                             "Use /language to change the interface language.")
-            return
         self.queue_reply(
             chat_id,
-            "👋 欢迎使用 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
-            "这是你的专属 agy 远程工作台：直接发送一句需求，即可在服务器工作区执行。\n\n"
-            "✅ 建议从这里开始：\n"
-            "1. 发送 /model，选择模型与思考强度\n"
-            "2. 直接发送任务，例如“检查当前项目的错误并修复”\n"
-            "3. 运行中可点“取消任务”，或发送 /status 查看状态\n\n"
-            "📎 可发送一组截图或文件（单个最大 10MB，整组最多 10 个、30MB）。\n"
-            "🔒 仅白名单私聊可使用；任务会在你的服务器工作区运行。\n"
-            "💡 发送 /help 查看全部指令，发送 /new 开启全新对话。",
+            self._text(
+                user,
+                "👋 欢迎使用 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
+                "这是你的专属 agy 远程工作台：直接发送一句需求，即可在服务器工作区执行。\n\n"
+                "✅ 建议从这里开始：\n"
+                "1. 发送 /model，选择模型与思考强度\n"
+                "2. 直接发送任务，例如“检查当前项目的错误并修复”\n"
+                "3. 运行中可点“取消任务”，或发送 /status 查看状态\n\n"
+                "📎 可发送一组截图或文件（单个最大 10MB，整组最多 10 个、30MB）。\n"
+                "🔒 仅白名单私聊可使用；任务会在你的服务器工作区运行。\n"
+                "💡 发送 /help 查看全部指令，发送 /new 开启全新对话。",
+                "👋 Welcome to Antigravity Telegram Remote\n\n"
+                "Send a task to run it in your server workspace. Use /model to choose a model, "
+                "/status to check progress, /cancel to stop a task, and /help for commands.\n\n"
+                "📎 Send up to 10 attachments per group, 10 MB each and 30 MB total.\n"
+                "🔒 Only authorized users in private chats can use the bot; tasks run in your server workspace.\n"
+                "Use /language to change the interface language.",
+            ),
         )
-        return
 
     async def _command_help(self, text, user, chat_id, helpers):
-        if self.store.get_language(user) == "en":
-            self.queue_control(chat_id, "🤖 Commands\n"
-                               "Send a message to submit a task.\n\n"
-                               "/model — select or check models\n/mode — choose execution mode\n"
-                               "/status — current task and workspace status\n/cancel — cancel a task\n"
-                               "/queue — view waiting tasks; /queue add <task> queues text, "
-                               "/queue cancel cancels waiting tasks, /queue resume resumes\n"
-                               "/steer <correction> — stop and rerun the current text task with a correction\n"
-                               "/history — recent tasks\n/last — latest result\n/new or /reset — new conversation\n"
-                               "/usage — usage statistics\n/ls or /files — browse workspace files\n"
-                               "/sys or /system — server status\n/whitelist — manage authorized users\n"
-                               "/update — update from GitHub (owner only)\n/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
-                               "/language — select language\n/help — this menu\n"
-                               "Attachments: up to 10 files, 10 MB each and 30 MB per group.")
-            return
         self.queue_control(
             chat_id,
-            "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
-            "💬 直接发送文字：向 AI 助手提问或分派任务\n\n"
-            "【🧠 模型与推理配置】\n"
-            "• 🧠 /model - 选择模型后继续选择思考强度\n"
-            "• 📋 /mode - 切换执行模式（Accept-Edits 落地 / Plan 推演规划）\n\n"
-            "【💬 会话与用量管理】\n"
-            "• 🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
-            "• 📊 /usage - 查看 Token 消耗明细与对话轮数\n"
-            "• 📈 /status - 查看任务执行状态、记忆与工作空间可用磁盘\n\n"
-            "【🖥️ 系统与运维管理】\n"
-            "• 📁 /ls 或 /files - 速览工作空间最近修改的文件列表\n"
-            "• 🖥️ /sys 或 /system - 实时查看 VPS 硬件负载、CPU、内存与运行时间\n"
-            "• 👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
-            "• 📥 /update - 从 GitHub 更新机器人（仅主管理员）\n• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
-            "【🛑 任务控制与基础】\n"
-            "• 🛑 /cancel - 立即取消正在执行的任务\n"
-            "• ⏳ /queue - 查看等待任务；/queue add <内容> 排队，/queue cancel 取消等待\n"
-            "• ⚡ /steer <修正内容> - 停止当前纯文字任务，按原任务加修正重新执行\n"
-            "• 📜 /last - 查看最近一条任务的执行结果\n"
-            "• 📚 /history - 查看最近 10 条任务并点开完整结果\n"
-            "• 📎 可发送一组截图、日志或代码文件（单个最大 10MB，整组最多 10 个、30MB）\n"
-            "• 🆔 /id - 查看你的 Telegram 数字 ID\n"
-            "• ❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ 零依赖纯 Python 构建 ｜ 原生支持多轮上下文对话记忆！",
+            self._text(
+                user,
+                "🤖 Antigravity Telegram Remote\n━━━━━━━━━━━━━━━━━━━━\n"
+                "💬 直接发送文字：向 AI 助手提问或分派任务\n\n"
+                "【🧠 模型与推理配置】\n"
+                "• 🧠 /model - 选择模型后继续选择思考强度\n"
+                "• 📋 /mode - 切换执行模式（Accept-Edits 落地 / Plan 推演规划）\n\n"
+                "【💬 会话与用量管理】\n"
+                "• 🔄 /new 或 /reset - 重置对话记忆，开启全新独立对话\n"
+                "• 📊 /usage - 查看 Token 消耗明细与对话轮数\n"
+                "• 📈 /status - 查看任务执行状态、记忆与工作空间可用磁盘\n\n"
+                "【🖥️ 系统与运维管理】\n"
+                "• 📁 /ls 或 /files - 速览工作空间最近修改的文件列表\n"
+                "• 🖥️ /sys 或 /system - 实时查看 VPS 硬件负载、CPU、内存与运行时间\n"
+                "• 👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
+                "• 📥 /update - 从 GitHub 更新机器人（仅主管理员）\n• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
+                "【🛑 任务控制与基础】\n"
+                "• 🛑 /cancel - 立即取消正在执行的任务\n"
+                "• ⏳ /queue - 查看等待任务；/queue add <内容> 排队，/queue cancel 取消等待\n"
+                "• ⚡ /steer <修正内容> - 停止当前纯文字任务，按原任务加修正重新执行\n"
+                "• 📜 /last - 查看最近一条任务的执行结果\n"
+                "• 📚 /history - 查看最近 10 条任务并点开完整结果\n"
+                "• 📎 可发送一组截图、日志或代码文件（单个最大 10MB，整组最多 10 个、30MB）\n"
+                "• 🆔 /id - 查看你的 Telegram 数字 ID\n"
+                "• ❓ /help - 显示帮助说明\n━━━━━━━━━━━━━━━━━━━━\n"
+                "✨ 零依赖纯 Python 构建 ｜ 原生支持多轮上下文对话记忆！",
+                "🤖 Commands\n"
+                "Send a message to submit a task.\n\n"
+                "/model — select or check models\n/mode — choose execution mode\n"
+                "/status — current task and workspace status\n/cancel — cancel a task\n"
+                "/queue — view waiting tasks; /queue add <task> queues text, "
+                "/queue cancel cancels waiting tasks, /queue resume resumes\n"
+                "/steer <correction> — stop and rerun the current text task with a correction\n"
+                "/history — recent tasks\n/last — latest result\n/new or /reset — new conversation\n"
+                "/usage — usage statistics\n/ls or /files — browse workspace files\n"
+                "/sys or /system — server status\n/whitelist — manage authorized users\n"
+                "/update — update from GitHub (owner only)\n/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
+                "/language — select language\n/help — this menu\n"
+                "Attachments: up to 10 files, 10 MB each and 30 MB per group.",
+            ),
         )
-        return
 
     async def _command_new(self, text, user, chat_id, helpers):
         self._close_reset_confirmation(user, self._text(user, "🧠 已通过命令新建对话。", "🧠 New conversation started by command."))
         self.queue_control(chat_id, self._reset_conversation(user))
-        return
 
     async def _command_usage(self, text, user, chat_id, helpers):
         control_html = helpers.control_html
         usage = self.store.get_usage(user)
         conv = self.store.get_conversation(user)
+        cid = conv.get("conversation_id", "") if conv else ""
+        short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
+        turns = conv.get("num_turns", 1) if conv else 1
+        inp = usage.get("total_input_tokens", 0)
+        out = usage.get("total_output_tokens", 0)
+        think = usage.get("total_thinking_tokens", 0)
+        total_turns = html.escape(str(usage.get("total_turns", 0)))
         if self.store.get_language(user) == "en":
-            cid = conv.get("conversation_id", "") if conv else ""
-            short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
-            conv_info = f"`{short_cid}` (turn {conv.get('num_turns', 1)})" if cid else "No active conversation"
+            conv_info = f"`{short_cid}` (turn {turns})" if cid else "No active conversation"
             report = control_html(f"📊 Token usage\n💬 Current conversation: {conv_info}")
-            inp, out = usage.get("total_input_tokens", 0), usage.get("total_output_tokens", 0)
-            self.queue_reply(chat_id, report + "\n\n<blockquote>📈 Cumulative usage:\n"
-                             f"• Conversation turns: {html.escape(str(usage.get('total_turns', 0)))}\n"
-                             f"• Input: {inp:,}\n• Output: {out:,}\n"
-                             f"• Thinking: {usage.get('total_thinking_tokens', 0):,}\n"
-                             f"• Total: {inp + out:,}\n</blockquote>\n"
-                             "💡 Use /new or /reset to reset the conversation.",
-                             html_mode=True)
+            self.queue_reply(
+                chat_id,
+                report + "\n\n<blockquote>📈 Cumulative usage:\n"
+                f"• Conversation turns: {total_turns}\n"
+                f"• Input: {inp:,}\n• Output: {out:,}\n"
+                f"• Thinking: {think:,}\n"
+                f"• Total: {inp + out:,}\n</blockquote>\n"
+                "💡 Use /new or /reset to reset the conversation.",
+                html_mode=True,
+            )
             return
-        conv_info = "无活跃上下文（发送任意消息自动开启）"
-        if conv and conv.get("conversation_id"):
-            cid = conv["conversation_id"]
-            short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
-            turns = conv.get("num_turns", 1)
-            conv_info = f"`{short_cid}`（已连续对话 {turns} 轮）"
+        conv_info = f"`{short_cid}`（已连续对话 {turns} 轮）" if cid else "无活跃上下文（发送任意消息自动开启）"
         report = control_html(f"📊 Token 用量统计报告\n💬 当前会话：{conv_info}")
         self.queue_reply(
             chat_id,
             report + "\n\n<blockquote>📈 历史累计资源消耗：\n"
-            f"• 💬 累计对话轮次：{html.escape(str(usage.get('total_turns', 0)))} 轮\n"
-            f"• 📥 输入 Token：{usage.get('total_input_tokens', 0):,}\n"
-            f"• 📤 输出 Token：{usage.get('total_output_tokens', 0):,}\n"
-            f"• 🧠 思考 Token：{usage.get('total_thinking_tokens', 0):,}\n"
-            f"• 📊 总计 Token：{(usage.get('total_input_tokens', 0) + usage.get('total_output_tokens', 0)):,}\n"
+            f"• 💬 累计对话轮次：{total_turns} 轮\n"
+            f"• 📥 输入 Token：{inp:,}\n"
+            f"• 📤 输出 Token：{out:,}\n"
+            f"• 🧠 思考 Token：{think:,}\n"
+            f"• 📊 总计 Token：{inp + out:,}\n"
             "</blockquote>\n💡 发送 /new 或 /reset 可重置当前会话上下文。",
             html_mode=True,
         )
-        return
 
     async def _command_status(self, text, user, chat_id, helpers):
         details = text.split(maxsplit=1)[1:] == ["details"]
         summary, keyboard = self._status_card(user, details)
         self.queue_reply(chat_id, summary, reply_markup=keyboard, html_mode=details)
-        return
 
     async def _command_queue(self, text, user, chat_id, helpers):
         if text.split(maxsplit=1)[1:] == ["cancel"]:
@@ -185,7 +185,6 @@ class CommandHandlers:
             en += "\n/queue add <text> to add; /queue cancel to cancel yours; /queue resume to resume. Confirmation is required after restart."
             self.queue_reply(chat_id, self._text(user, zh, en),
                              reply_markup={"inline_keyboard": buttons} if buttons else None)
-        return
 
     async def _command_cancel(self, text, user, chat_id, helpers):
         job = self.slot
@@ -207,10 +206,8 @@ class CommandHandlers:
             self.queue_reply(chat_id, self._text(user, "🛑 已取消接收这组附件，没有启动任务。", "🛑 Attachment intake cancelled; no task was started."))
         else:
             self.queue_reply(chat_id, self._text(user, "ℹ️ 你当前没有可取消的任务。", "ℹ️ You have no task to cancel."))
-        return
 
     async def _command_last(self, text, user, chat_id, helpers):
-        describe_html = helpers.describe_html
         if not self._recover_unsaved(user):
             self.queue_reply(chat_id, self._text(user, "⚠️ 结果仍无法保存；请修复服务器存储后再次发送 /last。若私有恢复文件也不可用，重启会丢失内存中的结果，请勿重复执行任务。",
                                                "⚠️ The result still cannot be saved. Fix server storage and send /last again. If the private recovery file is unavailable, restarting will lose the in-memory result. Do not rerun the task."))
@@ -227,7 +224,6 @@ class CommandHandlers:
         except (OSError, ValueError):
             text = self._text(user, "⚠️ 无法读取最近结果，请检查服务器状态。", "⚠️ Could not read the latest result; check the server.")
         self.queue_reply(chat_id, text)
-        return
 
     async def _command_steer(self, text, user, chat_id, helpers):
         correction_prompt = helpers.correction_prompt
@@ -267,17 +263,14 @@ class CommandHandlers:
         job.steer_task.add_done_callback(self.steer_tasks.discard)
         job.steer_task.add_done_callback(lambda _: self._wake_queue())
         self.queue_reply(chat_id, self._text(user, "⚡ 已收到修正：正在安全停止当前任务，清理完成后会自动按新要求重新执行。", "⚡ Correction received. The current task is stopping safely and will restart with the revised request after cleanup."))
-        return
 
     async def _command_history(self, text, user, chat_id, helpers):
-        history_summary = helpers.history_summary_en if self.store.get_language(user) == "en" else helpers.history_summary
         try:
-            summary, keyboard = history_summary(self.store.history(user))
+            summary, keyboard = helpers.history_summary(self.store.history(user), self.store.get_language(user))
             self.queue_reply(chat_id, summary, reply_markup=keyboard)
         except (OSError, ValueError):
             self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取任务历史，请检查服务器状态。",
                                                "⚠️ Could not read task history; check the server."))
-        return
 
     async def _command_model(self, text, user, chat_id, helpers):
         has_effort_picker = self._has_model_effort_picker
@@ -330,12 +323,10 @@ class CommandHandlers:
                                                f"✅ Switched to {resolved} | Reasoning effort: built into the model"))
             return
         self._show_effort_picker(chat_id, user, f"{resolved}{alias_note}")
-        return
 
     async def _command_sys(self, text, user, chat_id, helpers):
         system_status = helpers.system_status
         self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at, self.store.get_language(user)))
-        return
 
     async def _command_update(self, text, user, chat_id, helpers):
         if user != self.settings.owner_id:
@@ -387,7 +378,6 @@ class CommandHandlers:
         self.queue_reply(chat_id, self._text(user, zh, en))
 
         self.restart_task = asyncio.create_task(self._do_restart())
-        return
 
     async def _command_whitelist(self, text, user, chat_id, helpers):
         admin_id = self.settings.owner_id
@@ -471,25 +461,26 @@ class CommandHandlers:
             return
 
         self.queue_control(chat_id, self._text(user, "⚠️ 未知白名单指令。用法：\n• 查看：/whitelist\n• 添加：/whitelist add <ID>\n• 移除：/whitelist remove <ID>", "⚠️ Unknown allowlist command. Use /whitelist, /whitelist add <ID>, or /whitelist remove <ID>."))
-        return
 
     async def _command_mode(self, text, user, chat_id, helpers):
         parts = text.split(maxsplit=1)
         target = parts[1].strip().lower() if len(parts) > 1 else ""
         if not target or target in {"show", "current", "list", "help"}:
             curr = self.store.get_mode(user)
-            curr_display = "推演规划模式 (Plan)" if curr == "plan" else ("落地编辑模式 (Accept-Edits)" if curr == "accept-edits" else "跟随 agy 设置（不保证自动编辑）")
             if self.store.get_language(user) == "en":
                 curr_display = {"plan": "Plan", "accept-edits": "Accept edits"}.get(curr, "Follow agy settings")
-            lines = [
-                f"执行模式\n当前：{curr_display}",
-                "编辑：自动接受文件编辑，命令仍受工具审批与系统权限限制。",
-                "规划：先给出方案，不是系统只读隔离。",
-            ]
-            if self.store.get_language(user) == "en":
-                lines = [f"Execution mode\nCurrent: {curr_display}",
-                         "Edit: automatically accept file edits; commands remain subject to tool approval and system permissions.",
-                         "Plan: propose a plan first; this is not a system-level read-only sandbox."]
+                lines = [
+                    f"Execution mode\nCurrent: {curr_display}",
+                    "Edit: automatically accept file edits; commands remain subject to tool approval and system permissions.",
+                    "Plan: propose a plan first; this is not a system-level read-only sandbox.",
+                ]
+            else:
+                curr_display = "推演规划模式 (Plan)" if curr == "plan" else ("落地编辑模式 (Accept-Edits)" if curr == "accept-edits" else "跟随 agy 设置（不保证自动编辑）")
+                lines = [
+                    f"执行模式\n当前：{curr_display}",
+                    "编辑：自动接受文件编辑，命令仍受工具审批与系统权限限制。",
+                    "规划：先给出方案，不是系统只读隔离。",
+                ]
             keyboard = {
                 "inline_keyboard": [
                     [
@@ -520,7 +511,6 @@ class CommandHandlers:
             return
         self.queue_reply(chat_id, self._text(user, "⚠️ 不支持的执行模式。可选：`/mode plan` (推演规划), `/mode code` (落地编辑), `/mode default` (默认)",
                                            "⚠️ Unsupported mode. Choose `/mode plan`, `/mode code`, or `/mode default`."))
-        return
 
     async def _command_ls(self, text, user, chat_id, helpers):
         format_file_entry = helpers.format_file_entry
@@ -531,9 +521,7 @@ class CommandHandlers:
         if subpath:
             clean_sub = subpath.lstrip("/\\")
             candidate = (workspace / clean_sub).resolve()
-            try:
-                candidate.relative_to(workspace.resolve())
-            except ValueError:
+            if not candidate.is_relative_to(workspace.resolve()):
                 self.queue_control(chat_id, self._text(user, "⚠️ 路径不合法：严禁越权访问工作空间以外的目录。", "⚠️ Invalid path: access outside the workspace is not permitted."))
                 return
             if not candidate.exists() or not candidate.is_dir():
@@ -565,7 +553,6 @@ class CommandHandlers:
                     lines.append(format_file_entry(is_dir, name, size, mtime))
 
             lines.append("━━━━━━━━━━━━━━━━━━━━")
-            import shutil
             try:
                 free_gb = shutil.disk_usage(workspace).free / (1024 ** 3)
                 lines.append(self._text(user, f"📊 目录总计 {total_count} 个项目 ｜ 💾 剩余可用磁盘：{free_gb:.1f} GB", f"📊 {total_count} items | 💾 {free_gb:.1f} GB free"))
@@ -576,7 +563,6 @@ class CommandHandlers:
             self.queue_control(chat_id, "\n".join(lines))
         except Exception:
             self.queue_control(chat_id, self._text(user, "⚠️ 无法读取工作空间目录，请检查服务器权限。", "⚠️ Could not read the workspace directory. Check server permissions."))
-        return
 
     async def dispatch_command(self, command, text, user, chat_id, helpers):
         handlers = {

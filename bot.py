@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import signal
 import stat
 import sys
@@ -217,59 +218,71 @@ def correction_prompt(job: Job, correction: str) -> str:
             f"原任务：\n{job.original_prompt}\n\n最新修正：\n{correction}")
 
 
-def history_summary(records: list[dict]) -> tuple[str, dict | None]:
+def history_summary(records: list[dict], language: str = "zh") -> tuple[str, dict | None]:
+    english = language == "en"
     if not records:
-        return "📚 任务历史\n━━━━━━━━━━━━━━━━━━━━\nℹ️ 暂无已完成的任务记录。", None
-    lines = ["📚 任务历史（最近 10 条）", "时间按服务器本地时区 " + time.strftime("%z"), "━━━━━━━━━━━━━━━━━━━━"]
+        return (
+            "📚 Task history\nℹ️ No completed tasks."
+            if english
+            else "📚 任务历史\n━━━━━━━━━━━━━━━━━━━━\nℹ️ 暂无已完成的任务记录。"
+        ), None
+    lines = (
+        ["📚 Task history (last 10)", "Times use the server's local timezone " + time.strftime("%z")]
+        if english
+        else ["📚 任务历史（最近 10 条）", "时间按服务器本地时区 " + time.strftime("%z"), "━━━━━━━━━━━━━━━━━━━━"]
+    )
     keyboard: list[list[dict[str, str]]] = []
     for index, record in enumerate(records, 1):
-        title = task_title(str(record.get("title", "未命名任务")))
-        outcome = str(record.get("outcome", "error"))
         duration = record.get("duration_seconds")
-        duration_text = f" ｜ ⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
-        stamp = record_time_label(record.get("updated_at"))
-        model = history_model_label(str(record.get("model") or ""))
-        delivery = {"failed": "⚠️ 未送达", "failed_or_partial": "⚠️ 未完整送达",
-                    "unknown": "⚠️ 投递未确认", "pending": "⚠️ 投递未确认",
-                    "superseded_by_steer": "已修正替代"}.get(str(record.get("delivery") or ""), "")
-        delivery_text = f" ｜ {delivery}" if delivery else ""
-        lines.append(f"{index}. {LABELS.get(outcome, '结果需核对')} ｜ {stamp} ｜ {model}"
-                     f"{duration_text}{delivery_text}\n   {title}")
-        job_id = record.get("job_id")
-        if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
-            label = f"{index}. {stamp} {title}"[:60]
-            keyboard.append([{"text": label, "callback_data": f"history:{job_id}"}])
-    lines.append("━━━━━━━━━━━━━━━━━━━━\n点击下方任务可查看完整结果。")
-    return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
-
-
-def history_summary_en(records: list[dict]) -> tuple[str, dict | None]:
-    if not records:
-        return "📚 Task history\nℹ️ No completed tasks.", None
-    lines = ["📚 Task history (last 10)", "Times use the server's local timezone " + time.strftime("%z")]
-    keyboard = []
-    for index, record in enumerate(records, 1):
-        title = ui_excerpt(record.get("title"), 80, "Untitled task")
-        outcome = EN_OUTCOMES.get(str(record.get("outcome", "error")), "Review the result")
-        stamp = record.get("updated_at")
-        when = "Unknown time"
-        if type(stamp) in {int, float} and math.isfinite(stamp) and 0 <= stamp <= 253402300799:
-            try:
-                when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
-            except (OSError, ValueError, OverflowError):
-                pass
-        model = str(record.get("model") or "Default")
-        duration = record.get("duration_seconds")
-        duration_text = (f" | ⏱️ {duration}s" if type(duration) in {int, float}
-                         and math.isfinite(duration) and duration > 0 else "")
-        delivery = {"failed": "Not delivered", "failed_or_partial": "Incomplete delivery",
-                    "unknown": "Delivery unconfirmed", "pending": "Delivery unconfirmed",
-                    "superseded_by_steer": "Replaced by correction"}.get(str(record.get("delivery") or ""), "")
-        lines.append(f"{index}. {outcome} | {when} | {model}{duration_text}" + (f" | {delivery}" if delivery else "") + f"\n   {title}")
+        has_duration = type(duration) in {int, float} and math.isfinite(duration) and duration > 0
+        raw_delivery = str(record.get("delivery") or "")
+        if english:
+            title = ui_excerpt(record.get("title"), 80, "Untitled task")
+            outcome = EN_OUTCOMES.get(str(record.get("outcome", "error")), "Review the result")
+            stamp = record.get("updated_at")
+            when = "Unknown time"
+            if type(stamp) in {int, float} and math.isfinite(stamp) and 0 <= stamp <= 253402300799:
+                try:
+                    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
+                except (OSError, ValueError, OverflowError):
+                    pass
+            model = str(record.get("model") or "Default")
+            duration_text = f" | ⏱️ {duration}s" if has_duration else ""
+            delivery = {
+                "failed": "Not delivered",
+                "failed_or_partial": "Incomplete delivery",
+                "unknown": "Delivery unconfirmed",
+                "pending": "Delivery unconfirmed",
+                "superseded_by_steer": "Replaced by correction",
+            }.get(raw_delivery, "")
+            lines.append(
+                f"{index}. {outcome} | {when} | {model}{duration_text}"
+                + (f" | {delivery}" if delivery else "")
+                + f"\n   {title}"
+            )
+        else:
+            title = task_title(str(record.get("title", "未命名任务")))
+            outcome = LABELS.get(str(record.get("outcome", "error")), "结果需核对")
+            when = record_time_label(record.get("updated_at"))
+            model = history_model_label(str(record.get("model") or ""))
+            duration_text = f" ｜ ⏱️ {duration}s" if has_duration else ""
+            delivery = {
+                "failed": "⚠️ 未送达",
+                "failed_or_partial": "⚠️ 未完整送达",
+                "unknown": "⚠️ 投递未确认",
+                "pending": "⚠️ 投递未确认",
+                "superseded_by_steer": "已修正替代",
+            }.get(raw_delivery, "")
+            delivery_text = f" ｜ {delivery}" if delivery else ""
+            lines.append(f"{index}. {outcome} ｜ {when} ｜ {model}{duration_text}{delivery_text}\n   {title}")
         job_id = record.get("job_id")
         if isinstance(job_id, str) and re.fullmatch(r"[a-f0-9]{12}", job_id):
             keyboard.append([{"text": f"{index}. {when} {title}"[:60], "callback_data": f"history:{job_id}"}])
-    lines.append("Select a task below to view its saved result.")
+    lines.append(
+        "Select a task below to view its saved result."
+        if english
+        else "━━━━━━━━━━━━━━━━━━━━\n点击下方任务可查看完整结果。"
+    )
     return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
 
 
@@ -382,106 +395,80 @@ def describe(record: dict) -> str:
     return "\n\n".join(parts)
 
 
-def describe_html(record: dict) -> str:
+def describe_html(record: dict, language: str = "zh") -> str:
     """Render an agy result as Telegram HTML without trusting model-provided tags."""
-    parts = [question_html(record.get("title", ""), record.get("attachment_summary", ""))]
+    english = language == "en"
+    parts = [question_html(record.get("title", ""), record.get("attachment_summary", ""), language)]
     outcome = str(record.get("outcome", "error"))
     if outcome != "success":
-        parts.append(html.escape(LABELS.get(outcome, "⚠️ 结果需核对")))
-    if record.get("text"):
-        parts.append(render_markdown_html(str(record["text"])))
-    elif record.get("detail"):
-        parts.append(html.escape(str(record["detail"])))
-    help_text = CATEGORY_HELP.get(record.get("category")) or OUTCOME_HELP.get(outcome)
-    if help_text:
-        parts.append("💡 " + html.escape(help_text))
-    if record.get("metadata_warning"):
-        parts.append("⚠️ " + html.escape(str(record["metadata_warning"])))
-    if record.get("delivery") in {"failed", "failed_or_partial"}:
-        parts.append("⚠️ 上次发送未完成；这里是已保存的结果，没有重新执行任务。")
-    if record.get("model_fallback_from"):
-        parts.append("⚠️ 模型自动切换（原模型暂时无容量）：" + html.escape(display_model(str(record["model_fallback_from"])))
-                     + " → " + html.escape(display_model(str(record.get("model") or ""))))
-    if outcome not in {"success", "not_started", "running"}:
-        parts.append("ℹ️ 没有自动重跑任务；取消不会撤销已发生的修改。/last 只取回记录。")
-    summary = str(record.get("execution_summary") or "").strip()
-    if summary:
-        parts.append("<blockquote expandable><b>执行过程</b>\n" + html.escape(summary) + "</blockquote>")
-    parts.append(result_footer(record))
-    if record.get("session_token_reminder"):
-        tokens = record.get("session_tokens", 0)
-        cumulative = f"约 {tokens:,} Token" if type(tokens) is int and tokens >= 0 else "较多上下文"
-        parts.append(f"💡 当前会话累计{cumulative}；回复变慢或上下文混乱时，可发送 /new 开启新会话。")
-    return "\n\n".join(part for part in parts if part)
-
-
-def describe_html_en(record: dict) -> str:
-    """Render English interface labels while keeping model and user text unchanged."""
-    title = html.escape(ui_excerpt(record.get("title", ""), fallback="Task"))
-    attachment = english_attachment(str(record.get("attachment_summary") or ""))
-    attachment_line = "\n" + html.escape(ui_excerpt(attachment, 180)) if attachment else ""
-    parts = [f"<blockquote>❓ Request: <b>{title}</b>{attachment_line}</blockquote>"]
-    outcome = str(record.get("outcome", "error"))
-    if outcome != "success":
-        parts.append(html.escape(EN_OUTCOMES.get(outcome, "⚠️ Review the result")))
+        parts.append(html.escape(EN_OUTCOMES.get(outcome, "⚠️ Review the result") if english else LABELS.get(outcome, "⚠️ 结果需核对")))
     truncation_zh = "\n\n（回复超过保存上限，已截断；/last 也只能取回这份截断副本。）"
     truncation_en = "\n\n(The reply exceeded the storage limit and was truncated; /last can retrieve only this truncated copy.)"
     if record.get("text"):
         reply = str(record["text"])
-        if record.get("text_truncated") is True and reply.endswith(truncation_zh):
+        if english and record.get("text_truncated") is True and reply.endswith(truncation_zh):
             reply = reply[:-len(truncation_zh)] + truncation_en
         parts.append(render_markdown_html(reply))
     elif record.get("detail"):
         detail = str(record["detail"])
-        if record.get("detail_truncated") is True and detail.endswith(truncation_zh):
+        if english and record.get("detail_truncated") is True and detail.endswith(truncation_zh):
             detail = detail[:-len(truncation_zh)] + truncation_en
-        parts.append(html.escape(english_detail(detail)))
-    help_text = EN_CATEGORY_HELP.get(record.get("category")) or EN_OUTCOME_HELP.get(outcome)
+        parts.append(html.escape(english_detail(detail) if english else detail))
+    help_map = EN_CATEGORY_HELP if english else CATEGORY_HELP
+    outcome_map = EN_OUTCOME_HELP if english else OUTCOME_HELP
+    help_text = help_map.get(record.get("category")) or outcome_map.get(outcome)
     if help_text:
         parts.append("💡 " + html.escape(help_text))
     if record.get("metadata_warning"):
         warning = str(record["metadata_warning"])
-        for original, translation in EN_DETAILS.items():
-            warning = warning.replace(original, translation)
+        if english:
+            for original, translation in EN_DETAILS.items():
+                warning = warning.replace(original, translation)
         parts.append("⚠️ " + html.escape(warning))
     if record.get("delivery") in {"failed", "failed_or_partial"}:
-        parts.append("⚠️ Previous delivery was incomplete. This saved result was retrieved without rerunning the task.")
+        parts.append(
+            "⚠️ Previous delivery was incomplete. This saved result was retrieved without rerunning the task."
+            if english
+            else "⚠️ 上次发送未完成；这里是已保存的结果，没有重新执行任务。"
+        )
     if record.get("model_fallback_from"):
-        parts.append("⚠️ Model switched due to capacity: "
-                     + html.escape(str(record["model_fallback_from"])) + " → "
-                     + html.escape(str(record.get("model") or "")))
+        if english:
+            parts.append(
+                "⚠️ Model switched due to capacity: "
+                + html.escape(str(record["model_fallback_from"]))
+                + " → "
+                + html.escape(str(record.get("model") or ""))
+            )
+        else:
+            parts.append(
+                "⚠️ 模型自动切换（原模型暂时无容量）："
+                + html.escape(display_model(str(record["model_fallback_from"])))
+                + " → "
+                + html.escape(display_model(str(record.get("model") or "")))
+            )
     if outcome not in {"success", "not_started", "running"}:
-        parts.append("ℹ️ The task was not rerun automatically; cancellation does not undo changes. /last retrieves the saved result.")
+        parts.append(
+            "ℹ️ The task was not rerun automatically; cancellation does not undo changes. /last retrieves the saved result."
+            if english
+            else "ℹ️ 没有自动重跑任务；取消不会撤销已发生的修改。/last 只取回记录。"
+        )
     summary = str(record.get("execution_summary") or "").strip()
     if summary:
-        translated = "\n".join(english_activity(line) for line in summary.splitlines())
-        parts.append("<blockquote expandable><b>Execution steps</b>\n" + html.escape(translated) + "</blockquote>")
-    duration = record.get("duration_seconds")
-    elapsed = (f"{duration:g}s" if type(duration) in {int, float} and 0 <= duration <= 1e12
-               and math.isfinite(duration) else "Not provided")
-    def count(key: str) -> str:
-        value = record.get(key)
-        return f"{value:,}" if type(value) is int and value >= 0 else "—"
-    model = html.escape(str(record.get("model") or "Default (agy setting)"))
-    effort = str(record.get("effort") or "")
-    if effort:
-        model += " (" + html.escape(effort.capitalize()) + ")"
-    footer = (f"🤖 {model} · ⏱ {elapsed}\n"
-              f"📊 Input {count('input_tokens')} · Output {count('output_tokens')} · Total {count('total_tokens')} tokens")
-    mode = record.get("mode")
-    turns = record.get("num_turns")
-    detail_items = []
-    if mode:
-        detail_items.append("Plan" if mode == "plan" else "Edit" if mode == "accept-edits" else str(mode))
-    if type(turns) is int and turns > 0:
-        detail_items.append(f"Conversation turn {turns}")
-    if detail_items:
-        footer += "\n" + html.escape(" · ".join(detail_items))
-    parts.append("<blockquote>" + footer + "</blockquote>")
+        if english:
+            translated = "\n".join(english_activity(line) for line in summary.splitlines())
+            parts.append("<blockquote expandable><b>Execution steps</b>\n" + html.escape(translated) + "</blockquote>")
+        else:
+            parts.append("<blockquote expandable><b>执行过程</b>\n" + html.escape(summary) + "</blockquote>")
+    parts.append(result_footer(record, language))
     if record.get("session_token_reminder"):
         tokens = record.get("session_tokens", 0)
-        cumulative = f"about {tokens:,} tokens" if type(tokens) is int and tokens >= 0 else "a large context"
-        parts.append(f"💡 This conversation has {cumulative}. Use /new if replies slow down or the context becomes confused.")
+        valid_tokens = type(tokens) is int and tokens >= 0
+        if english:
+            cumulative = f"about {tokens:,} tokens" if valid_tokens else "a large context"
+            parts.append(f"💡 This conversation has {cumulative}. Use /new if replies slow down or the context becomes confused.")
+        else:
+            cumulative = f"约 {tokens:,} Token" if valid_tokens else "较多上下文"
+            parts.append(f"💡 当前会话累计{cumulative}；回复变慢或上下文混乱时，可发送 /new 开启新会话。")
     return "\n\n".join(part for part in parts if part)
 
 
@@ -506,38 +493,63 @@ def display_model(model: str, effort: str = "") -> str:
     return ui_excerpt(label, 90) + (f" ({effort.capitalize()})" if effort else "")
 
 
-def question_html(title: object, attachment: object = "") -> str:
+def question_html(title: object, attachment: object = "", language: str = "zh") -> str:
+    if language == "en":
+        title_html = html.escape(ui_excerpt(title, fallback="Task"))
+        att = english_attachment(str(attachment or ""))
+        att_line = "\n" + html.escape(ui_excerpt(att, 180)) if att else ""
+        return f"<blockquote>❓ Request: <b>{title_html}</b>{att_line}</blockquote>"
     parts = ["❓ 提问：<b>" + html.escape(ui_excerpt(title, fallback="历史任务")) + "</b>"]
     if attachment:
         parts.append(html.escape(ui_excerpt(attachment, 180)))
     return "<blockquote>" + "\n".join(parts) + "</blockquote>"
 
 
-def result_footer(record: dict) -> str:
-    model = display_model(str(record.get("model") or ""), str(record.get("effort") or ""))
+def result_footer(record: dict, language: str = "zh") -> str:
+    english = language == "en"
     duration = record.get("duration_seconds")
-    elapsed = (f"{duration:g}s" if type(duration) in {int, float} and 0 <= duration <= 1e12
-               and math.isfinite(duration) else "未提供")
+    elapsed = (
+        f"{duration:g}s"
+        if type(duration) in {int, float} and 0 <= duration <= 1e12 and math.isfinite(duration)
+        else ("Not provided" if english else "未提供")
+    )
+
     def count(key: str) -> str:
         value = record.get(key)
         return f"{value:,}" if type(value) is int and value >= 0 else "—"
-    lines = [f"🤖 {html.escape(model)} · ⏱ {elapsed}",
-             f"📊 输入 {count('input_tokens')} · 输出 {count('output_tokens')} · 共 {count('total_tokens')} tokens"]
+
+    effort = str(record.get("effort") or "")
+    if english:
+        model_html = html.escape(str(record.get("model") or "Default (agy setting)"))
+        if effort:
+            model_html += " (" + html.escape(effort.capitalize()) + ")"
+        lines = [
+            f"🤖 {model_html} · ⏱ {elapsed}",
+            f"📊 Input {count('input_tokens')} · Output {count('output_tokens')} · Total {count('total_tokens')} tokens",
+        ]
+    else:
+        model = display_model(str(record.get("model") or ""), effort)
+        lines = [
+            f"🤖 {html.escape(model)} · ⏱ {elapsed}",
+            f"📊 输入 {count('input_tokens')} · 输出 {count('output_tokens')} · 共 {count('total_tokens')} tokens",
+        ]
     mode = record.get("mode")
     turns = record.get("num_turns")
     details = []
     if mode:
-        details.append("规划模式" if mode == "plan" else "编辑模式" if mode == "accept-edits" else str(mode))
+        if english:
+            details.append("Plan" if mode == "plan" else "Edit" if mode == "accept-edits" else str(mode))
+        else:
+            details.append("规划模式" if mode == "plan" else "编辑模式" if mode == "accept-edits" else str(mode))
     if type(turns) is int and turns > 0:
-        details.append(f"第 {turns} 轮对话")
+        details.append(f"Conversation turn {turns}" if english else f"第 {turns} 轮对话")
     if details:
         lines.append(html.escape(" · ".join(details)))
     return "<blockquote>" + "\n".join(lines) + "</blockquote>"
 
 
 def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
-    import datetime
-    dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
+    dt_str = datetime.fromtimestamp(mtime).strftime("%m-%d %H:%M")
     if is_dir:
         return f"📁 `{name}/` ｜ {dt_str}"
 
@@ -565,18 +577,11 @@ def format_file_entry(is_dir: bool, name: str, size: int, mtime: float) -> str:
     else:
         icon = "📄"
 
-    if size < 1024:
-        size_str = f"{size} B"
-    elif size < 1024 * 1024:
-        size_str = f"{size / 1024:.1f} KB"
-    else:
-        size_str = f"{size / (1024 * 1024):.1f} MB"
-    return f"{icon} `{name}` ({size_str}) ｜ {dt_str}"
+    return f"{icon} `{name}` ({attachment_size(size)}) ｜ {dt_str}"
 
 
 def system_status(workspace: Path, start_time: float, language: str = "zh") -> str:
     import platform
-    import shutil
     import socket
 
     hostname = socket.gethostname()
@@ -643,7 +648,6 @@ def system_status(workspace: Path, start_time: float, language: str = "zh") -> s
         usage = shutil.disk_usage(workspace)
         free_gb = usage.free / (1024 ** 3)
         total_gb = usage.total / (1024 ** 3)
-        used_gb = usage.used / (1024 ** 3)
         pct = (usage.used / usage.total) * 100
         disk_str = f"剩余 {free_gb:.1f} GB / 总计 {total_gb:.1f} GB ({pct:.1f}% 已用)"
         if language == "en":
@@ -713,6 +717,12 @@ def deployment_version(directory: Path | None = None) -> str:
     except (OSError, UnicodeError, ValueError):
         pass
     return "未知（未提供有效版本标记）"
+
+
+async def _cancel_task(task: asyncio.Task | None) -> None:
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 class Bridge(CommandHandlers):
@@ -795,6 +805,8 @@ class Bridge(CommandHandlers):
         return True
 
     def _answer_callback(self, callback_id: str, **kwargs) -> None:
+        if not callback_id or not hasattr(self.api, "answer_callback_query"):
+            return
         if len(self.callback_tasks) >= 64 or self.stop.is_set():
             return
         if callback_language.get() == "en" and isinstance(kwargs.get("text"), str):
@@ -929,7 +941,6 @@ class Bridge(CommandHandlers):
                 short_cid = f"{cid[:8]}...{cid[-4:]}" if len(cid) > 16 else cid
                 lines.append(f"Conversation: `{short_cid}` (turn {conv.get('num_turns', 1)})")
             try:
-                import shutil
                 free_gb = shutil.disk_usage(self.settings.workspace).free / (1024 ** 3)
                 lines.append(f"Workspace free space: {free_gb:.1f} GB")
             except OSError:
@@ -963,7 +974,6 @@ class Bridge(CommandHandlers):
             conv_info = f"\n🧠 记忆会话：`{short_cid}` (第 {turns} 轮)"
         disk_info = ""
         try:
-            import shutil
             usage = shutil.disk_usage(self.settings.workspace)
             free_gb = usage.free / (1024 ** 3)
             disk_info = f"\n💾 工作空间可用磁盘：{free_gb:.1f} GB"
@@ -1077,11 +1087,8 @@ class Bridge(CommandHandlers):
         age = time.monotonic() - self.catalog_attempt_at
         if not force and age < (60 if self.catalog_live else 15):
             return
-        if (self.runner.blocked or self._restart_pending() or self.slot is not None
-                or self.pending_album is not None or (self.waiting_jobs and not self.queue_paused)
-                or (self.album_task is not None and not self.album_task.done())
-                or any(not task.done() for task in self.steer_tasks)
-                or (self.model_check_task is not None and not self.model_check_task.done())):
+        if (self.runner.blocked or self._restart_pending() or self._restart_busy()
+                or (self.waiting_jobs and not self.queue_paused)):
             self.catalog_notice = "busy"
             return
         self.catalog_attempt_at = time.monotonic()
@@ -1240,14 +1247,11 @@ class Bridge(CommandHandlers):
         if self._restart_pending():
             self.queue_reply(chat_id, self._text(chat_id, "⏳ 正在重新载入服务，请稍后再检测模型。", "⏳ The service is restarting. Check models later."))
             return
-        if (self.slot is not None or self.pending_album is not None
-                or (self.waiting_jobs and not self.queue_paused)
-                or (self.album_task is not None and not self.album_task.done())
-                or any(not task.done() for task in self.steer_tasks)):
-            self.queue_reply(chat_id, self._text(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。", "⏳ A task is running. Wait for it to finish before using /model refresh."))
-            return
         if self.model_check_task and not self.model_check_task.done():
             self.queue_reply(chat_id, self._text(chat_id, "⏳ 模型可用性检测正在进行，请稍候。", "⏳ A model availability check is already running. Please wait."))
+            return
+        if self._restart_busy() or (self.waiting_jobs and not self.queue_paused):
+            self.queue_reply(chat_id, self._text(chat_id, "⏳ 当前有任务运行中。请等待任务结束后再发送 /model refresh。", "⏳ A task is running. Wait for it to finish before using /model refresh."))
             return
         self.model_check_user = chat_id
         self.model_check_cancelling = False
@@ -1270,7 +1274,7 @@ class Bridge(CommandHandlers):
         return localize_markup(markup, language)
 
     def _render_result(self, user: int, record: dict) -> str:
-        return describe_html_en(record) if self.store.get_language(user) == "en" else describe_html(record)
+        return describe_html(record, self.store.get_language(user))
 
     async def send_text(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
         reply_markup = self._buttons(chat, reply_markup)
@@ -1338,11 +1342,8 @@ class Bridge(CommandHandlers):
             self._wake_queue()
 
     def _wake_queue(self) -> None:
-        if (not self.waiting_jobs or not self.queue_storage_ok or self.queue_paused or self.stop.is_set() or self.runner.blocked
-                or self.slot is not None or self.pending_album is not None
-                or (self.album_task is not None and not self.album_task.done())
-                or self._restart_pending() or any(not task.done() for task in self.steer_tasks)
-                or (self.model_check_task is not None and not self.model_check_task.done())
+        if (not self.waiting_jobs or not self.queue_storage_ok or self.queue_paused or self.stop.is_set()
+                or self.runner.blocked or self._restart_pending() or self._restart_busy()
                 or (self.queue_task is not None and not self.queue_task.done())):
             return
         self.queue_task = asyncio.create_task(self._start_queued())
@@ -1368,10 +1369,7 @@ class Bridge(CommandHandlers):
 
     async def _start_queued(self) -> None:
         while self.waiting_jobs and not self.stop.is_set() and not self.runner.blocked:
-            if (self.slot is not None or self.pending_album is not None or self._restart_pending()
-                    or (self.album_task is not None and not self.album_task.done())
-                    or (self.model_check_task is not None and not self.model_check_task.done())
-                    or any(not task.done() for task in self.steer_tasks)):
+            if self._restart_pending() or self._restart_busy():
                 return
             item = self.waiting_jobs[0]
             user, chat, text = item
@@ -1409,33 +1407,40 @@ class Bridge(CommandHandlers):
             self.queue_reply(chat, self._text(chat, "⚠️ 等待任务未能启动，仍保留在队列中。请检查模型和存储后发送 /queue resume，或使用 /queue cancel 取消。", "⚠️ The waiting task could not start and remains queued. Check the model and storage, then use /queue resume or /queue cancel."))
             return
 
-    def queue_control(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
-        return self.queue_reply(chat, control_html(text), reply_markup, html_mode=True)
-
-    def queue_selector_edit(self, chat: int, message: dict, text: str,
-                            markup: dict | None = None, *, html_mode: bool = False) -> bool:
+    def _enqueue_reply(self, item: tuple | ControlCard | SelectorEdit) -> bool:
         if self.stop.is_set():
             return False
         try:
-            self.replies.put_nowait(SelectorEdit(chat, message, text, markup, html_mode))
+            self.replies.put_nowait(item)
         except asyncio.QueueFull:
             return False
         if self.reply_worker is None or self.reply_worker.done():
             self.reply_worker = asyncio.create_task(self._send_replies())
         return True
 
+    @staticmethod
+    def _record_ttl(cache: dict[tuple, float], key: tuple, ttl: float) -> None:
+        now = time.monotonic()
+        for existing in [k for k, until in cache.items() if until <= now]:
+            cache.pop(existing, None)
+        if len(cache) >= 128:
+            cache.pop(next(iter(cache)))
+        cache[key] = now + ttl
+
+    def queue_control(self, chat: int, text: str, reply_markup: dict | None = None) -> bool:
+        return self.queue_reply(chat, control_html(text), reply_markup, html_mode=True)
+
+    def queue_selector_edit(self, chat: int, message: dict, text: str,
+                            markup: dict | None = None, *, html_mode: bool = False) -> bool:
+        return self._enqueue_reply(SelectorEdit(chat, message, text, markup, html_mode))
+
     def queue_card(self, card: ControlCard, text: str, markup: dict | None = None) -> None:
         card.text, card.markup = text, markup if markup is not None else {"inline_keyboard": []}
         card.revision += 1
-        if card.queued or self.stop.is_set():
+        if card.queued:
             return
-        try:
-            self.replies.put_nowait(card)
-        except asyncio.QueueFull:
-            return
-        card.queued = True
-        if self.reply_worker is None or self.reply_worker.done():
-            self.reply_worker = asyncio.create_task(self._send_replies())
+        if self._enqueue_reply(card):
+            card.queued = True
 
     async def _send_card(self, card: ControlCard) -> None:
         if card.uncertain:
@@ -1464,20 +1469,14 @@ class Bridge(CommandHandlers):
     def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None,
                     html_mode: bool = False, *, result_key: tuple | None = None) -> bool:
         # Control replies must never hold up update ingestion or cancellation.
-        if self.stop.is_set():
+        if result_key is not None and (
+            result_key in self._pending_results or time.monotonic() < self._recent_results.get(result_key, 0)
+        ):
             return False
-        now = time.monotonic()
-        if result_key is not None:
-            if result_key in self._pending_results or now < self._recent_results.get(result_key, 0):
-                return False
-        try:
-            self.replies.put_nowait((chat, text, reply_markup, html_mode, result_key))
-        except asyncio.QueueFull:
+        if not self._enqueue_reply((chat, text, reply_markup, html_mode, result_key)):
             return False
         if result_key is not None:
             self._pending_results.add(result_key)
-        if self.reply_worker is None or self.reply_worker.done():
-            self.reply_worker = asyncio.create_task(self._send_replies())
         return True
 
     async def _send_replies(self) -> None:
@@ -1521,11 +1520,7 @@ class Bridge(CommandHandlers):
                 if result_key is not None:
                     self._pending_results.discard(result_key)
                     if delivered:
-                        self._recent_results = {key: until for key, until in self._recent_results.items()
-                                                if until > time.monotonic()}
-                        if len(self._recent_results) >= 128:
-                            self._recent_results.pop(next(iter(self._recent_results)))
-                        self._recent_results[result_key] = time.monotonic() + 2
+                        self._record_ttl(self._recent_results, result_key, 2)
                 self.replies.task_done()
 
     async def _accept_and_work(self, job: Job, prompt: str) -> None:
@@ -1568,6 +1563,18 @@ class Bridge(CommandHandlers):
                     self.queue_reply(job.chat, self._text(job.user, "⚠️ 新对话未能建立，请检查服务器状态。", "⚠️ Could not start a new conversation; check the server."))
             self._release_job(job)
 
+    def _stash_unsaved(self, job: Job, base: dict, warning: str) -> bool:
+        self.unsaved_results[job.user] = self.store.prepare_record(job.user, base | {
+            "delivery": "failed_or_partial",
+            "metadata_warning": warning,
+        })
+        try:
+            self.store.save_emergency(self.settings.home, job.user, self.unsaved_results[job.user])
+            return True
+        except (OSError, ValueError):
+            LOG.warning("emergency_result_save_failed id=%s", job.job_id)
+            return False
+
     async def _work(self, job: Job, prompt: str) -> None:
         # A single worker owns the slot until the execution, cleanup and storage finish.
         try:
@@ -1575,7 +1582,6 @@ class Bridge(CommandHandlers):
             job.progress_task = asyncio.create_task(self._refresh_progress(job))
             job.typing_task = asyncio.create_task(self._typing_heartbeat(job))
             result = await self._run_task(job, prompt)
-            fallback_from = ""
 
             job.phase = "saving"
             # Persist the execution evidence before optional accounting/context
@@ -1586,38 +1592,31 @@ class Bridge(CommandHandlers):
                     "effort": job.effort or getattr(result, "effort", ""),
                     "mode": job.mode or getattr(result, "mode", ""),
                     "title": job.history_title,
-                    "model_fallback_from": fallback_from,
+                    "model_fallback_from": "",
                     "attachment_summary": job.attachment_feedback,
                     "execution_summary": "\n".join(job.execution_steps[-6:]),
                 }
             try:
                 record = self.store.save(job.user, result_data)
             except (OSError, ValueError) as error:
-                self.unsaved_results[job.user] = self.store.prepare_record(job.user, result_data | {
-                    "delivery": "failed_or_partial",
-                    "metadata_warning": "结果曾因存储异常暂存，恢复后已保存；本次会话和用量记录可能缺失。",
-                })
-                recovery = "暂时保存在服务内存中，服务重启会丢失"
-                try:
-                    self.store.save_emergency(self.settings.home, job.user, self.unsaved_results[job.user])
-                    recovery = "已额外保存在私有恢复文件中；请勿删除该文件"
-                except (OSError, ValueError):
-                    LOG.warning("emergency_result_save_failed id=%s", job.job_id)
+                saved_emergency = self._stash_unsaved(
+                    job,
+                    result_data,
+                    "结果曾因存储异常暂存，恢复后已保存；本次会话和用量记录可能缺失。",
+                )
+                recovery = "已额外保存在私有恢复文件中；请勿删除该文件" if saved_emergency else "暂时保存在服务内存中，服务重启会丢失"
                 LOG.warning("result_save_failed id=%s type=%s", job.job_id, type(error).__name__)
-                en_recovery = "it is also stored in a private recovery file; do not delete it" if recovery.startswith("已额外") else "it is held only in service memory and will be lost on restart"
+                en_recovery = "it is also stored in a private recovery file; do not delete it" if saved_emergency else "it is held only in service memory and will be lost on restart"
                 await self.send_text(job.chat, self._text(job.user, f"⚠️ 任务已结束，但结果保存失败，{recovery}，尚未发送。请修复服务器存储后发送 /last 保存并取回。不要重复执行原任务。", f"⚠️ The task ended, but saving its result failed; {en_recovery}. It has not been sent. Repair server storage and use /last to save and retrieve it. Do not rerun the original task."))
                 return
             try:
                 self.store.save_history(job.user, job.history_title, record)
             except (OSError, ValueError) as error:
-                self.unsaved_results[job.user] = self.store.prepare_record(job.user, record | {
-                    "delivery": "failed_or_partial",
-                    "metadata_warning": "结果已保存，历史记录曾写入失败，恢复后已补存；会话和用量可能缺失。",
-                })
-                try:
-                    self.store.save_emergency(self.settings.home, job.user, self.unsaved_results[job.user])
-                except (OSError, ValueError):
-                    LOG.warning("emergency_result_save_failed id=%s", job.job_id)
+                self._stash_unsaved(
+                    job,
+                    record,
+                    "结果已保存，历史记录曾写入失败，恢复后已补存；会话和用量可能缺失。",
+                )
                 LOG.warning("result_history_save_failed id=%s type=%s", job.job_id, type(error).__name__)
                 await self.send_text(job.chat, self._text(job.user, "⚠️ 结果已保存，但历史记录保存失败。请修复服务器存储后发送 /last 取回并补存历史；不要重复执行任务。", "⚠️ The result was saved but history could not be saved. Repair server storage and use /last to retrieve it and restore history; do not rerun the task."))
                 return
@@ -1647,9 +1646,7 @@ class Bridge(CommandHandlers):
                 record["metadata_warning"] = " ".join(warnings)
             job.phase = "sending"
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
-            if job.progress_task:
-                job.progress_task.cancel()
-                await asyncio.gather(job.progress_task, return_exceptions=True)
+            await _cancel_task(job.progress_task)
             if job.steered:
                 await self._finish_progress(job, result.outcome)
             delivered = True if job.steered else await self.send_html(
@@ -1690,12 +1687,8 @@ class Bridge(CommandHandlers):
                 f"Task {job.job_id} encountered a result storage or internal processing error. Check the server and existing result before retrying."),
             )
         finally:
-            if job.progress_task:
-                job.progress_task.cancel()
-                await asyncio.gather(job.progress_task, return_exceptions=True)
-            if job.typing_task:
-                job.typing_task.cancel()
-                await asyncio.gather(job.typing_task, return_exceptions=True)
+            await _cancel_task(job.progress_task)
+            await _cancel_task(job.typing_task)
             self._release_job(job)
 
     async def _run_task(self, job: Job, prompt: str) -> Result:
@@ -1729,13 +1722,12 @@ class Bridge(CommandHandlers):
             await asyncio.sleep(TYPING_HEARTBEAT_SECONDS)
 
     def _progress_text(self, job: Job) -> str:
+        elapsed = max(0, int(time.monotonic() - job.started_at))
+        raw_trace = job.execution_steps[-6:] if job.progress_expanded else job.execution_steps[-1:]
         if self.store.get_language(job.user) == "en":
-            elapsed = max(0, int(time.monotonic() - job.started_at))
             state = "🛑 Cancelling and cleaning up" if job.cancel.is_set() else "⏳ Task running"
             activity = "Cleaning up" if job.cancel.is_set() else english_activity(ui_excerpt(job.activity, 90))
-            trace = [english_activity(ui_excerpt(step, 160)) for step in job.execution_steps[-6:]]
-            if not job.progress_expanded:
-                trace = trace[-1:]
+            trace = [english_activity(ui_excerpt(step, 160)) for step in raw_trace]
             steps = html.escape("\n".join(trace)) if trace else "Waiting for the first step…"
             title = html.escape(ui_excerpt(job.history_title or job.original_prompt, fallback="Task"))
             attachment = english_attachment(job.attachment_feedback)
@@ -1747,12 +1739,9 @@ class Bridge(CommandHandlers):
                     + ("\n📖 Reading mode: content is paused while the task continues. Refresh for updates."
                        if job.progress_expanded else ""))
             return self.store.redact(text)
-        elapsed = max(0, int(time.monotonic() - job.started_at))
         state = "🛑 正在取消并清理" if job.cancel.is_set() else "⏳ 任务执行中"
         activity = "正在清理资源" if job.cancel.is_set() else ui_excerpt(job.activity, 90)
-        trace = [ui_excerpt(step, 160) for step in job.execution_steps[-6:]]
-        if not job.progress_expanded:
-            trace = trace[-1:]
+        trace = [ui_excerpt(step, 160) for step in raw_trace]
         if trace:
             # A repeatedly edited native expandable quote loses the client's
             # reading state. Our buttons own expansion; this quote never folds.
@@ -1869,14 +1858,7 @@ class Bridge(CommandHandlers):
                 f"{LABELS.get(outcome, '任务已结束')}\n\n{delivery_text}"
             )
             if self.store.get_language(job.user) == "en":
-                label = {
-                    "success": "✅ Task completed", "no_text": "⚠️ No final reply",
-                    "permission": "🚫 Permission denied", "invalid": "⚠️ Invalid result",
-                    "error": "❌ Task failed", "timed_out": "⏱️ Task timed out",
-                    "cancelled": "🛑 Task cancelled", "interrupted": "⚠️ Task interrupted",
-                    "output_limit": "📏 Output limit reached", "cleanup_failed": "⚠️ Cleanup not confirmed",
-                    "not_started": "⏹️ Task did not start", "running": "⏳ Task running",
-                }.get(outcome, "⚠️ Task ended")
+                label = EN_OUTCOMES.get(outcome, "⚠️ Task ended")
                 delivery_text = {
                     "pending": "The result is saved and is being sent; you may also retrieve it below.",
                     "sent": "The result was sent. Use the buttons below to retrieve it or start a conversation.",
@@ -2162,13 +2144,9 @@ class Bridge(CommandHandlers):
         except AttributeError:
             pass
         key = (chat_id, message_id, text, repr(reply_markup))
-        now = time.monotonic()
-        if now < self._selector_fallbacks.get(key, 0):
+        if time.monotonic() < self._selector_fallbacks.get(key, 0):
             return True
-        self._selector_fallbacks = {key: until for key, until in self._selector_fallbacks.items() if until > now}
-        if len(self._selector_fallbacks) >= 128:
-            self._selector_fallbacks.pop(next(iter(self._selector_fallbacks)))
-        self._selector_fallbacks[key] = now + 30
+        self._record_ttl(self._selector_fallbacks, key, 30)
         return False
 
     def _reset_context(self, user: int) -> tuple:
@@ -2279,8 +2257,7 @@ class Bridge(CommandHandlers):
 
         if (type(user) is not int or not self._is_allowed(user) or sender.get("is_bot") is True
                 or chat.get("type") != "private" or type(chat_id) is not int or chat_id != user):
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text="⚠️ 无操作权限", show_alert=True)
+            self._answer_callback(cq_id, text="⚠️ 无操作权限", show_alert=True)
             return
 
         if data in {"language:zh", "language:en"}:
@@ -2313,14 +2290,12 @@ class Bridge(CommandHandlers):
                 notice = {"expand": "正在展开过程，任务继续执行",
                           "collapse": "正在收起过程并恢复自动刷新",
                           "refresh": "正在刷新，保持当前展开状态"}[parts[1]]
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text=notice)
+            self._answer_callback(cq_id, text=notice)
             return
 
         if data in {"status:summary", "status:details"}:
             text, keyboard = self._status_card(user, data == "status:details")
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id)
+            self._answer_callback(cq_id)
             self.queue_selector_edit(chat_id, message, text, keyboard, html_mode=data == "status:details")
             return
 
@@ -2340,8 +2315,7 @@ class Bridge(CommandHandlers):
                 # Invalidate before any await so repeated taps cannot reset twice.
                 self._close_reset_confirmation(user, self._reset_conversation(user))
                 notice = "已确认新建对话"
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text=notice)
+            self._answer_callback(cq_id, text=notice)
             return
 
         if data.startswith("probe:progress:"):
@@ -2349,8 +2323,7 @@ class Bridge(CommandHandlers):
                      and data == f"probe:progress:{self.model_check_id}" and user == self.model_check_user)
             if valid:
                 self._update_probe_card()
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text="进度已刷新" if valid else "检测已结束")
+            self._answer_callback(cq_id, text="进度已刷新" if valid else "检测已结束")
             return
 
         if data in {"probe:current", "probe:all"}:
@@ -2359,8 +2332,7 @@ class Bridge(CommandHandlers):
                 self.queue_reply(chat_id, self._text(user, "💡 请先在 /model 选择具体模型，再检测当前模型；默认模型由 CLI 决定。", "💡 Select a specific model with /model before checking it; the CLI chooses the default model."))
             else:
                 self._start_model_health_refresh(chat_id, current if data == "probe:current" else None)
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id)
+            self._answer_callback(cq_id)
             return
 
         if data.startswith("probe:cancel:"):
@@ -2369,8 +2341,7 @@ class Bridge(CommandHandlers):
                      and user in {self.model_check_user, self.settings.owner_id})
             if valid:
                 self._cancel_model_health()
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text="已请求取消" if valid else "检测已结束、按钮已失效或无取消权限")
+            self._answer_callback(cq_id, text="已请求取消" if valid else "检测已结束、按钮已失效或无取消权限")
             return
 
         if data.startswith("correction:"):
@@ -2383,8 +2354,7 @@ class Bridge(CommandHandlers):
                      and job.phase not in {"saving", "sending"} and not self.runner.blocked
                      and not self._restart_pending())
             if not valid:
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text="补充已失效，请确认当前任务后重新发送。", show_alert=True)
+                self._answer_callback(cq_id, text="补充已失效，请确认当前任务后重新发送。", show_alert=True)
                 return
             correction = job.pending_correction
             text = (self._text(user, "⚡ 已提交修正，正在等待清理和交接。", "⚡ Correction submitted; waiting for cleanup and handover.") if parts[1] == "apply" else self._text(user, "已忽略这条补充，当前任务未改变。", "Addition ignored; the current task is unchanged."))
@@ -2393,8 +2363,7 @@ class Bridge(CommandHandlers):
             # awaiting any Telegram acknowledgement, so double taps cannot replay.
             if parts[1] == "apply":
                 await self.handle({"message": {"chat": chat, "from": sender, "text": "/steer " + correction}})
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text="已提交修正" if parts[1] == "apply" else "已忽略补充")
+            self._answer_callback(cq_id, text="已提交修正" if parts[1] == "apply" else "已忽略补充")
             return
 
         if data.startswith("cancel:"):
@@ -2403,10 +2372,9 @@ class Bridge(CommandHandlers):
                 job.cancel.set()
                 job.progress_requested.set()
                 job.steer_cancelled = True
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text="🛑 已请求取消")
+                self._answer_callback(cq_id, text="🛑 已请求取消")
                 self.queue_reply(chat_id, self._text(user, "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。", "🛑 Cancellation requested. Task processes are being cleaned up; existing changes are not undone."))
-            elif cq_id and hasattr(self.api, "answer_callback_query"):
+            else:
                 self._answer_callback(cq_id, text="该任务已结束或不可取消")
             return
 
@@ -2414,13 +2382,11 @@ class Bridge(CommandHandlers):
             key = data.removeprefix("queue:cancel:")
             entry = self.queue_buttons.get(key)
             if not entry or entry[0] != user or not any(item is entry[1] for item in self.waiting_jobs):
-                if cq_id:
-                    self._answer_callback(cq_id, text="这条等待任务已失效。")
+                self._answer_callback(cq_id, text="这条等待任务已失效。")
                 return
             self.queue_buttons.pop(key, None)
             removed = self._remove_queued(lambda item: item is entry[1])
-            if cq_id:
-                self._answer_callback(cq_id, text="已取消等待任务" if removed else "保存失败，请检查存储")
+            self._answer_callback(cq_id, text="已取消等待任务" if removed else "保存失败，请检查存储")
             self.queue_reply(chat_id, self._text(user, "🛑 已取消这条等待任务。", "🛑 Waiting task cancelled.") if removed else self._text(user, "⚠️ 无法保存取消操作，请检查服务器存储。", "⚠️ Could not save the cancellation; check server storage."))
             return
 
@@ -2429,9 +2395,7 @@ class Bridge(CommandHandlers):
                 record = self.store.history_item(user, data[8:])
             except (OSError, ValueError) as error:
                 LOG.warning("history_callback_read_failed type=%s", type(error).__name__)
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(
-                        cq_id, text="无法读取任务历史，请检查服务器状态。", show_alert=True)
+                self._answer_callback(cq_id, text="无法读取任务历史，请检查服务器状态。", show_alert=True)
                 self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取任务历史，请检查服务器状态；原记录已保留，没有重新执行任务。", "⚠️ Could not read task history; check the server. The original record is retained and the task was not rerun."))
                 return
             opened = False
@@ -2439,15 +2403,13 @@ class Bridge(CommandHandlers):
                 opened = self.queue_reply(chat_id, self._render_result(user, record), html_mode=True,
                                           reply_markup=self._result_buttons(record["job_id"]),
                                           result_key=(user, record["job_id"]))
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(
-                    cq_id, text=("📖 正在打开任务结果" if opened else "⏳ 结果正在打开或刚刚已发送")
-                    if record else "该历史记录不存在或已过期")
+            self._answer_callback(
+                cq_id, text=("📖 正在打开任务结果" if opened else "⏳ 结果正在打开或刚刚已发送")
+                if record else "该历史记录不存在或已过期")
             return
 
         if data in {"tasks:history", "tasks:new"}:
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id)
+            self._answer_callback(cq_id)
             # Reuse the existing user-scoped command semantics, including deferred
             # /new during a running task. These buttons never launch a model job.
             if data == "tasks:new":
@@ -2458,8 +2420,7 @@ class Bridge(CommandHandlers):
 
         if (data in {"selector:models", "selector:close", "selector:refresh"}
                 or re.fullmatch(r"selector:models:[0-9]{1,3}", data)):
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id)
+            self._answer_callback(cq_id)
             if data != "selector:close":
                 await self._ensure_model_catalog(force=data == "selector:refresh")
                 page = int(data.rsplit(":", 1)[1]) if data.rsplit(":", 1)[1].isdigit() else 0
@@ -2485,26 +2446,22 @@ class Bridge(CommandHandlers):
             reset = target.lower() in {"default", "reset", "auto", "clear"} and not choosing
             resolved = target
             if not reset and (not MODEL_RE.fullmatch(resolved) or resolved not in self._variant_ids()):
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
+                self._answer_callback(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
                 return
             # Family navigation does not persist a choice or depend on the high tier's health.
             if not reset and not choosing and selected_variant_effort(resolved):
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id)
+                self._answer_callback(cq_id)
                 picker, keyboard = self._effort_picker(user, resolved, model=resolved)
                 self.queue_selector_edit(chat_id, message, picker, keyboard)
                 return
             if not reset and self._model_is_known_unavailable(resolved):
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(
-                        cq_id, text="该选项上次检测不可用，可用 /model refresh 重新检测", show_alert=True)
+                self._answer_callback(
+                    cq_id, text="该选项上次检测不可用，可用 /model refresh 重新检测", show_alert=True)
                 return
             self.store.set_model(user, None if reset else resolved, exact=not reset)
             self.store.set_effort(user, None)
             current = self.store.get_model(user) or self.settings.model or ""
-            if cq_id and hasattr(self.api, "answer_callback_query"):
-                self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
+            self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
             if not reset and supports_effort(resolved) and resolved not in self._variant_ids():
                 picker, keyboard = self._effort_picker(user, resolved)
                 self.queue_selector_edit(chat_id, message, picker, keyboard)
@@ -2530,37 +2487,32 @@ class Bridge(CommandHandlers):
                 variant = variant_model_for_effort(model, target, self._variant_ids())
                 if variant is not None:
                     if self._model_is_known_unavailable(variant):
-                        if cq_id and hasattr(self.api, "answer_callback_query"):
-                            self._answer_callback(
-                                cq_id, text="该思考档位当前检测为不可用", show_alert=True,
-                            )
+                        self._answer_callback(
+                            cq_id, text="该思考档位当前检测为不可用", show_alert=True,
+                        )
                         return
                     self.store.set_model(user, variant, exact=True)
                     self.store.set_effort(user, None)
                     collapsed = f"✅ 已切换至：{variant}｜思考强度：{effort_label(None, variant)}"
                     if self.store.get_language(user) == "en":
                         collapsed = f"✅ Switched to: {variant} | Reasoning effort: {target.capitalize()}"
-                    if cq_id and hasattr(self.api, "answer_callback_query"):
-                        self._answer_callback(cq_id, text=f"🎯 已切换至 {variant}")
+                    self._answer_callback(cq_id, text=f"🎯 已切换至 {variant}")
                     self.queue_selector_edit(chat_id, message, collapsed)
                     return
                 if selected_variant_effort(model):
-                    if cq_id and hasattr(self.api, "answer_callback_query"):
-                        self._answer_callback(cq_id, text="该模型暂不提供这一思考档位", show_alert=True)
+                    self._answer_callback(cq_id, text="该模型暂不提供这一思考档位", show_alert=True)
                     return
             if not supports_effort(model):
                 self.store.set_effort(user, None)
                 collapsed = f"✅ 已切换至：{model}｜思考强度：模型内置"
                 if self.store.get_language(user) == "en":
                     collapsed = f"✅ Switched to: {model} | Reasoning effort: built in"
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text="该模型使用内置思考强度")
+                self._answer_callback(cq_id, text="该模型使用内置思考强度")
                 self.queue_selector_edit(chat_id, message, collapsed)
                 return
             if target in {"default", "reset", "clear"}:
                 self.store.set_effort(user, None)
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text="🔄 已恢复默认思考强度")
+                self._answer_callback(cq_id, text="🔄 已恢复默认思考强度")
                 collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：默认"
                 if self.store.get_language(user) == "en":
                     collapsed = f"✅ Switched to: {model or 'Default model'} | Reasoning effort: default"
@@ -2568,8 +2520,7 @@ class Bridge(CommandHandlers):
                 return
             if target in {"low", "medium", "high"}:
                 self.store.set_effort(user, target)
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text=f"🎯 已设置思考强度为: {target.capitalize()}")
+                self._answer_callback(cq_id, text=f"🎯 已设置思考强度为: {target.capitalize()}")
                 collapsed = f"✅ 已切换至：{model or '默认模型'}｜思考强度：{effort_label(target, model)}"
                 if self.store.get_language(user) == "en":
                     collapsed = f"✅ Switched to: {model or 'Default model'} | Reasoning effort: {target.capitalize()}"
@@ -2580,8 +2531,7 @@ class Bridge(CommandHandlers):
             target = data[5:].strip().lower()
             if target in {"default", "reset", "clear"}:
                 self.store.set_mode(user, None)
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text="🔄 已恢复默认执行模式")
+                self._answer_callback(cq_id, text="🔄 已恢复默认执行模式")
                 self.queue_selector_edit(chat_id, message, self._text(user, "已恢复默认执行模式\n后续任务跟随 agy 设置", "Default execution mode restored\nFuture tasks use agy settings"))
                 return
             if target in {"plan", "accept-edits"}:
@@ -2589,8 +2539,7 @@ class Bridge(CommandHandlers):
                 name = "推演规划模式 (Plan)" if target == "plan" else "落地编辑模式 (Accept-Edits)"
                 if self.store.get_language(user) == "en":
                     name = "Plan" if target == "plan" else "Accept-Edits"
-                if cq_id and hasattr(self.api, "answer_callback_query"):
-                    self._answer_callback(cq_id, text=f"🎯 已切换为: {name}")
+                self._answer_callback(cq_id, text=f"🎯 已切换为: {name}")
                 text = self._text(user, f"已切换模式：{name}\n后续任务生效", f"Mode changed: {name}\nApplies to future tasks")
                 self.queue_selector_edit(chat_id, message, text)
                 return
@@ -2688,13 +2637,19 @@ class Bridge(CommandHandlers):
         if not command and any(not task.done() for task in self.steer_tasks):
             self.queue_reply(chat_id, self._text(user, "⏳ 正在交接修正任务，请等待清理和交接完成。", "⏳ A corrected task is being handed over. Wait for cleanup to finish."))
             return
+        largest_photo = (
+            max(
+                (entry for entry in photo_list if isinstance(entry, dict)),
+                key=lambda entry: entry.get("file_size", 0) if type(entry.get("file_size")) is int else 0,
+                default=None,
+            )
+            if has_photo
+            else None
+        )
         group_id = message.get("media_group_id")
         if (album_items is None and isinstance(group_id, str) and group_id
                 and (has_photo or has_document) and self.slot is None and not self.waiting_jobs):
-            item = (max((entry for entry in photo_list if isinstance(entry, dict)),
-                        key=lambda entry: entry.get("file_size", 0)
-                        if type(entry.get("file_size")) is int else 0, default=None)
-                    if has_photo else document)
+            item = largest_photo if has_photo else document
             if not isinstance(item, dict):
                 self.queue_reply(chat_id, self._text(user, "⚠️ 无法识别这组附件，请重新发送。", "⚠️ Could not identify these attachments. Send them again."))
                 return
@@ -2706,11 +2661,10 @@ class Bridge(CommandHandlers):
         attachment: dict | None = None
         is_photo = False
         if has_photo:
-            candidates = [entry for entry in photo_list if isinstance(entry, dict)]
-            if not candidates:
+            if largest_photo is None:
                 self.queue_reply(chat_id, self._text(user, "⚠️ 无法识别这张图片，请重新发送原图或截图。", "⚠️ Could not identify the image. Resend the original or screenshot."))
                 return
-            attachment = max(candidates, key=lambda entry: entry.get("file_size", 0) if type(entry.get("file_size")) is int else 0)
+            attachment = largest_photo
             is_photo = True
         elif has_document:
             attachment = document
@@ -2993,30 +2947,23 @@ class Bridge(CommandHandlers):
         finally:
             self.stop.set()
             self.waiting_jobs.clear()
-            if self.queue_task is not None:
-                self.queue_task.cancel()
-                await asyncio.gather(self.queue_task, return_exceptions=True)
+            await _cancel_task(self.queue_task)
             if self.model_check_task is not None:
                 check_task = self.model_check_task
                 self._cancel_model_health()
                 await asyncio.gather(check_task, return_exceptions=True)
                 self._model_check_finished(check_task)
             if self.restart_task is not None:
-                self.restart_task.cancel()
-                await asyncio.gather(self.restart_task, return_exceptions=True)
+                await _cancel_task(self.restart_task)
                 self.restart_task = None
             self.pending_album = None
-            if self.album_task is not None:
-                self.album_task.cancel()
-                await asyncio.gather(self.album_task, return_exceptions=True)
+            await _cancel_task(self.album_task)
             if self.ready_file is not None:
                 self.ready_file.unlink(missing_ok=True)
             job = self.slot
             if job is not None:
                 job.cancel.set()
-            if self.reply_worker is not None:
-                self.reply_worker.cancel()
-                await asyncio.gather(self.reply_worker, return_exceptions=True)
+            await _cancel_task(self.reply_worker)
             for task in self.callback_tasks:
                 task.cancel()
             if self.callback_tasks:

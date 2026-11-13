@@ -63,8 +63,6 @@ _CALLBACK_NOTICES = {
     "已切换模型": "Model changed",
     "已恢复默认": "Default restored",
     "已恢复默认执行模式": "Default execution mode restored",
-    "🛑 已请求取消。正在清理任务进程；已经发生的修改不会自动撤销。":
-        "🛑 Cancellation requested. Processes are being cleaned up; existing changes are not automatically undone.",
 }
 
 

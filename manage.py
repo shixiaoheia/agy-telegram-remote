@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import getpass
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 import warnings
@@ -15,7 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
 
-from agy_runner import Runner, SMOKE_PROMPT
+from agy_runner import Runner, SMOKE_PROMPT, child_environment
 from settings import (ConfigError, KEYS, TOKEN_RE, Settings, check_no_symlink, merged_config,
                       parse_allowed_ids, parse_env, read_private_text, serialize_env)
 from state_store import read_json
@@ -211,25 +213,13 @@ def highlight_url(url: str) -> str:
 def oauth_environment(home: Path, inherited: Mapping[str, str] | None = None) -> dict[str, str]:
     """Provide a minimal, sanitized environment for agy OAuth login."""
     inherited = os.environ if inherited is None else inherited
-    user = "root" if str(home) == "/root" else inherited.get("USER", "root")
-    env = {
-        "HOME": str(home),
-        "USER": user,
-        "LOGNAME": user,
-        "PATH": f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin:" + inherited.get("PATH", ""),
-        "TERM": inherited.get("TERM", "xterm-256color"),
-        "LANG": inherited.get("LANG", "C.UTF-8"),
-    }
-    for key in ("LC_ALL", "LC_CTYPE", "TMPDIR", "TZ"):
-        if key in inherited:
-            env[key] = inherited[key]
-    # Retain SSH context for remote CLI environment detection, excluding SSH_AUTH_SOCK
-    for key in ("SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"):
-        if key in inherited:
-            env[key] = inherited[key]
-    # Retain standard proxy environment for OAuth token exchange
-    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY",
-                "https_proxy", "http_proxy", "all_proxy", "no_proxy"):
+    env = child_environment(home, inherited)
+    env.pop("NO_COLOR", None)
+    env["PATH"] = f"{env['PATH']}:{inherited.get('PATH', '')}"
+    env["TERM"] = inherited.get("TERM", "xterm-256color")
+    env["LANG"] = inherited.get("LANG", "C.UTF-8")
+    # Retain locale/time and SSH context (excluding SSH_AUTH_SOCK) for CLI detection.
+    for key in ("LC_ALL", "LC_CTYPE", "TMPDIR", "TZ", "SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"):
         if key in inherited:
             env[key] = inherited[key]
     return env
@@ -238,37 +228,19 @@ def oauth_environment(home: Path, inherited: Mapping[str, str] | None = None) ->
 def kill_process_group(proc: subprocess.Popen, timeout: float = 3.0) -> None:
     """Terminate the process and its child process group safely."""
     pgid = None
-    try:
+    with contextlib.suppress(ProcessLookupError, OSError):
         pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        pass
-
-    if pgid is not None:
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            pass
-    else:
-        try:
-            proc.terminate()
-        except (ProcessLookupError, OSError):
-            pass
-
-    try:
-        proc.wait(timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError):
-        if pgid is not None:
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, OSError):
-                pass
-        else:
-            try:
+    for sig, wait in ((signal.SIGTERM, timeout), (signal.SIGKILL, 2.0)):
+        with contextlib.suppress(ProcessLookupError, OSError):
+            if pgid is not None:
+                os.killpg(pgid, sig)
+            elif sig == signal.SIGTERM:
+                proc.terminate()
+            else:
                 proc.kill()
-            except (ProcessLookupError, OSError):
-                pass
         try:
-            proc.wait(timeout=2.0)
+            proc.wait(timeout=wait)
+            return
         except (subprocess.TimeoutExpired, OSError):
             pass
 
@@ -394,41 +366,30 @@ def auth_login(agy: Path, home: Path, workspace: Path,
                 auth_prompted = True
             break
 
+    def close_master() -> None:
+        with contextlib.suppress(OSError):
+            os.close(master)
+
     if auth_prompted:
         try:
             code = input("👉 请在此处粘贴浏览器显示的授权码并按回车：").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n已取消授权流程。")
             kill_process_group(proc)
-            try:
-                os.close(master)
-            except OSError:
-                pass
+            close_master()
             return 20
 
-        if proc.poll() is not None:
-            print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
-            kill_process_group(proc)
+        write_ok = proc.poll() is None
+        if write_ok:
             try:
-                os.close(master)
+                os.write(master, (code + "\n").encode("utf-8"))
             except OSError:
-                pass
-            return 1
-
-        write_ok = False
-        try:
-            os.write(master, (code + "\n").encode("utf-8"))
-            write_ok = True
-        except OSError:
-            write_ok = False
+                write_ok = False
 
         if not write_ok or proc.poll() is not None:
             print("\n❌ 错误：授权会话已结束，请重新开始。", file=sys.stderr)
             kill_process_group(proc)
-            try:
-                os.close(master)
-            except OSError:
-                pass
+            close_master()
             return 1
 
         print("🔄 正在验证授权码并完成配置，请稍候……")
@@ -452,10 +413,7 @@ def auth_login(agy: Path, home: Path, workspace: Path,
             if proc.poll() is None:
                 timed_out = True
 
-        try:
-            os.close(master)
-        except OSError:
-            pass
+        close_master()
 
         if timed_out:
             kill_process_group(proc)
@@ -476,10 +434,7 @@ def auth_login(agy: Path, home: Path, workspace: Path,
         print(f"\n❌ {err_msg}", file=sys.stderr)
         return 1
 
-    try:
-        os.close(master)
-    except OSError:
-        pass
+    close_master()
 
     try:
         rc = proc.wait(timeout=3.0)
@@ -532,26 +487,19 @@ def main() -> int:
     try:
         if args.command == "prepare-config":
             return prepare_config(args)
-        if args.command == "check-ready":
+        if args.command in {"check-ready", "check-health"}:
             data = read_json(args.file, 1024)
-            return 0 if (
-                isinstance(data, dict) and args.pid > 0
-                and data.get("pid") == args.pid
-                and data.get("initialized") is True
-                and data.get("polling_ready") is True
-                and isinstance(data.get("started_at"), (int, float))
-                and 0 <= time.time() - data["started_at"] < 120
-            ) else 1
-        if args.command == "check-health":
-            data = read_json(args.file, 1024)
-            last_poll = data.get("last_poll_at") if isinstance(data, dict) else None
-            return 0 if (
-                args.pid > 0 and args.max_poll_age >= 30
+            is_health = args.command == "check-health"
+            stamp = data.get("last_poll_at" if is_health else "started_at") if isinstance(data, dict) else None
+            valid = (
+                args.pid > 0 and (not is_health or args.max_poll_age >= 30)
                 and isinstance(data, dict) and data.get("pid") == args.pid
                 and data.get("initialized") is True and data.get("polling_ready") is True
-                and type(last_poll) in {int, float}
-                and 0 <= time.time() - last_poll <= args.max_poll_age
-            ) else 1
+                and type(stamp) in {int, float}
+                and 0 <= time.time() - stamp <= (args.max_poll_age if is_health else 120)
+                and (is_health or time.time() - stamp < 120)
+            )
+            return 0 if valid else 1
         if args.command == "auth-login":
             if args.config:
                 settings = Settings.load(args.config)

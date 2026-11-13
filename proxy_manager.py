@@ -280,12 +280,7 @@ def check_telegram_identity(port: int) -> bool | None:
         print("Telegram 身份验证：尚无机器人配置，安装时会继续验证。")
         return None
     env = {key: os.environ[key] for key in ("PATH", "HOME", "LANG", "LC_ALL", "TZ")
-           if key in os.environ}
-    address = f"http://127.0.0.1:{port}"
-    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-        env[key] = address
-    env["NO_PROXY"] = env["no_proxy"] = "localhost,127.0.0.1,::1"
-    env["ALL_PROXY"] = env["all_proxy"] = ""
+           if key in os.environ} | _proxy_env(port)
     try:
         result = subprocess.run(
             [sys.executable, "-E", "-s", "-B", str(Path(__file__).resolve().with_name("manage.py")),
@@ -387,6 +382,10 @@ def env_text(port: int) -> bytes:
             "ALL_PROXY=\nall_proxy=\n").encode()
 
 
+def _proxy_env(port: int) -> dict[str, str]:
+    return dict(line.split("=", 1) for line in env_text(port).decode("ascii").splitlines())
+
+
 def drop_text() -> bytes:
     return (MARKER + f"[Unit]\nRequires={PROXY_SERVICE}\nAfter={PROXY_SERVICE}\n"
             f"[Service]\nEnvironmentFile={ENV}\n").encode()
@@ -401,7 +400,7 @@ def check_bot_proxy_environment(environ: dict[str, str] | None = None) -> None:
             raise ProxyError("上次代理切换未完成；请先通过菜单 4 恢复。")
         return  # A direct or externally managed installation remains unchanged.
     environ = os.environ if environ is None else environ
-    expected = dict(line.split("=", 1) for line in env_text(port).decode("ascii").splitlines())
+    expected = _proxy_env(port)
     if any(environ.get(key) != value for key, value in expected.items()):
         raise ProxyError("代理配置存在但机器人没有加载代理环境；请检查服务配置。")
     try:
@@ -410,11 +409,16 @@ def check_bot_proxy_environment(environ: dict[str, str] | None = None) -> None:
         raise ProxyError("代理配置存在但本机代理未就绪；请检查代理服务。") from exc
 
 
-def ready() -> bool:
+def _service_main_pid() -> str | None:
     result = subprocess.run(["systemctl", "show", SERVICE, "-p", "MainPID", "--value"],
                             capture_output=True, text=True, timeout=10, check=False)
     pid = result.stdout.strip()
-    if not pid.isdecimal() or pid == "0":
+    return pid if pid.isdecimal() and pid != "0" else None
+
+
+def ready() -> bool:
+    pid = _service_main_pid()
+    if pid is None:
         return False
     helper = Path(__file__).resolve().with_name("manage.py")
     return run("/usr/bin/python3", "-E", "-s", "-B", str(helper),
@@ -423,10 +427,8 @@ def ready() -> bool:
 
 
 def service_proxy_matches(port: int) -> bool:
-    result = subprocess.run(["systemctl", "show", SERVICE, "-p", "MainPID", "--value"],
-                            capture_output=True, text=True, timeout=10, check=False)
-    pid = result.stdout.strip()
-    if not pid.isdecimal() or pid == "0":
+    pid = _service_main_pid()
+    if pid is None:
         return False
     try:
         data = (Path("/proc") / pid / "environ").read_bytes()

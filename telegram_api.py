@@ -36,6 +36,7 @@ class TelegramAPI:
         self._file_endpoint = f"{root}/file/bot{token}/"
         self.request_timeout = request_timeout
         self._root = urlsplit(root)
+        self._bot_path = f"{self._root.path.rstrip('/')}/bot{token}/"
         self._idle: list[tuple[http.client.HTTPConnection, float]] = []
         self._pool_lock = threading.Lock()
         self._closed = False
@@ -100,7 +101,7 @@ class TelegramAPI:
         http_code = 0
         try:
             connection = self._connection(request_timeout or self.request_timeout)
-            path = (self._root.path.rstrip("/") + "/bot" + self._endpoint.split("/bot", 1)[1] + method)
+            path = self._bot_path + method
             connection.request("POST", path, body=json.dumps(payload).encode("utf-8"),
                                headers={"Content-Type": "application/json"})
             response = connection.getresponse()
@@ -234,18 +235,25 @@ class TelegramAPI:
                 watcher.cancel()
                 await asyncio.gather(watcher, return_exceptions=True)
 
-    async def send(self, chat_id: int, text: str, reply_markup: dict | None = None,
-                   parse_mode: str | None = None) -> object:
-        # Retry ONLY a definite 429 rejection, not an ambiguous network failure.
+    @staticmethod
+    def _text_payload(chat_id: int, text: str, reply_markup: dict | None,
+                      parse_mode: str | None, **extra: object) -> dict[str, object]:
         payload: dict[str, object] = {
             "chat_id": chat_id,
             "text": text,
             "link_preview_options": {"is_disabled": True},
+            **extra,
         }
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         if parse_mode is not None:
             payload["parse_mode"] = parse_mode
+        return payload
+
+    async def send(self, chat_id: int, text: str, reply_markup: dict | None = None,
+                   parse_mode: str | None = None) -> object:
+        # Retry ONLY a definite 429 rejection, not an ambiguous network failure.
+        payload = self._text_payload(chat_id, text, reply_markup, parse_mode)
         for attempt in range(3):
             try:
                 return await self.call("sendMessage", **payload)
@@ -256,16 +264,7 @@ class TelegramAPI:
 
     async def edit(self, chat_id: int, message_id: int, text: str,
                    reply_markup: dict | None = None, parse_mode: str | None = None) -> object:
-        payload: dict[str, object] = {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": text,
-            "link_preview_options": {"is_disabled": True},
-        }
-        if reply_markup is not None:
-            payload["reply_markup"] = reply_markup
-        if parse_mode is not None:
-            payload["parse_mode"] = parse_mode
+        payload = self._text_payload(chat_id, text, reply_markup, parse_mode, message_id=message_id)
         return await self.call("editMessageText", **payload)
 
     async def set_commands(self, commands: list[dict[str, str]]) -> object:

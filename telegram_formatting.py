@@ -26,6 +26,10 @@ HTML_TOKEN = re.compile(
     r"|&(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);|[\s\S]"
 )
 TAG_NAME = re.compile(r"</?([a-z-]+)")
+BACKTICK_RE = re.compile(r"`+")
+BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+AUTOLINK_RE = re.compile(r"<(https?://[^<>\s]+)>")
+CODE_SPLIT_RE = re.compile(r"(<code>.*?</code>)", re.DOTALL)
 
 
 def clean_model_reply(text: str) -> str:
@@ -79,19 +83,19 @@ def _safe_url(value: str) -> bool:
 
 
 def _code_span(text: str, index: int, budget: list[int]) -> tuple[int, str] | None:
-    run = re.match(r"`+", text[index:]).group(0)
-    previous = 0
-    for match in re.finditer(r"`+", text[index + len(run):]):
+    run = BACKTICK_RE.match(text, index).group(0)
+    start = index + len(run)
+    previous = start
+    for match in BACKTICK_RE.finditer(text, start):
         budget[0] -= match.end() - previous
         previous = match.end()
         if budget[0] <= 0:
             return None
         if match.group(0) == run:
-            end = index + len(run) + match.start()
-            value = text[index + len(run):end].replace("\n", " ")
+            value = text[start:match.start()].replace("\n", " ")
             if value.startswith(" ") and value.endswith(" ") and value.strip():
                 value = value[1:-1]
-            return end + len(run), value
+            return match.end(), value
     return None
 
 
@@ -180,7 +184,7 @@ def _closing_emphasis(text: str, index: int, marker: str, budget: list[int], out
 
 def _format(tags: tuple[str, ...], body: str) -> str:
     # Telegram forbids code inside emphasis. Suspend formatting around code spans.
-    parts = re.split(r"(<code>.*?</code>)", body, flags=re.DOTALL)
+    parts = CODE_SPLIT_RE.split(body)
     return "".join(part if part.startswith("<code>") else
                    "".join(f"<{tag}>" for tag in tags) + part
                    + "".join(f"</{tag}>" for tag in reversed(tags))
@@ -224,7 +228,7 @@ def render_inline_markdown(text: str, *, depth: int = 0, rich: bool = True,
                 result.append(f"<code>{value}</code>" if rich else value)
                 position = span[0]
                 continue
-            run = re.match(r"`+", text[position:]).group(0)
+            run = BACKTICK_RE.match(text, position).group(0)
             plain.append(run)
             position += len(run)
             continue
@@ -238,18 +242,18 @@ def render_inline_markdown(text: str, *, depth: int = 0, rich: bool = True,
                 position = link[0]
                 continue
         if char == "<":
-            br = re.match(r"<br\s*/?>", text[position:], re.IGNORECASE)
-            auto = re.match(r"<(https?://[^<>\s]+)>", text[position:]) if rich else None
+            br = BR_TAG_RE.match(text, position)
+            auto = AUTOLINK_RE.match(text, position) if rich else None
             if br:
                 flush()
                 result.append("\n")
-                position += br.end()
+                position = br.end()
                 continue
             if auto and _safe_url(html.unescape(auto.group(1))):
                 flush()
                 url = html.escape(html.unescape(auto.group(1)), quote=True)
                 result.append(f'<a href="{url}">{url}</a>')
-                position += auto.end()
+                position = auto.end()
                 continue
         if char in "*_~|":
             run = 1
@@ -295,7 +299,7 @@ def table_cells(line: str) -> list[str]:
             position += 2
             continue
         if char == "`":
-            run = re.match(r"`+", source[position:]).group(0)
+            run = BACKTICK_RE.match(source, position).group(0)
             if not code_run:
                 code_run = run
             elif code_run == run:
@@ -438,6 +442,9 @@ def html_chunks(text: str, units: int = 3400) -> list[str]:
     def close_tags() -> str:
         return "".join(f"</{name}>" for name, _ in reversed(stack))
 
+    def utf16_units(value: str) -> int:
+        return sum(2 if ord(char) > 0xFFFF else 1 for char in value)
+
     for match in HTML_TOKEN.finditer(text):
         token = match.group(0)
         name = TAG_NAME.match(token) if token.startswith("<") else None
@@ -445,7 +452,7 @@ def html_chunks(text: str, units: int = 3400) -> list[str]:
             if name.group(1) == "pre" and not token.startswith("</") and used:
                 end = text.find("</pre>", match.end())
                 if end >= 0:
-                    size = len(plain_html_text(text[match.start():end + 6]).encode("utf-16-le")) // 2
+                    size = utf16_units(plain_html_text(text[match.start():end + 6]))
                     if size <= units and used + size > units:
                         chunks.append("".join(current) + close_tags())
                         current = [opening for _, opening in stack]
@@ -460,7 +467,7 @@ def html_chunks(text: str, units: int = 3400) -> list[str]:
                 boundary = (len(current), used, list(stack))
             continue
         value = html.unescape(token)
-        size = sum(2 if ord(char) > 0xFFFF else 1 for char in value)
+        size = utf16_units(value)
         if used and used + size > units:
             if boundary and boundary[1] >= units // 2:
                 cut, consumed, previous = boundary

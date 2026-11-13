@@ -203,12 +203,10 @@ class Settings:
             raise ConfigError("AGY_SKIP_PERMISSIONS 必须是 true 或 false。")
         work = absolute_path(values["AGY_WORKSPACE"], "AGY_WORKSPACE")
         home = absolute_path(values.get("AGY_HOME", "/root"), "AGY_HOME")
-        base = home if str(home) != "/" else Path("/root")
-        if work != base and base not in work.parents:
-            raise ConfigError(f"工作目录必须在 {base} 内。")
+        if not work.is_relative_to(home):
+            raise ConfigError(f"工作目录必须在 {home} 内。")
         state = absolute_path(values["STATE_DIR"], "STATE_DIR")
-        state_base = Path("/var/lib/agy-telegram-remote")
-        if state != state_base and state_base not in state.parents:
+        if not state.is_relative_to(Path("/var/lib/agy-telegram-remote")):
             raise ConfigError("STATE_DIR 必须在 /var/lib/agy-telegram-remote 内。")
         model = resolve_model(values.get("AGY_MODEL", ""))
         if model and not MODEL_RE.fullmatch(model):

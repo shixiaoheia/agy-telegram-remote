@@ -148,12 +148,16 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
             category=category, agy_status=status[:32], exit_code=exit_code,
             conversation_id=conversation_id, num_turns=num_turns,
         )
+    meta = {
+        "agy_status": status, "exit_code": exit_code,
+        "conversation_id": conversation_id, "num_turns": num_turns,
+    }
+    tokens = {
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "thinking_tokens": thinking_tokens, "total_tokens": total_tokens,
+    }
     if not isinstance(response, str):
-        return Result(
-            "invalid", detail="agy 的 response 缺失或不是文本。",
-            agy_status=status, exit_code=exit_code,
-            conversation_id=conversation_id, num_turns=num_turns,
-        )
+        return Result("invalid", detail="agy 的 response 缺失或不是文本。", **meta)
     try:
         response.encode("utf-8")
     except UnicodeEncodeError:
@@ -165,25 +169,14 @@ def parse_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
             "permission", text=response.strip(),
             detail="检测到权限或文件系统限制；请核对任务实际完成情况。",
             category=category if category.startswith("filesystem_") else "permission",
-            agy_status=status, exit_code=exit_code,
-            conversation_id=conversation_id, num_turns=num_turns,
-            input_tokens=input_tokens, output_tokens=output_tokens,
-            thinking_tokens=thinking_tokens, total_tokens=total_tokens,
+            **meta, **tokens,
         )
     if not response.strip():
         return Result(
             "no_text", detail="agy 已结束，但缺少最终文字回复；请先核对执行记录和工作目录。",
-            agy_status=status, exit_code=exit_code,
-            conversation_id=conversation_id, num_turns=num_turns,
-            input_tokens=input_tokens, output_tokens=output_tokens,
-            thinking_tokens=thinking_tokens, total_tokens=total_tokens,
+            **meta, **tokens,
         )
-    return Result(
-        "success", text=response.strip(), agy_status=status, exit_code=exit_code,
-        conversation_id=conversation_id, num_turns=num_turns,
-        input_tokens=input_tokens, output_tokens=output_tokens,
-        thinking_tokens=thinking_tokens, total_tokens=total_tokens,
-    )
+    return Result("success", text=response.strip(), **meta, **tokens)
 
 
 def parse_stream_result(stdout: bytes, stderr: bytes, exit_code: int) -> Result:
@@ -431,15 +424,15 @@ def group_signal(pgid: int, sig: int) -> None:
 async def cleanup_group(process: asyncio.subprocess.Process, grace: float = 3.0,
                         kill_grace: float = 2.0) -> bool:
     pgid = process.pid
-    if live_group(pgid):
-        group_signal(pgid, signal.SIGTERM)
-        deadline = asyncio.get_running_loop().time() + grace
-        while live_group(pgid) and asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(0.03)
-    if live_group(pgid):
-        group_signal(pgid, signal.SIGKILL)
-        deadline = asyncio.get_running_loop().time() + kill_grace
-        while live_group(pgid) and asyncio.get_running_loop().time() < deadline:
+    loop = asyncio.get_running_loop()
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, kill_grace)):
+        if not live_group(pgid):
+            return True
+        group_signal(pgid, sig)
+        deadline = loop.time() + wait
+        while loop.time() < deadline:
+            if not live_group(pgid):
+                return True
             await asyncio.sleep(0.03)
     return not live_group(pgid)
 
@@ -658,8 +651,7 @@ class Runner:
                     or captured[1].total > min(self.settings.max_output, 262144)):
                 result = Result("output_limit", detail="输出超过上限；没有解析或转发截断数据。")
             else:
-                parser = parse_stream_result
-                result = parser(captured[0].data, captured[1].data, process.returncode or 0)
+                result = parse_stream_result(captured[0].data, captured[1].data, process.returncode or 0)
         result.stdout_bytes = captured[0].total
         result.stderr_bytes = captured[1].total
         if selected_model:

@@ -12,9 +12,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from settings import check_no_symlink, resolve_model
+from settings import MODEL_RE, check_no_symlink, resolve_model
 
 HISTORY_ITEMS = 10
+
+
+def _ensure_private_dir(directory: Path, message: str, *, parents: bool = False) -> None:
+    check_no_symlink(directory)
+    directory.mkdir(mode=0o700, parents=parents, exist_ok=True)
+    info = directory.stat()
+    if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise PermissionError(message)
+
+
+def _valid_timestamp(stamp: object, *, allow_zero: bool = True) -> bool:
+    return (type(stamp) in {int, float} and math.isfinite(stamp)
+            and (0 <= stamp if allow_zero else 0 < stamp) and stamp <= 253402300799)
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -57,11 +70,10 @@ def read_json(path: Path, maximum: int = 1048576) -> Any:
 class Store:
     def __init__(self, directory: Path, allowed: frozenset[int], max_reply: int,
                  retention_days: int, token: str = ""):
-        check_no_symlink(directory)
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        info = directory.stat()
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
-            raise PermissionError("State directory must be owned by this user and private (0700)")
+        _ensure_private_dir(
+            directory, "State directory must be owned by this user and private (0700)",
+            parents=True,
+        )
         self.directory = directory
         self.base_allowed = frozenset(allowed)
         self.allowed = set(allowed)
@@ -121,11 +133,7 @@ class Store:
     def _emergency_path(self, home: Path, user: int) -> Path:
         self._path(user)  # enforce the current whitelist
         directory = home / ".agy-telegram-recovery"
-        check_no_symlink(directory)
-        directory.mkdir(mode=0o700, exist_ok=True)
-        info = directory.stat()
-        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
-            raise PermissionError("Recovery directory must be private")
+        _ensure_private_dir(directory, "Recovery directory must be private")
         return directory / f"result-{user}.json"
 
     def save_emergency(self, home: Path, user: int, record: dict) -> None:
@@ -143,10 +151,17 @@ class Store:
     def clear_emergency(self, home: Path, user: int) -> None:
         self._emergency_path(home, user).unlink(missing_ok=True)
 
-    def _path(self, user: int) -> Path:
+    def _path(self, user: int, kind: str = "last") -> Path:
         if type(user) is not int or user not in self.allowed:
             raise ValueError("User is not allowed")
-        return self.directory / f"last-{user}.json"
+        return self.directory / f"{kind}-{user}.json"
+
+    def _read_user_record(self, user: int, kind: str, maximum: int = 1024) -> dict | None:
+        try:
+            value = read_json(self._path(user, kind), maximum)
+        except FileNotFoundError:
+            return None
+        return value if isinstance(value, dict) and value.get("user_id") == user else None
 
     def redact(self, value: str) -> str:
         if self.token:
@@ -191,15 +206,10 @@ class Store:
         atomic_json(self._path(user), record)
         return record
 
-    def _model_path(self, user: int) -> Path:
-        if type(user) is not int or user not in self.allowed:
-            raise ValueError("User is not allowed")
-        return self.directory / f"model-{user}.json"
-
     def get_language(self, user: int) -> str:
-        self._path(user)
+        path = self._path(user, "language")
         try:
-            value = read_json(self.directory / f"language-{user}.json", 1024)
+            value = read_json(path, 1024)
         except (OSError, ValueError):
             return "zh"
         if isinstance(value, dict) and value.get("user_id") == user and value.get("language") in {"zh", "en"}:
@@ -207,36 +217,26 @@ class Store:
         return "zh"
 
     def set_language(self, user: int, language: str) -> None:
-        self._path(user)
+        path = self._path(user, "language")
         if language not in {"zh", "en"}:
             raise ValueError("Invalid language")
-        atomic_json(self.directory / f"language-{user}.json",
-                    {"user_id": user, "language": language, "updated_at": time.time()})
+        atomic_json(path, {"user_id": user, "language": language, "updated_at": time.time()})
 
     def get_model(self, user: int) -> str | None:
-        path = self._model_path(user)
-        try:
-            value = read_json(path, 1024)
-        except FileNotFoundError:
-            return None
-        if not isinstance(value, dict) or value.get("user_id") != user:
-            return None
-        model = value.get("model")
-        if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
+        value = self._read_user_record(user, "model")
+        model = value.get("model") if value else None
+        if isinstance(model, str) and MODEL_RE.fullmatch(model):
             return model if value.get("exact") is True else resolve_model(model)
         return None
 
     def set_model(self, user: int, model: str | None, *, exact: bool = False) -> None:
-        path = self._model_path(user)
+        path = self._path(user, "model")
         if model is None:
             path.unlink(missing_ok=True)
             return
-        if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
+        if not isinstance(model, str) or not MODEL_RE.fullmatch(model):
             raise ValueError("Invalid model name")
         atomic_json(path, {"user_id": user, "model": model, "exact": exact, "updated_at": time.time()})
-
-    def _model_health_path(self) -> Path:
-        return self.directory / "model-health.json"
 
     def get_model_catalog(self) -> dict:
         """A separate snapshot: historical probe results are never a model list."""
@@ -247,8 +247,7 @@ class Store:
         if not isinstance(value, dict):
             raise ValueError("Invalid model catalog")
         stamp, models = value.get("checked_at"), value.get("models")
-        if (type(stamp) not in {int, float} or not math.isfinite(stamp)
-                or not 0 < stamp <= 253402300799):
+        if not _valid_timestamp(stamp, allow_zero=False):
             raise ValueError("Invalid model catalog timestamp")
         self._validate_catalog(models)
         return {"checked_at": float(stamp), "models": list(models)}
@@ -256,8 +255,7 @@ class Store:
     @staticmethod
     def _validate_catalog(models) -> None:
         if (not isinstance(models, (list, tuple)) or not 1 <= len(models) <= 128
-                or any(not isinstance(model, str)
-                       or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model) for model in models)
+                or any(not isinstance(model, str) or not MODEL_RE.fullmatch(model) for model in models)
                 or len(set(models)) != len(models)):
             raise ValueError("Invalid model catalog entries")
 
@@ -269,104 +267,73 @@ class Store:
     def get_model_health(self) -> dict:
         """Return the bounded, account-wide result of explicit model probes."""
         try:
-            value = read_json(self._model_health_path(), 32768)
+            value = read_json(self.directory / "model-health.json", 32768)
         except FileNotFoundError:
             return {"checked_at": 0.0, "models": {}}
         if not isinstance(value, dict) or not isinstance(value.get("models"), dict):
             return {"checked_at": 0.0, "models": {}}
         checked_at = value.get("checked_at")
-        if (type(checked_at) not in {int, float} or not 0 <= checked_at <= 253402300799
-                or not math.isfinite(checked_at)):
+        if not _valid_timestamp(checked_at):
             return {"checked_at": 0.0, "models": {}}
         models: dict[str, dict] = {}
         for model, result in value["models"].items():
-            if (isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model)
+            if (isinstance(model, str) and MODEL_RE.fullmatch(model)
                     and isinstance(result, dict)
                     and result.get("outcome") in {"success", "error", "timed_out", "invalid"}):
                 category = result.get("category", "unknown")
+                stamp = result.get("checked_at", checked_at)
                 models[model] = {
                     "outcome": result["outcome"],
                     "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
+                    "checked_at": float(stamp) if _valid_timestamp(stamp) else 0.0,
                 }
-                stamp = result.get("checked_at", checked_at)
-                models[model]["checked_at"] = (float(stamp) if type(stamp) in {int, float}
-                                               and 0 <= stamp <= 253402300799 and math.isfinite(stamp) else 0.0)
         return {"checked_at": float(checked_at), "models": models}
 
     def set_model_health(self, models: dict[str, dict]) -> None:
         clean: dict[str, dict] = {}
         for model, result in models.items():
-            if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
+            if not isinstance(model, str) or not MODEL_RE.fullmatch(model):
                 raise ValueError("Invalid model health key")
             if not isinstance(result, dict) or result.get("outcome") not in {
                 "success", "error", "timed_out", "invalid"
             }:
                 raise ValueError("Invalid model health result")
             category = result.get("category", "unknown")
+            stamp = result.get("checked_at", time.time())
+            if not _valid_timestamp(stamp):
+                raise ValueError("Invalid model health timestamp")
             clean[model] = {
                 "outcome": result["outcome"],
                 "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
+                "checked_at": float(stamp),
             }
-            stamp = result.get("checked_at", time.time())
-            if (type(stamp) not in {int, float} or not 0 <= stamp <= 253402300799
-                    or not math.isfinite(stamp)):
-                raise ValueError("Invalid model health timestamp")
-            clean[model]["checked_at"] = float(stamp)
-        atomic_json(self._model_health_path(), {"checked_at": time.time(), "models": clean})
+        atomic_json(self.directory / "model-health.json", {"checked_at": time.time(), "models": clean})
 
-    def _effort_path(self, user: int) -> Path:
-        if type(user) is not int or user not in self.allowed:
-            raise ValueError("User is not allowed")
-        return self.directory / f"effort-{user}.json"
+    def _get_choice(self, user: int, kind: str, choices: tuple[str, ...]) -> str | None:
+        value = self._read_user_record(user, kind)
+        choice = value.get(kind) if value else None
+        return choice if isinstance(choice, str) and choice in choices else None
+
+    def _set_choice(self, user: int, kind: str, choice: str | None, choices: tuple[str, ...]) -> None:
+        path = self._path(user, kind)
+        if choice is None:
+            path.unlink(missing_ok=True)
+            return
+        if choice not in choices:
+            raise ValueError(f"Invalid {kind} setting")
+        atomic_json(path, {"user_id": user, kind: choice, "updated_at": time.time()})
 
     def get_effort(self, user: int) -> str | None:
-        path = self._effort_path(user)
-        try:
-            value = read_json(path, 1024)
-        except FileNotFoundError:
-            return None
-        if not isinstance(value, dict) or value.get("user_id") != user:
-            return None
-        effort = value.get("effort")
-        if isinstance(effort, str) and effort in ("low", "medium", "high"):
-            return effort
-        return None
+        return self._get_choice(user, "effort", ("low", "medium", "high"))
 
     def set_effort(self, user: int, effort: str | None) -> None:
-        path = self._effort_path(user)
-        if effort is None:
-            path.unlink(missing_ok=True)
-            return
-        if effort not in ("low", "medium", "high"):
-            raise ValueError("Invalid effort setting")
-        atomic_json(path, {"user_id": user, "effort": effort, "updated_at": time.time()})
-
-    def _mode_path(self, user: int) -> Path:
-        if type(user) is not int or user not in self.allowed:
-            raise ValueError("User is not allowed")
-        return self.directory / f"mode-{user}.json"
+        self._set_choice(user, "effort", effort, ("low", "medium", "high"))
 
     def get_mode(self, user: int) -> str | None:
-        path = self._mode_path(user)
-        try:
-            value = read_json(path, 1024)
-        except FileNotFoundError:
-            return None
-        if not isinstance(value, dict) or value.get("user_id") != user:
-            return None
-        mode = value.get("mode")
-        if isinstance(mode, str) and mode in ("plan", "accept-edits"):
-            return mode
-        return None
+        return self._get_choice(user, "mode", ("plan", "accept-edits"))
 
     def set_mode(self, user: int, mode: str | None) -> None:
-        path = self._mode_path(user)
-        if mode is None:
-            path.unlink(missing_ok=True)
-            return
-        if mode not in ("plan", "accept-edits"):
-            raise ValueError("Invalid mode setting")
-        atomic_json(path, {"user_id": user, "mode": mode, "updated_at": time.time()})
+        self._set_choice(user, "mode", mode, ("plan", "accept-edits"))
 
     def get_extra_whitelist(self) -> list[int]:
         path = self.directory / "whitelist.json"
@@ -401,27 +368,16 @@ class Store:
             self.allowed.discard(user)
         return True
 
-    def _conv_path(self, user: int) -> Path:
-        if type(user) is not int or user not in self.allowed:
-            raise ValueError("User is not allowed")
-        return self.directory / f"conv-{user}.json"
-
     def get_conversation(self, user: int) -> dict | None:
-        path = self._conv_path(user)
-        try:
-            value = read_json(path, 2048)
-        except FileNotFoundError:
-            return None
-        if not isinstance(value, dict) or value.get("user_id") != user:
-            return None
-        cid = value.get("conversation_id")
+        value = self._read_user_record(user, "conv", 2048)
+        cid = value.get("conversation_id") if value else None
         if isinstance(cid, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,128}", cid):
             return value
         return None
 
     def set_conversation(self, user: int, conversation_id: str | None, num_turns: int = 1,
                          session_tokens: int = 0) -> None:
-        path = self._conv_path(user)
+        path = self._path(user, "conv")
         if not conversation_id:
             path.unlink(missing_ok=True)
             return
@@ -438,26 +394,12 @@ class Store:
     def reset_conversation(self, user: int) -> None:
         self.set_conversation(user, None)
 
-    def _usage_path(self, user: int) -> Path:
-        if type(user) is not int or user not in self.allowed:
-            raise ValueError("User is not allowed")
-        return self.directory / f"usage-{user}.json"
-
     def get_usage(self, user: int) -> dict:
-        path = self._usage_path(user)
-        try:
-            value = read_json(path, 2048)
-        except FileNotFoundError:
-            return {
-                "user_id": user, "total_input_tokens": 0, "total_output_tokens": 0,
-                "total_thinking_tokens": 0, "total_turns": 0,
-            }
-        if not isinstance(value, dict) or value.get("user_id") != user:
-            return {
-                "user_id": user, "total_input_tokens": 0, "total_output_tokens": 0,
-                "total_thinking_tokens": 0, "total_turns": 0,
-            }
-        return value
+        value = self._read_user_record(user, "usage", 2048)
+        return value or {
+            "user_id": user, "total_input_tokens": 0, "total_output_tokens": 0,
+            "total_thinking_tokens": 0, "total_turns": 0,
+        }
 
     def record_usage(self, user: int, input_tokens: int, output_tokens: int,
                      thinking_tokens: int = 0) -> dict:
@@ -470,7 +412,7 @@ class Store:
             "total_turns": curr.get("total_turns", 0) + 1,
             "updated_at": time.time(),
         }
-        atomic_json(self._usage_path(user), new_usage)
+        atomic_json(self._path(user, "usage"), new_usage)
         return new_usage
 
     def load(self, user: int) -> dict | None:
@@ -489,11 +431,6 @@ class Store:
             return None
         return value
 
-    def _history_path(self, user: int) -> Path:
-        if type(user) is not int or user not in self.allowed:
-            raise ValueError("User is not allowed")
-        return self.directory / f"history-{user}.json"
-
     def _history_maximum(self) -> int:
         # Each result has two capped text fields (up to six JSON bytes per
         # character), plus metadata. History retains ten complete results,
@@ -505,13 +442,13 @@ class Store:
         size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
         if size > self._history_maximum():
             raise ValueError("Oversized history record")
-        atomic_json(self._history_path(user), value)
+        atomic_json(self._path(user, "history"), value)
 
     def save_history(self, user: int, title: str, record: dict) -> None:
         """Keep a small, private, per-user result history for /history."""
         title = self.redact(" ".join(str(title).split()))[:160] or "未命名任务"
         try:
-            value = read_json(self._history_path(user), self._history_maximum())
+            value = read_json(self._path(user, "history"), self._history_maximum())
             items = value.get("items", []) if isinstance(value, dict) else []
         except FileNotFoundError:
             items = []
@@ -526,7 +463,7 @@ class Store:
         self._write_history(user, items)
 
     def history(self, user: int) -> list[dict]:
-        path = self._history_path(user)
+        path = self._path(user, "history")
         try:
             value = read_json(path, self._history_maximum())
         except FileNotFoundError:
@@ -553,73 +490,21 @@ class Store:
     def maintain(self) -> None:
         """Runs at startup and periodically: expire or remove non-allowed records."""
         for path in self.directory.iterdir():
-            match_last = re.fullmatch(r"last-([0-9]+)\.json", path.name)
-            if match_last:
-                user = int(match_last[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                    continue
+            match = re.fullmatch(
+                r"(last|history|model|language|conv|usage|effort|mode)-([0-9]+)\.json",
+                path.name,
+            )
+            if not match:
+                continue
+            kind, user = match[1], int(match[2])
+            if path.is_symlink():
+                raise ValueError("Linked state record")
+            if user not in self.allowed:
+                path.unlink()
+            elif kind == "last":
                 self.load(user)
-                continue
-            match_history = re.fullmatch(r"history-([0-9]+)\.json", path.name)
-            if match_history:
-                user = int(match_history[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                    continue
+            elif kind == "history":
                 self.history(user)
-                continue
-            match_model = re.fullmatch(r"model-([0-9]+)\.json", path.name)
-            if match_model:
-                user = int(match_model[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                continue
-            match_language = re.fullmatch(r"language-([0-9]+)\.json", path.name)
-            if match_language:
-                user = int(match_language[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                continue
-            match_conv = re.fullmatch(r"conv-([0-9]+)\.json", path.name)
-            if match_conv:
-                user = int(match_conv[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                continue
-            match_usage = re.fullmatch(r"usage-([0-9]+)\.json", path.name)
-            if match_usage:
-                user = int(match_usage[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                continue
-            match_effort = re.fullmatch(r"effort-([0-9]+)\.json", path.name)
-            if match_effort:
-                user = int(match_effort[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
-                continue
-            match_mode = re.fullmatch(r"mode-([0-9]+)\.json", path.name)
-            if match_mode:
-                user = int(match_mode[1])
-                if path.is_symlink():
-                    raise ValueError("Linked state record")
-                if user not in self.allowed:
-                    path.unlink()
 
     def recover_interrupted(self) -> None:
         self.maintain()

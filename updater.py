@@ -196,8 +196,7 @@ async def notify(settings: Settings, status: dict, language: str) -> None:
     try:
         await api.send(settings.owner_id, status_text(status, language))
     finally:
-        if hasattr(api, "close"):
-            api.close()
+        api.close()
 
 
 def apply(settings: Settings, *, app: Path = APP, releases: Path = RELEASES) -> int:
@@ -219,14 +218,15 @@ def apply(settings: Settings, *, app: Path = APP, releases: Path = RELEASES) -> 
         trusted(CONFIG)
         release, original = current_revision(app, releases)
         status["current"] = original
-        target = latest_revision(worker_environment(settings))
+        env = worker_environment(settings)
+        target = latest_revision(env)
         status["target"] = target
         if target == original:
             status.update(phase="current", actual=original)
         else:
             status.update(phase="installing", updated_at=time.time())
             atomic_json(destination, status)
-            code = install_revision(release, target, worker_environment(settings))
+            code = install_revision(release, target, env)
             _, actual = current_revision(app, releases)
             status["actual"] = actual
             if code == 0 and actual == target and healthy():
