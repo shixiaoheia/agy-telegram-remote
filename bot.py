@@ -1979,6 +1979,10 @@ class Bridge(CommandHandlers):
     def _variant_ids(self):
         return frozenset(model for _, variants in self._model_choices() for model in variants)
 
+    def _has_model_effort_picker(self, model: str) -> bool:
+        # For catalog entries, offer only variants actually returned by agy.
+        return bool(selected_variant_effort(model)) if model in self._variant_ids() else has_effort_picker(model)
+
     def _model_callback(self, model: str, *, choosing: bool = False) -> str:
         prefix = "choose:" if choosing else "model:"
         if len(prefix + model) <= 64:
@@ -2439,12 +2443,12 @@ class Bridge(CommandHandlers):
                     self._answer_callback(
                         cq_id, text="该选项上次检测不可用，可用 /model refresh 重新检测", show_alert=True)
                 return
-            self.store.set_model(user, None if reset else resolved)
+            self.store.set_model(user, None if reset else resolved, exact=not reset)
             self.store.set_effort(user, None)
             current = self.store.get_model(user) or self.settings.model or ""
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
-            if not reset and supports_effort(resolved):
+            if not reset and supports_effort(resolved) and resolved not in self._variant_ids():
                 picker, keyboard = self._effort_picker(user, resolved)
                 self.queue_selector_edit(chat_id, message, picker, keyboard)
                 return
@@ -2474,7 +2478,7 @@ class Bridge(CommandHandlers):
                                 cq_id, text="该思考档位当前检测为不可用", show_alert=True,
                             )
                         return
-                    self.store.set_model(user, variant)
+                    self.store.set_model(user, variant, exact=True)
                     self.store.set_effort(user, None)
                     collapsed = f"✅ 已切换至：{variant}｜思考强度：{effort_label(None, variant)}"
                     if self.store.get_language(user) == "en":

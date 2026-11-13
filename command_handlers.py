@@ -280,7 +280,7 @@ class CommandHandlers:
         return
 
     async def _command_model(self, text, user, chat_id, helpers):
-        has_effort_picker = helpers.has_effort_picker
+        has_effort_picker = self._has_model_effort_picker
         model_health_text = helpers.model_health_text
         parts = text.split(maxsplit=1)
         target = parts[1].strip() if len(parts) > 1 else ""
@@ -321,7 +321,7 @@ class CommandHandlers:
                            f"⚠️ {resolved} is currently marked unavailable. Run /model refresh to check again or choose an available model."),
             )
             return
-        self.store.set_model(user, resolved)
+        self.store.set_model(user, resolved, exact=resolved in self._variant_ids())
         alias_note = (self._text(user, f"（由别名 '{target}' 解析）", f" (resolved from alias '{target}')")
                       if resolved != target else "")
         if not has_effort_picker(resolved):

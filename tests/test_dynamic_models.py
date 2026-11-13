@@ -141,3 +141,14 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
         for invalid in ([], ["bad;id"], ["same", "same"], ["model"] * 129):
             with self.assertRaises(ValueError):
                 self.store.set_model_catalog(invalid)
+
+    async def test_returned_slug_is_never_rewritten_by_a_legacy_alias(self):
+        self.runner.list_models.return_value = ("claude-sonnet-5-5",)
+        await self.handle(update("/model"))
+        await self.handle(callback_update("model:claude-sonnet-5-5"))
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5")
+        # No unsupported reasoning choices are invented for an unsuffixed entry.
+        actions = [b["callback_data"] for row in self.api.edits[-1][2]["inline_keyboard"] for b in row]
+        self.assertFalse(any(a.startswith(("choose:", "effort:")) for a in actions))
+        await self.handle(update("/model sonnet"))
+        self.assertEqual(self.store.get_model(12345), "claude-sonnet-5-5")

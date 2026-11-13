@@ -223,17 +223,17 @@ class Store:
             return None
         model = value.get("model")
         if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
-            return resolve_model(model)
+            return model if value.get("exact") is True else resolve_model(model)
         return None
 
-    def set_model(self, user: int, model: str | None) -> None:
+    def set_model(self, user: int, model: str | None, *, exact: bool = False) -> None:
         path = self._model_path(user)
         if model is None:
             path.unlink(missing_ok=True)
             return
         if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9._-]{2,64}", model):
             raise ValueError("Invalid model name")
-        atomic_json(path, {"user_id": user, "model": model, "updated_at": time.time()})
+        atomic_json(path, {"user_id": user, "model": model, "exact": exact, "updated_at": time.time()})
 
     def _model_health_path(self) -> Path:
         return self.directory / "model-health.json"
