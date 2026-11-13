@@ -194,3 +194,7 @@ Markdown 显示新增 28 项回归，完整测试共 376 项：代码围栏与�
 
 功能提交 `11cd6637138feb5526bc88f41dee17e031377a6c` 的[完整 PR 检查](https://github.com/shixiaoheia/agy-telegram-remote/actions/runs/43388694243)通过：569 项离线测试（2 项按环境跳过）、Python 3.10–3.13 常规/私有 umask、ARM64、Debian 12 账号、两种架构的代理与 systemd 回退，以及独立更新器的真实服务交接和固定提交参数校验。发布说明整理后继续检查最终提交与合并结果；目标 VPS 与真实 Google/Telegram 交互未验收。
 
+
+## 安装自检隔离修复
+
+安装器自检以 nobody 和空环境执行，不继承 Token/代理凭据。卸载夹具的 unit 与引擎路径跟随临时安装根目录。离线测试验证路径边界，实际 root CI 调用自检并验证其非 root 身份以及不能改写 root 所有的文件。

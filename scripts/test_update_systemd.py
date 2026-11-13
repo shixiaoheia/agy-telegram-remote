@@ -82,6 +82,29 @@ if (validate_bot_update); then exit 1; fi
 ''', "_", str(ROOT / "install.sh"), str(base)], check=True, timeout=10,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print("Pinned noninteractive update flags passed")
+            # Run the installed self-check launcher under actual root, while
+            # the fixture proves it cannot write root-owned deployment files.
+            base.chmod(0o755)
+            fixture = base / "offline-fixture"
+            fixture.mkdir(mode=0o755)
+            tests = fixture / "tests"
+            tests.mkdir(mode=0o755)
+            protected = fixture / "production-marker"
+            protected.write_text("preserve")
+            protected.chmod(0o644)
+            test = tests / "test_unprivileged.py"
+            test.write_text(
+                "import os,pathlib,unittest\n"
+                "class Identity(unittest.TestCase):\n"
+                " def test_unprivileged(self):\n"
+                "  self.assertNotEqual(os.geteuid(),0)\n"
+                "  self.assertNotIn('TELEGRAM_BOT_TOKEN',os.environ)\n"
+                f"  with self.assertRaises(PermissionError): pathlib.Path({str(protected)!r}).write_text('bad')\n")
+            test.chmod(0o644)
+            subprocess.run(["/bin/bash", "-c", 'source "$1"; run_offline_tests "$2"',
+                            "_", str(ROOT / "install.sh"), str(fixture)], check=True, timeout=15)
+            assert protected.read_text() == "preserve"
+            print("Installer offline self-check runs unprivileged and preserves root files")
         finally:
             for name in (bot, worker):
                 ctl("stop", name, check=False)

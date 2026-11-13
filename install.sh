@@ -245,6 +245,17 @@ as_user() {
     "$@"
 }
 
+run_offline_tests() (
+  local stage="$1"
+  command -v runuser >/dev/null || fail '缺少非 root 自检工具 runuser；未停止旧服务。'
+  id -u nobody >/dev/null 2>&1 || fail '缺少 nobody 自检账户；未停止旧服务。'
+  cd -- "$stage"
+  runuser -u nobody -- /usr/bin/env -i \
+    HOME=/nonexistent USER=nobody LOGNAME=nobody PATH=/usr/bin:/bin \
+    LANG=C.UTF-8 TERM=dumb \
+    /usr/bin/python3 -I -B -m unittest discover -s "$stage/tests" -q
+)
+
 report_service_state() {
   local state
   if ! state="$(systemctl show "$SERVICE" -p ActiveState --value 2>/dev/null)"; then
@@ -600,9 +611,12 @@ validate_release_files() {
 
 uninstall() {
   local answer managed_agy='' directory configured_input='' managed_proxy=0 managed_engine=0 managed_drop=0
-  local proxy_unit=/etc/systemd/system/agy-telegram-proxy.service
-  local proxy_drop=/etc/systemd/system/agy-telegram-remote.service.d/90-agy-managed-proxy.conf
-  local proxy_engine=/opt/agy-telegram-remote-proxy
+  local systemd_dir
+  systemd_dir="$(dirname -- "$UNIT")"
+  local proxy_unit="$systemd_dir/agy-telegram-proxy.service"
+  local proxy_drop="$systemd_dir/agy-telegram-remote.service.d/90-agy-managed-proxy.conf"
+  local proxy_engine="$(dirname -- "$APP")/agy-telegram-remote-proxy"
+  local UPDATE_UNIT="$systemd_dir/agy-telegram-update.service"
   [[ ! -L "$proxy_unit" && ! -L "$(dirname -- "$proxy_drop")" && ! -L "$proxy_drop" && ! -L "$proxy_engine" ]] \
     || fail '代理相关路径是符号链接，请人工检查。'
   if [[ -f "$proxy_unit" ]] && head -n 1 "$proxy_unit" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.'; then
@@ -889,7 +903,7 @@ main() {
   echo '正在检查本地代码和 Telegram Bot……'
   local test_log
   test_log="$(mktemp "$RELEASES/.tests-XXXXXXXX")"
-  if ! as_user /usr/bin/python3 -I -B -m unittest discover -s "$STAGE/tests" -q > "$test_log" 2>&1; then
+  if ! run_offline_tests "$STAGE" > "$test_log" 2>&1; then
     tail -n 80 "$test_log" >&2
     fail '离线自检失败，旧服务尚未被停止。'
   fi

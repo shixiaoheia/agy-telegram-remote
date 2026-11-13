@@ -73,6 +73,39 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--uninstall", result.stderr)
 
+    def test_uninstall_proxy_checks_follow_the_selected_unit_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            drop = base / "agy-telegram-remote.service.d"
+            drop.mkdir()
+            outside = base / "outside"
+            outside.write_text("preserve")
+            (drop / "90-agy-managed-proxy.conf").symlink_to(outside)
+            script = r'''
+source "$1"
+UNIT="$2/service"; APP="$2/app"; CONFIG="$2/missing"; APP_HOME="$2/home"
+systemctl() { echo invoked > "$2/invoked"; }
+echo y | uninstall
+'''
+            result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), str(base)],
+                                    capture_output=True, text=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("代理相关路径是符号链接", result.stderr)
+            self.assertEqual(outside.read_text(), "preserve")
+
+    def test_offline_launcher_targets_nobody_with_an_empty_environment(self):
+        script = r'''
+source "$1"
+runuser() { printf '%s\n' "$@"; }
+run_offline_tests "$2"
+'''
+        with tempfile.TemporaryDirectory() as temp:
+            result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), temp],
+                                    capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("-u\nnobody\n--\n/usr/bin/env\n-i\n", result.stdout)
+        self.assertIn("/usr/bin/python3\n-I\n-B\n-m\nunittest", result.stdout)
+
     def test_purge_removes_all_project_components_but_not_workspace(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)

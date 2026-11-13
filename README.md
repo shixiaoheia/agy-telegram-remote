@@ -15,7 +15,7 @@
 
 > 这是给自己或完全信任的人使用的工具。它能在服务器工作目录中执行 AI 任务，请不要把 Bot Token 或白名单权限交给陌生人。
 
-**当前发布：[v2026.11.13](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13)** · [更新日志](CHANGELOG.md)
+**当前发布：[v2026.11.13.1](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.1)** · [更新日志](CHANGELOG.md)
 
 本版模型菜单按当前 Google 账号动态刷新，并支持主管理员使用 `/update` 从 GitHub 更新机器人。旧安装需先使用本版安装脚本更新一次，再启用机器人内更新。
 
@@ -217,7 +217,7 @@ pid=$(systemctl show agy-telegram-remote -p MainPID --value)
 首次启用本版功能，登录 VPS 执行下面的固定版本命令：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13/install.sh -o install.sh && bash install.sh --ref v2026.11.13
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.1/install.sh -o install.sh && bash install.sh --ref v2026.11.13.1
 ```
 
 带 `--ref` 的命令会直接沿用现有配置执行更新。完成后发送 `/status` 核对部署版本，再打开 `/model` 检查动态菜单。以后 GitHub `main` 有新提交时，可直接在机器人私聊发送 `/update`。
