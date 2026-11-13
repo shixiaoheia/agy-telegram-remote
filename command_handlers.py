@@ -60,7 +60,7 @@ class CommandHandlers:
                                "/history — recent tasks\n/last — latest result\n/new or /reset — new conversation\n"
                                "/usage — usage statistics\n/ls or /files — browse workspace files\n"
                                "/sys or /system — server status\n/whitelist — manage authorized users\n"
-                               "/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
+                               "/update — update from GitHub (owner only)\n/restart — restart when idle (owner only)\n/id — Telegram numeric ID\n"
                                "/language — select language\n/help — this menu\n"
                                "Attachments: up to 10 files, 10 MB each and 30 MB per group.")
             return
@@ -79,7 +79,7 @@ class CommandHandlers:
             "• 📁 /ls 或 /files - 速览工作空间最近修改的文件列表\n"
             "• 🖥️ /sys 或 /system - 实时查看 VPS 硬件负载、CPU、内存与运行时间\n"
             "• 👥 /whitelist - 管理授权白名单用户（仅主管理员）\n"
-            "• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
+            "• 📥 /update - 从 GitHub 更新机器人（仅主管理员）\n• 🔄 /restart - 重新载入并启动守护进程（仅主管理员）\n\n"
             "【🛑 任务控制与基础】\n"
             "• 🛑 /cancel - 立即取消正在执行的任务\n"
             "• ⏳ /queue - 查看等待任务；/queue add <内容> 排队，/queue cancel 取消等待\n"
@@ -337,6 +337,30 @@ class CommandHandlers:
         self.queue_reply(chat_id, system_status(self.settings.workspace, self._started_at, self.store.get_language(user)))
         return
 
+    async def _command_update(self, text, user, chat_id, helpers):
+        if user != self.settings.owner_id:
+            self.queue_reply(chat_id, self._text(user, "⚠️ 仅主管理员可以更新机器人。", "⚠️ Only the owner can update the bot."))
+            return
+        parts = text.split()
+        if len(parts) == 2 and parts[1].lower() == "status":
+            try:
+                status = helpers.read_update_status(self.settings.state_dir)
+                self.queue_reply(chat_id, helpers.update_status_text(status, self.store.get_language(user)))
+            except (OSError, ValueError):
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法读取更新记录，请检查 VPS。", "⚠️ Cannot read the update record; check the VPS."))
+            return
+        if len(parts) != 1:
+            self.queue_reply(chat_id, self._text(user, "用法：/update 更新 GitHub main；/update status 查看结果。", "Use /update for GitHub main or /update status for the result."))
+            return
+        if self._restart_pending():
+            self.queue_reply(chat_id, self._text(user, "⏳ 更新或重启已经安排，请稍候。", "⏳ An update or restart is already scheduled."))
+            return
+        if (self._restart_busy() or self.waiting_jobs or self.unsaved_results or self.unreadable_recovery
+                or self.runner.blocked):
+            self.queue_reply(chat_id, self._text(user, "⚠️ 请先完成任务、清空等待队列并保存未恢复的结果，再更新机器人。", "⚠️ Finish active tasks, clear the waiting queue and save unrecovered results before updating."))
+            return
+        self.restart_task = asyncio.create_task(self._do_update(user, chat_id))
+
     async def _command_restart(self, text, user, chat_id, helpers):
         admin_id = self.settings.owner_id
         if user != admin_id:
@@ -572,6 +596,7 @@ class CommandHandlers:
             '/sys': self._command_sys,
             '/system': self._command_sys,
             '/restart': self._command_restart,
+            '/update': self._command_update,
             '/whitelist': self._command_whitelist,
             '/mode': self._command_mode,
             '/ls': self._command_ls,

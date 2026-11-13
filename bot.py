@@ -28,6 +28,7 @@ from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, EN_OUTCOME_HELP, bo
 from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import ConfigError, MODEL_RE, resolve_model, Settings
 from state_store import Store, atomic_json
+from updater import SERVICE as UPDATE_SERVICE, TERMINAL as UPDATE_TERMINAL, read_status as read_update_status, status_text as update_status_text, systemctl as update_systemctl
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 from telegram_formatting import (clean_model_reply, control_html, html_chunks,
                                  plain_html_text, render_markdown_html)
@@ -987,7 +988,17 @@ class Bridge(CommandHandlers):
         return text
 
     def _restart_pending(self) -> bool:
-        return self.restart_task is not None and not self.restart_task.done()
+        if self.restart_task is not None and not self.restart_task.done():
+            return True
+        # A newly started bot must wait for the external updater's readiness
+        # check and final transaction result before accepting work.
+        try:
+            status = read_update_status(self.settings.state_dir)
+            stamp = status.get("updated_at", 0)
+            return (status.get("phase") in {"checking", "installing"}
+                    and type(stamp) in {int, float} and 0 <= time.time() - stamp < 1800)
+        except (OSError, ValueError):
+            return False
 
     def _restart_busy(self) -> bool:
         return (self.slot is not None or self.pending_album is not None
@@ -1009,6 +1020,49 @@ class Bridge(CommandHandlers):
         except Exception as error:
             LOG.error("restart_exit_failed type=%s", type(error).__name__)
             self.queue_reply(self.settings.owner_id, self._text(self.settings.owner_id, "⚠️ 重新载入失败，请检查服务器后重试。", "⚠️ Restart failed; check the server before retrying."))
+        finally:
+            self.restart_task = None
+
+    async def _do_update(self, user: int, chat_id: int) -> None:
+        try:
+            # Reserve restart_task before yielding, so tasks and another update
+            # cannot enter while the external service is starting.
+            if (self._restart_busy() or self.waiting_jobs or self.unsaved_results
+                    or self.unreadable_recovery or self.stop.is_set()):
+                self.queue_reply(chat_id, self._text(user, "⚠️ 当前状态已变化，本次未开始更新。", "⚠️ State changed; the update was not started."))
+                return
+            if await update_systemctl("is-active", "--quiet", UPDATE_SERVICE) == 0:
+                self.queue_reply(chat_id, self._text(user, "⏳ 更新服务正在运行，可用 /update status 查看。", "⏳ The updater is running; use /update status."))
+                return
+            nonce = uuid.uuid4().hex
+            atomic_json(self.settings.state_dir / "update-request.json", {
+                "request_id": nonce, "created_at": time.time(), "language": self.store.get_language(user),
+            })
+            atomic_json(self.settings.state_dir / "update-status.json", {
+                "request_id": nonce, "phase": "requested", "updated_at": time.time(),
+            })
+            if await update_systemctl("start", "--no-block", UPDATE_SERVICE) != 0:
+                atomic_json(self.settings.state_dir / "update-status.json", {
+                    "request_id": nonce, "phase": "unavailable", "updated_at": time.time(),
+                })
+                self.queue_reply(chat_id, self._text(user, "⚠️ 无法启动更新服务。请先在 VPS 安装一次支持 /update 的版本。", "⚠️ Cannot start the updater. Install a version with /update support on the VPS once first."))
+                return
+            self.queue_reply(chat_id, self._text(user, "🔄 已开始检查 GitHub main，发现新版后自动更新并重启；结果会发回这里。可用 /update status 查看。", "🔄 Checking GitHub main; a new version will be installed and restarted automatically. The result will be sent here; use /update status."))
+            for second in range(1250):
+                await asyncio.sleep(1)
+                status = read_update_status(self.settings.state_dir)
+                if status.get("request_id") == nonce and status.get("phase") in UPDATE_TERMINAL:
+                    return  # The independent worker sends its durable final result.
+                if second >= 10 and second % 5 == 0 and await update_systemctl("is-active", "--quiet", UPDATE_SERVICE) != 0:
+                    self.queue_reply(chat_id, self._text(user, "⚠️ 更新服务已退出但没有完成记录，请用 /update status 查看并检查 VPS。", "⚠️ The updater exited without a completed record. Use /update status and check the VPS."))
+                    return
+            self.runner.blocked = True
+            self.queue_reply(chat_id, self._text(user, "⚠️ 更新状态超时未确认，已暂停新任务，请检查 VPS。", "⚠️ Update completion is unconfirmed; new tasks are paused. Check the VPS."))
+        except asyncio.CancelledError:
+            raise  # Stopping the bot does not stop the separate updater cgroup.
+        except Exception as error:
+            LOG.warning("bot_update_failed type=%s", type(error).__name__)
+            self.queue_reply(chat_id, self._text(user, "⚠️ 无法确认更新状态，请检查 /update status 和 VPS。", "⚠️ Update status is unconfirmed; check /update status and the VPS."))
         finally:
             self.restart_task = None
 
@@ -2626,7 +2680,7 @@ class Bridge(CommandHandlers):
             command = ""
             force_queue = True
         if not command and self._restart_pending():
-            self.queue_reply(chat_id, self._text(user, "⏳ 正在重新载入服务，请稍后再发送任务或附件。", "⏳ The service is restarting. Send the task or attachment again later."))
+            self.queue_reply(chat_id, self._text(user, "⏳ 正在更新或重新载入服务，请稍后再发送任务或附件。", "⏳ The service is updating or restarting. Send the task or attachment again later."))
             return
         if not command and any(not task.done() for task in self.steer_tasks):
             self.queue_reply(chat_id, self._text(user, "⏳ 正在交接修正任务，请等待清理和交接完成。", "⏳ A corrected task is being handed over. Wait for cleanup to finish."))

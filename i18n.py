@@ -19,6 +19,7 @@ _COMMANDS = (
     ("usage", "查看 Token 用量", "Token usage"),
     ("last", "查看最近一次结果", "Latest result"),
     ("history", "查看最近 10 条任务", "Recent tasks"),
+    ("update", "从 GitHub 更新机器人（仅主管理员）", "Update from GitHub (owner only)"),
 )
 
 
