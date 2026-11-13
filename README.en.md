@@ -6,7 +6,7 @@ Control the Google Antigravity CLI (`agy`) in a private Telegram chat on your VP
 
 > This is a tool for you and people you fully trust. It can execute tasks on your server. Keep the bot token and whitelist private.
 
-**Current release: [v2026.11.13.1](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.1)** · [Changelog](CHANGELOG.md)
+**Current release: [v2026.11.13.2](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.2)** · [Changelog](CHANGELOG.md)
 
 This release adds account-based dynamic model discovery and owner-only `/update` from Telegram. Existing installations need one VPS update with the new installer before remote updates are available.
 
@@ -60,6 +60,8 @@ Up to three text tasks can wait in the queue; attachments cannot be queued. Save
 
 Language preference is saved per authorized user. Your task text, file names, model replies, and externally supplied error text remain in their original language. Historical records created before this update may contain older Chinese labels. The installer remains in Chinese.
 
+Completed task results are sent as new messages, while the original progress card closes with the final status. Notifications follow your Telegram and device settings, including when you leave the chat. Long results remain paginated; saved results can be retrieved without rerunning the task.
+
 ## Troubleshooting
 
 Run the installer and choose `5`, or run `bash install.sh --diagnose`, to inspect bot and managed proxy status. Telegram 409 can indicate another instance is polling the same bot. Check other devices before restarting; do not repeatedly launch competing instances.
@@ -110,7 +112,7 @@ Configuration, proxy, Google login, permissions, history and model choices are r
 To bootstrap this release on an existing VPS with its saved configuration:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.1/install.sh -o install.sh && bash install.sh --ref v2026.11.13.1
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.2/install.sh -o install.sh && bash install.sh --ref v2026.11.13.2
 ```
 
 The explicit `--ref` bypasses the menu. Verify `/status` and `/model` afterward; future updates merged into `main` can be installed through `/update`.

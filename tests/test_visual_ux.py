@@ -109,17 +109,22 @@ class VisualCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('choose:gemini-3.8-flash-medium', callbacks)
         self.assertTrue(all(len(row) <= 2 for row in picker['inline_keyboard']))
 
-    async def test_short_result_replaces_same_message_and_keeps_buttons(self):
+    async def test_short_result_sends_new_message_and_closes_progress_card(self):
         self.runner.result = Result('success', text='**final answer**', model='gemini-3.8-flash-low')
         await self.bridge.handle(update('original question'))
         job = self.bridge.slot
         await job.worker
-        self.assertEqual(self.api.sent_count, 1)
-        self.assertEqual(len(self.api.messages), 1)
-        message = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertEqual(self.api.sent_count, 2)
+        self.assertEqual(len(self.api.messages), 2)
+        progress = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertIn('任务完成', progress[1])
+        self.assertIn('结果已发送', progress[1])
+        self.assertNotIn('final answer', progress[1])
+        self.assertNotIn('cancel:', str(progress[2]))
+        message = self.api.sent_messages[-1]
         self.assertIn('<b>final answer</b>', message[1])
         self.assertIn('original question', message[1])
-        self.assertEqual(self.api.edit_parse_modes[-1], 'HTML')
+        self.assertEqual(self.api.parse_modes[-1], 'HTML')
         self.assertEqual(message[2]['inline_keyboard'][0][0]['callback_data'], f'history:{job.job_id}')
         self.assertNotIn('cancel:', str(message[2]))
         self.assertEqual(self.store.load(12345)['delivery'], 'sent')
@@ -157,9 +162,11 @@ class VisualCardTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(update('long question'))
         job = self.bridge.slot
         await job.worker
-        first = self.api.messages[self.api.message_indices[job.status_message_id]]
+        progress = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertIn('结果已发送', progress[1])
+        first = self.api.sent_messages[1]
         self.assertIn('第 1/', first[1])
-        self.assertEqual(first[2], {'inline_keyboard': []})
+        self.assertIsNone(first[2])
         for message in self.api.sent_messages[1:-1]:
             self.assertIsNone(message[2])
         self.assertIn('第 ', self.api.sent_messages[-1][1])
@@ -168,15 +175,16 @@ class VisualCardTests(unittest.IsolatedAsyncioTestCase):
         for _, body, _ in self.api.messages:
             validate(body)
 
-    async def test_later_page_failure_preserves_already_replaced_first_page(self):
+    async def test_later_page_failure_preserves_already_sent_first_page(self):
         self.runner.result = Result('success', text='UNIQUE_FIRST\n' + 'long text\n' * 1000)
-        self.api.fail_at = {2}
+        self.api.fail_at = {3}
         await self.bridge.handle(update('long question'))
         job = self.bridge.slot
         await job.worker
-        first = self.api.messages[self.api.message_indices[job.status_message_id]]
+        first = self.api.sent_messages[1]
         self.assertIn('UNIQUE_FIRST', first[1])
-        self.assertIn('结果发送失败或不完整', self.api.messages[-1][1])
+        progress = self.api.messages[self.api.message_indices[job.status_message_id]]
+        self.assertIn('结果发送失败或不完整', progress[1])
         self.assertEqual(self.store.load(12345)['delivery'], 'failed_or_partial')
         self.assertEqual(self.runner.calls, 1)
         self.assertEqual(sum('UNIQUE_FIRST' in body for _, body, _ in self.api.messages), 1)

@@ -181,7 +181,7 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.05)
         self.assertEqual(self.card(job)[1], shown)
 
-    async def test_completion_drains_requested_edit_before_replacing_card(self):
+    async def test_completion_drains_requested_edit_before_sending_result(self):
         entered, release = asyncio.Event(), asyncio.Event()
         original = self.api.edit
         async def edit(*args, **kwargs):
@@ -200,7 +200,8 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
         await asyncio.wait_for(job.worker, 2)
-        self.assertIn("the result", self.card(job)[1])
+        self.assertIn("the result", self.api.sent_messages[-1][1])
+        self.assertIn("任务完成", self.card(job)[1])
         self.assertNotIn("📖 阅读中", self.card(job)[1])
         self.assertNotIn("progress:", str(self.card(job)[2]))
 

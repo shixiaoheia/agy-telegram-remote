@@ -1654,15 +1654,18 @@ class Bridge(CommandHandlers):
                 await self._finish_progress(job, result.outcome)
             delivered = True if job.steered else await self.send_html(
                 job.chat, self._render_result(job.user, record), reply_markup=self._completion_buttons(job),
-                message_id=job.status_message_id, delivery_job=job,
+                delivery_job=job,
             )
             final_record = self.store.save(job.user, record | {
                 "delivery": "superseded_by_steer" if job.steered else ("sent" if delivered else "failed_or_partial")
             })
             self.store.save_history(job.user, job.history_title, final_record)
-            card_updated = True if job.steered or delivered else False
-            if not card_updated and not job.result_started:
-                card_updated = await self._finish_progress(job, result.outcome, final_record["delivery"])
+            # A fresh result message can notify users who have left Telegram.
+            # Keep progress edits in their original card and close it separately;
+            # never replace or replay a result page that was already sent.
+            card_updated = True if job.steered else await self._finish_progress(
+                job, result.outcome, final_record["delivery"],
+            )
             if not delivered and not card_updated:
                 await self.send_text(
                     job.chat,

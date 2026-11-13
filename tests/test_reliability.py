@@ -411,7 +411,8 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         job = self.bridge.slot
         await job.worker
         card = self.api.messages[self.api.message_indices[job.status_message_id]]
-        self.assertIn("the result", card[1])
+        self.assertIn("任务完成", card[1])
+        self.assertIn("the result", self.api.sent_messages[-1][1])
         buttons = [b["callback_data"] for row in card[2]["inline_keyboard"] for b in row]
         self.assertEqual(buttons, [f"history:{job.job_id}", "tasks:history", "tasks:new"])
         await self.bridge.handle(callback_update(buttons[0]))
@@ -480,7 +481,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runner.calls, 1)
 
     async def test_delivery_failure_updates_card_and_retrieval_does_not_rerun(self):
-        self.api.fail_html_edits = True
+        self.api.fail_at = {2}
         await self.bridge.handle(update("safe task"))
         job = self.bridge.slot
         await job.worker
@@ -502,11 +503,12 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         await job.worker
         card = self.api.messages[self.api.message_indices[job.status_message_id]]
         self.assertIn("执行异常", card[1])
-        self.assertIn("fixture error", card[1])
+        self.assertIn("fixture error", self.api.sent_messages[-1][1])
         self.assertEqual(self.store.load(12345)["delivery"], "sent")
         self.assertNotIn("任务完成", card[1])
 
     async def test_failed_result_and_card_edit_send_short_retrieval_notice(self):
+        self.api.fail_at = {2}
         self.api.edit = AsyncMock(side_effect=TelegramError())
         await self.bridge.handle(update("safe task"))
         job = self.bridge.slot
@@ -514,7 +516,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("结果发送失败或不完整", self.api.messages[-1][1])
         buttons = self.api.messages[-1][2]["inline_keyboard"]
         self.assertEqual(buttons[0][0]["callback_data"], f"history:{job.job_id}")
-        self.assertEqual(self.api.sent_count, 2)
+        self.assertEqual(self.api.sent_count, 3)
         self.assertEqual(self.runner.calls, 1)
         self.assertEqual(self.store.load(12345)["delivery"], "failed_or_partial")
 
@@ -671,7 +673,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.store.set_mode(12345, "plan")
         for delivery in ("sent", "failed_or_partial"):
             if delivery != "sent":
-                self.api.fail_html_edits = True
+                self.api.fail_at.add(self.api.sent_count + 2)
             await self.bridge.handle(update("check the project"))
             await self.bridge.slot.worker
             last = self.store.load(12345)
