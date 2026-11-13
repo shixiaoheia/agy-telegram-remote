@@ -94,15 +94,17 @@ if (validate_bot_update); then exit 1; fi
             protected.chmod(0o644)
             test = tests / "test_unprivileged.py"
             test.write_text(
-                "import os,pathlib,unittest\n"
+                "import os,pathlib,sys,unittest\n"
                 "class Identity(unittest.TestCase):\n"
                 " def test_unprivileged(self):\n"
                 "  self.assertNotEqual(os.geteuid(),0)\n"
                 "  self.assertNotIn('TELEGRAM_BOT_TOKEN',os.environ)\n"
+                "  self.assertEqual(sys.stdin.read(1),'')\n"
                 f"  with self.assertRaises(PermissionError): pathlib.Path({str(protected)!r}).write_text('bad')\n")
             test.chmod(0o644)
             subprocess.run(["/bin/bash", "-c", 'source "$1"; run_offline_tests "$2"',
-                            "_", str(ROOT / "install.sh"), str(fixture)], check=True, timeout=15)
+                            "_", str(ROOT / "install.sh"), str(fixture)], check=True, timeout=15,
+                           input="installer-answer\n", text=True)
             assert protected.read_text() == "preserve"
             print("Installer offline self-check runs unprivileged and preserves root files")
         finally:
