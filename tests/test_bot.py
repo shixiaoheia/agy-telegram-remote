@@ -329,7 +329,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         await self.finish_job()
 
     async def test_delivery_failure_keeps_result_without_rerun(self):
-        self.api.fail_html_edits = True
+        self.api.fail_at = {2}
         await self.handle(update("task"))
         await self.finish_job()
         self.assertEqual(self.runner.calls, 1)
@@ -346,14 +346,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.load(12345)["outcome"], "not_started")
 
     async def test_result_saved_before_delivery(self):
-        original_edit = self.api.edit
+        original_send = self.api.send
         checked_results = []
-        async def checked(chat, message_id, text, **kwargs):
+        async def checked(chat, text, **kwargs):
             if "the result" in text:
                 self.assertEqual(self.store.load(12345)["text"], "the result")
-                checked_results.append(message_id)
-            return await original_edit(chat, message_id, text, **kwargs)
-        self.api.edit = checked
+                checked_results.append(text)
+            return await original_send(chat, text, **kwargs)
+        self.api.send = checked
         await self.handle(update("task"))
         await self.finish_job()
         self.assertEqual(len(checked_results), 1)

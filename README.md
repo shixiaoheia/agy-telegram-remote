@@ -15,7 +15,7 @@
 
 > 这是给自己或完全信任的人使用的工具。它能在服务器工作目录中执行 AI 任务，请不要把 Bot Token 或白名单权限交给陌生人。
 
-**当前发布：[v2026.11.13.1](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.1)** · [更新日志](CHANGELOG.md)
+**当前发布：[v2026.11.13.2](https://github.com/shixiaoheia/agy-telegram-remote/releases/tag/v2026.11.13.2)** · [更新日志](CHANGELOG.md)
 
 本版模型菜单按当前 Google 账号动态刷新，并支持主管理员使用 `/update` 从 GitHub 更新机器人。旧安装需先使用本版安装脚本更新一次，再启用机器人内更新。
 
@@ -119,7 +119,7 @@ pid=$(systemctl show agy-telegram-remote -p MainPID --value)
 
 回复和历史保留原始 Markdown；发送到 Telegram 时转换为其支持的格式，显示标题、加粗/斜体、代码、原生引用、链接和列表。代码内容不会被当作表格或图示再次转换，长回复分页会保留完整的格式标签和转义字符。普通消息无法完整表达的表格会转为逐项字段，复杂或未完整闭合的语法保持可读文字；格式被明确拒绝时备用文本仍保留链接地址。这里不是完整的网页 Markdown 渲染器。
 
-短回复直接替换原进度气泡，长回复继续分页，只有最后一页提供“查看结果”“最近任务”“新建对话”按钮。“查看结果”取回该次任务的已保存记录，不重新执行；旧按钮仍定位原任务。若结果发送失败或不完整，会提示已保存的结果及按钮和 `/last` 取回入口。后续页失败不会覆盖已经显示的首屏；网络结果不明时不重发答案。执行状态与发送状态分别记录，发送成功不代表任务执行成功。
+任务结束后，结果作为新消息发送，原进度卡收尾显示完成或异常状态；退出聊天后也能按 Telegram 和系统通知设置收到提醒。长回复继续分页，只有最后一页提供“查看结果”“最近任务”“新建对话”按钮。“查看结果”取回该次任务的已保存记录，不重新执行；旧按钮仍定位原任务。若结果发送失败或不完整，会提示已保存的结果及按钮和 `/last` 取回入口。后续页失败不会覆盖已经发送的首屏；网络结果不明时不重发答案。执行状态与发送状态分别记录，发送成功不代表任务执行成功。
 
 如果服务器存储故障导致结果无法保存，机器人会暂时在内存中保留限长的结果，并提示先修复存储。之后发送 `/last`，系统先保存再发送，不重新运行任务；临时结果在服务重启后会丢失。该用户的新任务会等结果保存成功，其他用户不因此被全局暂停。
 
@@ -217,7 +217,7 @@ pid=$(systemctl show agy-telegram-remote -p MainPID --value)
 首次启用本版功能，登录 VPS 执行下面的固定版本命令：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.1/install.sh -o install.sh && bash install.sh --ref v2026.11.13.1
+curl -fsSL https://raw.githubusercontent.com/shixiaoheia/agy-telegram-remote/v2026.11.13.2/install.sh -o install.sh && bash install.sh --ref v2026.11.13.2
 ```
 
 带 `--ref` 的命令会直接沿用现有配置执行更新。完成后发送 `/status` 核对部署版本，再打开 `/model` 检查动态菜单。以后 GitHub `main` 有新提交时，可直接在机器人私聊发送 `/update`。
