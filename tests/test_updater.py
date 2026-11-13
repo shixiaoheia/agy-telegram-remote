@@ -97,6 +97,14 @@ class UpdateWorkerTests(unittest.TestCase):
         latest.assert_called_once()
         self.sent.assert_awaited_once()
 
+    def test_notification_failure_does_not_erase_or_replay_completed_update(self):
+        self.sent.side_effect = OSError("offline")
+        with patch("updater.latest_revision", return_value=self.old) as latest:
+            self.assertEqual(self.apply(), 0)
+            self.assertEqual(self.apply(), 0)
+        latest.assert_called_once()
+        self.assertEqual(updater.read_status(self.settings.state_dir)["phase"], "current")
+
     def test_expired_or_malformed_request_never_fetches_code(self):
         for nonce, stamp in ((self.request_id, time.time() - 901), ("bad", time.time()), (self.request_id, float("inf"))):
             # JSON itself rejects non-finite timestamps; use a future finite one.
@@ -162,6 +170,36 @@ class UpdateWorkerTests(unittest.TestCase):
         self.assertNotIn("PartOf=", unit)
         self.assertNotIn("BOT_TOKEN", unit)
         self.assertNotIn("--dangerously", unit)
+
+    def test_installer_rollback_restores_or_removes_update_unit_transactionally(self):
+        for existing in (True, False):
+            backup = self.base / ("backup-old" if existing else "backup-new")
+            backup.mkdir()
+            unit = self.base / ("unit-old" if existing else "unit-new")
+            unit.write_text("new unit")
+            if existing:
+                (backup / "update-service").write_text("old unit")
+            script = '''
+source "$1"
+BACKUP="$2"; UPDATE_UNIT="$3"; UPDATE_UNIT_CHANGED=1
+systemctl() { return 0; }
+report_service_state() { :; }
+rollback
+'''
+            subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), str(backup), str(unit)],
+                           check=True, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.assertEqual(unit.read_text() if unit.exists() else None, "old unit" if existing else None)
+
+    def test_installer_rejects_linked_update_unit_before_executing_source(self):
+        target = self.base / "foreign"
+        target.write_text("do not change")
+        link = self.base / "unit-link"
+        link.symlink_to(target)
+        result = subprocess.run(["bash", "-c", 'source "$1"; UPDATE_UNIT="$2"; BACKUP="$3"; install_update_unit "$3"',
+                                 "_", str(ROOT / "install.sh"), str(link), str(self.base)],
+                                timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(target.read_text(), "do not change")
 
 
 class BotUpdateTests(unittest.IsolatedAsyncioTestCase):

@@ -94,3 +94,11 @@ Join the [Telegram community](https://t.me/xiaoheidemimi). The project also list
 Listing sends no chat prompts. Visibility does not guarantee quota, regional eligibility, or a successful request. Failed lookups preserve a clearly marked cached snapshot; without a snapshot, no candidate models are invented. Busy tasks defer lookup until the menu is reopened while idle. Failed automatic lookups have a 15-second cooldown. An upstream CLI interface/format change can still require a software update.
 
 The optional **Check current model** / `/model check` consumes quota and remains separate from catalog refresh. Existing selections, permissions, history and running tasks are preserved. Stale buttons cannot select models missing from the refreshed catalog. Large catalogs are paginated. Legacy version aliases are retained for old settings; family shortcuts follow the current catalog.
+
+### Update from Telegram
+
+After installing a version with this feature on the VPS once, the owner can send `/update` in private chat. It checks the fixed repository's `main` branch, pins its current commit, runs offline tests and a Telegram identity check before stopping the old bot, then deploys and verifies initialization and polling readiness. Up-to-date installations are not restarted. An independent systemd updater survives bot shutdown, reuses the installer's deployment lock and rollback, and sends the final result to the owner. `/update status` retrieves the durable result if notification fails.
+
+Active tasks, attachments, model checks, waiting queues and unrecovered results block updates. Duplicate requests do not create concurrent deployments, and the new bot waits for readiness verification before accepting work. Only merged `main` code is used; arbitrary sources/arguments and unmerged PRs are not accepted. This is an explicit command, not a scheduled or push-triggered update.
+
+Configuration, proxy, Google login, permissions, history and model choices are retained. No model prompts, Google CLI upgrade, OS package upgrade or reauthentication runs during a bot update. Changes to dependencies or login can still require VPS maintenance. Failure retains or restores the previous bot; unconfirmed recovery is reported explicitly.

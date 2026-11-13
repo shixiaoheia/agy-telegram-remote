@@ -670,6 +670,14 @@ uninstall() {
       done
     fi
   fi
+  local managed_update=0
+  if [[ -e "$UPDATE_UNIT" || -L "$UPDATE_UNIT" ]]; then
+    [[ -f "$UPDATE_UNIT" && ! -L "$UPDATE_UNIT" && "$(stat -c %u "$UPDATE_UNIT")" == 0 ]] \
+      || fail '更新服务文件类型异常；未停止服务。'
+    head -n 1 "$UPDATE_UNIT" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.' \
+      || fail '更新服务不是本项目管理；未停止服务。'
+    managed_update=1
+  fi
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
   if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
     fail '服务未能停止；未移除服务文件。'
@@ -687,11 +695,7 @@ uninstall() {
     [[ "$managed_drop" == 0 ]] || rm -f -- "$proxy_drop"
     [[ "$managed_engine" == 0 ]] || rm -rf -- "$proxy_engine"
   fi
-  if [[ -e "$UPDATE_UNIT" || -L "$UPDATE_UNIT" ]]; then
-    [[ -f "$UPDATE_UNIT" && ! -L "$UPDATE_UNIT" && "$(stat -c %u "$UPDATE_UNIT")" == 0 ]] \
-      || fail '更新服务文件类型异常。'
-    head -n 1 "$UPDATE_UNIT" | grep -Fxq '# Managed by agy-telegram-remote; do not edit.' \
-      || fail '更新服务不是本项目管理，请人工检查。'
+  if [[ "$managed_update" == 1 ]]; then
     systemctl stop agy-telegram-update.service >/dev/null 2>&1 || true
     rm -f -- "$UPDATE_UNIT"
   fi
@@ -845,6 +849,10 @@ main() {
   find "$STAGE" -type d -exec chmod 0755 {} +
   find "$STAGE" -type f -exec chmod 0644 {} +
   validate_release_files "$STAGE"
+  if [[ "$BOT_UPDATE" == 1 ]]; then
+    [[ -f "$STAGE/updater.py" ]] || fail '目标版本不支持机器人更新；旧服务尚未停止。'
+    [[ "$commit" == "$REF" ]] || fail '获取的提交与固定目标不一致。'
+  fi
   echo "采用提交：$commit"
 
   if [[ "$NEW_PROXY" == 1 ]]; then
