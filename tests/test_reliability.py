@@ -186,7 +186,7 @@ class ReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.bridge.model_check_task)
 
     async def test_immediate_model_cancel_clears_reservation(self):
-        await self.bridge.handle(callback_update("probe:all"))
+        self.bridge._start_model_health_refresh(12345)
         task = self.bridge.model_check_task
         await self.bridge.handle(update("/cancel"))
         await asyncio.gather(task, return_exceptions=True)

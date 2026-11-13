@@ -703,7 +703,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.get_model(12345))
 
     async def test_model_refresh_filters_shortcuts_and_blocks_known_unavailable_model(self):
-        await self.bridge.handle(callback_update("probe:all"))
+        self.bridge._start_model_health_refresh(12345)
         check_task = self.bridge.model_check_task
         self.assertIsNotNone(check_task)
         await check_task
@@ -965,7 +965,9 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(model=old):
                 await self.handle(callback_update(f"model:{old}"))
-                self.assertIn(label, self.api.edits[-1][1])
+                self.assertNotEqual(self.store.get_model(12345), old)
+                await self.handle(update(f"/model {new}"))
+                self.assertIn(label, self.api.messages[-1][1])
                 await self.handle(callback_update(f"choose:{new}"))
                 self.assertEqual(self.store.get_model(12345), new)
                 self.assertIsNone(self.store.get_effort(12345))
@@ -1205,6 +1207,7 @@ class ReadinessTests(unittest.IsolatedAsyncioTestCase):
                            self.settings.max_reply, 7, self.settings.token)
         self.runner = FakeRunner()
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner, self.ready_file)
+        await self.bridge._ensure_model_catalog()
 
     async def asyncTearDown(self):
         self.bridge.stop.set()

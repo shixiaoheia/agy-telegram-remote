@@ -1179,7 +1179,8 @@ class Bridge(CommandHandlers):
         if self.runner.blocked:
             self.queue_reply(chat_id, self._text(chat_id, "⚠️ 新任务已暂停，请先检查服务器状态。", "⚠️ New tasks are paused; check the server first."))
             return
-        if model is not None and not MODEL_RE.fullmatch(model):
+        if model is not None and (not MODEL_RE.fullmatch(model)
+                                  or (self.model_catalog["checked_at"] and model not in self._variant_ids())):
             self.queue_reply(chat_id, self._text(chat_id, "⚠️ 请先选择有效的具体模型，再检测当前模型。", "⚠️ Select a valid specific model before checking it."))
             return
         if self._restart_pending():
