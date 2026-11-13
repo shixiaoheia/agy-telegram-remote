@@ -13,19 +13,7 @@ TOKEN_RE = re.compile(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,200}\Z")
 PATH_RE = re.compile(r"/[A-Za-z0-9_./-]+\Z")
 MODEL_RE = re.compile(r"[A-Za-z0-9._-]{2,64}\Z")
 
-# Bootstrap catalog; /model refresh discovers the installed CLI's actual slugs.
-OFFICIAL_MODELS: tuple[tuple[str, str, str], ...] = (
-    ("Gemini 4 Argon", "gemini-4-argon-high", "High 深度推理"),
-    ("Gemini 4 Argon", "gemini-4-argon-medium", "Medium 推理"),
-    *((f"Claude {family.title()} 5.5", f"claude-{family}-5-5-{level}", f"{family.title()} 5.5 ({level})")
-      for family in ("sonnet", "opus") for level in ("low", "medium", "high", "max")),
-    ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-high", "High 思考 (推荐)"),
-    ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-medium", "Medium 思考"),
-    ("Gemini 3.8 Flash (最新极速)", "gemini-3.8-flash-low", "Low 思考"),
-    ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-high", "High 深度推理 (推荐)"),
-    ("Gemini 3.1 Pro (深度推理)", "gemini-3.1-pro-low", "Low 推理"),
-)
-
+# Legacy aliases are retained only to read settings saved by older versions.
 MODEL_ALIASES: dict[str, str] = {
     "argon": "gemini-4-argon-high",
     "4": "gemini-4-argon-high",
@@ -47,15 +35,6 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-opus-5-5": "claude-opus-5-5-medium",
     "claude-opus-5-5-thinking": "claude-opus-5-5-medium",
 }
-
-
-def is_retired_model(name: str) -> bool:
-    """Explicitly removed families must not return through CLI discovery or old buttons."""
-    return re.fullmatch(
-        r"(?:gemini-3\.[67]-flash(?:-[a-z0-9-]+)?|"
-        r"claude-(?:sonnet|opus)-4-6(?:-[a-z0-9-]+)?|gpt-oss-120b(?:-[a-z0-9-]+)?|"
-        r"3\.[67](?:-(?:low|med|medium|high))?|gpt|120b)", name.strip().lower(),
-    ) is not None
 
 
 def resolve_model(name: str) -> str:

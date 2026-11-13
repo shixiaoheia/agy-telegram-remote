@@ -26,6 +26,7 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
         self.store = Store(self.settings.state_dir, self.settings.allowed, self.settings.max_reply, 7, self.settings.token)
         self.api, self.runner = FakeAPI(), FakeRunner()
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        await self.bridge._ensure_model_catalog()
         self.interval = patch("bot.PROGRESS_UPDATE_SECONDS", .01)
         self.interval.start()
 

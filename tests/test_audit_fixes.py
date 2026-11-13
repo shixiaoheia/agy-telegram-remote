@@ -27,6 +27,7 @@ class AuditFixTests(unittest.IsolatedAsyncioTestCase):
                            self.settings.max_reply, 7, self.settings.token)
         self.api, self.runner = FakeAPI(), FakeRunner()
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        await self.bridge._ensure_model_catalog()
 
     async def asyncTearDown(self):
         self.bridge.waiting_jobs.clear()

@@ -15,7 +15,7 @@ from bot import Bridge, Job, describe, describe_html
 from state_store import Store
 from telegram_api import TelegramError
 from telegram_formatting import plain_html_text
-from settings import OFFICIAL_MODELS
+from tests.model_fixture import OFFICIAL_MODELS
 
 def update(text, user=12345, chat_type="private", update_id=1):
     return {
@@ -174,6 +174,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                            self.settings.max_reply, 7, self.settings.token)
         self.api, self.runner = FakeAPI(), FakeRunner()
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        await self.bridge._ensure_model_catalog()
 
     async def asyncTearDown(self):
         self.runner.finish.set()
@@ -662,7 +663,8 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_command_show_current_and_examples(self):
         await self.handle(update("/model"))
         msg = self.api.messages[-1][1]
-        self.assertEqual(msg, "选择模型\n当前：默认（由 agy 决定）\n当前模型上次检测：未检测\n检测会消耗模型额度，不更改选定模型。")
+        self.assertIn("选择模型\n当前：默认（由 agy 决定）", msg)
+        self.assertIn("打开时自动刷新", msg)
         self.assertNotIn("gemini-", msg)
         self.assertEqual(self.runner.calls, 0)
 
@@ -701,7 +703,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.store.get_model(12345))
 
     async def test_model_refresh_filters_shortcuts_and_blocks_known_unavailable_model(self):
-        await self.bridge.handle(update("/model refresh"))
+        await self.bridge.handle(callback_update("probe:all"))
         check_task = self.bridge.model_check_task
         self.assertIsNotNone(check_task)
         await check_task

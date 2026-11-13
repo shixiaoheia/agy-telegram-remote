@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import html
 import logging
 import math
@@ -25,8 +26,7 @@ from command_handlers import CommandHandlers
 from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, EN_OUTCOME_HELP, bot_commands, callback_language,
                   english_activity, english_attachment, english_callback_notice, english_detail, localize_markup)
 from proxy_manager import ProxyError, check_bot_proxy_environment
-from settings import (ConfigError, MODEL_RE, OFFICIAL_MODELS, is_retired_model,
-                      resolve_model, Settings)
+from settings import ConfigError, MODEL_RE, resolve_model, Settings
 from state_store import Store, atomic_json
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 from telegram_formatting import (clean_model_reply, control_html, html_chunks,
@@ -91,8 +91,7 @@ FILE_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 # the model identifier.  Passing a second --effort argument makes the CLI
 # reject several providers.  Flash variants can still use the same friendly
 # picker: it switches the *model* suffix instead of passing --effort.
-OFFICIAL_MODEL_IDS = frozenset(model_id for _, model_id, _ in OFFICIAL_MODELS)
-CATALOG_VARIANT_RE = re.compile(r"^((?:gemini|claude)-[A-Za-z0-9.-]+)-(low|medium|high|max)$")
+CATALOG_VARIANT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]+)-(low|medium|high|xhigh|max)$")
 
 
 @dataclass
@@ -275,11 +274,11 @@ def history_summary_en(records: list[dict]) -> tuple[str, dict | None]:
 
 def supports_effort(model: str) -> bool:
     """Only future/custom models may receive the separate CLI --effort flag."""
-    return not model or (model not in OFFICIAL_MODEL_IDS and not CATALOG_VARIANT_RE.fullmatch(model))
+    return not model or not CATALOG_VARIANT_RE.fullmatch(model)
 
 
 def variant_model_for_effort(model: str, effort: str,
-                            model_ids=OFFICIAL_MODEL_IDS) -> str | None:
+                            model_ids=frozenset()) -> str | None:
     """Return a concrete catalog slug, never an unsupported reasoning suffix."""
     match = CATALOG_VARIANT_RE.fullmatch(model)
     if match:
@@ -301,7 +300,7 @@ def effort_label(effort: str | None, model: str) -> str:
     chosen = selected_variant_effort(model) or effort
     if not supports_effort(model) and not chosen:
         return "模型内置"
-    return {"low": "极速", "medium": "均衡", "high": "深度", "max": "最高"}.get(chosen or "", "默认")
+    return {"low": "极速", "medium": "均衡", "high": "深度", "xhigh": "超高", "max": "最高"}.get(chosen or "", "默认")
 
 
 def model_health_text(result: dict | None) -> str:
@@ -492,12 +491,12 @@ def ui_excerpt(value: object, limit: int = 120, fallback: str = "未命名任务
 
 def display_model(model: str, effort: str = "") -> str:
     """Use readable names in cards while leaving stored model identifiers intact."""
-    match = re.fullmatch(r"gemini-(\d+(?:\.\d+)?)-(flash|pro|argon)(?:-(low|medium|high|max))?", model)
+    match = re.fullmatch(r"gemini-(\d+(?:\.\d+)?)-([a-z][a-z0-9]*)(?:-(low|medium|high|xhigh|max))?", model)
     if match:
         label = f"Gemini {match[1]} {match[2].title()}"
         effort = match[3] or effort
     else:
-        match = re.fullmatch(r"claude-(sonnet|opus)-(\d+)-(\d+)(?:-(low|medium|high|max))?", model)
+        match = re.fullmatch(r"claude-(sonnet|opus)-(\d+)-(\d+)(?:-(low|medium|high|xhigh|max))?", model)
         if match:
             label = f"Claude {match[1].title()} {match[2]}.{match[3]}"
             effort = match[4] or effort
@@ -738,6 +737,13 @@ class Bridge(CommandHandlers):
         self.model_check_id = ""
         self.model_check_started_at = 0.0
         self.model_check_card: ControlCard | None = None
+        try:
+            self.model_catalog = self.store.get_model_catalog()
+        except (OSError, ValueError):
+            self.model_catalog = {"checked_at": 0.0, "models": []}
+        self.catalog_live = False
+        self.catalog_attempt_at = float("-inf")
+        self.catalog_notice = ""
         self.reset_confirmations: dict[int, ResetConfirmation] = {}
         self._pending_results: set[tuple] = set()
         self._recent_results: dict[tuple, float] = {}
@@ -1012,21 +1018,71 @@ class Bridge(CommandHandlers):
         except (OSError, ValueError):
             return {"checked_at": 0.0, "models": {}}
 
+    async def _ensure_model_catalog(self, *, force: bool = False) -> None:
+        """Refresh on menu access, sharing the execution slot with explicit probes."""
+        age = time.monotonic() - self.catalog_attempt_at
+        if not force and age < (60 if self.catalog_live else 15):
+            return
+        if (self.runner.blocked or self._restart_pending() or self.slot is not None
+                or self.pending_album is not None or (self.waiting_jobs and not self.queue_paused)
+                or (self.album_task is not None and not self.album_task.done())
+                or any(not task.done() for task in self.steer_tasks)
+                or (self.model_check_task is not None and not self.model_check_task.done())):
+            self.catalog_notice = "busy"
+            return
+        self.catalog_attempt_at = time.monotonic()
+        self.model_check_user = self.settings.owner_id
+        self.model_check_progress = "正在读取模型目录"
+        async def refresh():
+            models = await self.runner.list_models()
+            self.store.set_model_catalog(models)
+            self.model_catalog = self.store.get_model_catalog()
+        task = asyncio.create_task(refresh())
+        self.model_check_task = task
+        try:
+            await task
+            self.catalog_live = True
+            self.catalog_notice = ""
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.catalog_live = False
+            self.catalog_notice = "failed"
+            LOG.warning("model_catalog_failed type=%s", type(error).__name__)
+        finally:
+            self._model_check_finished(task)
+
+    def _resolve_model(self, name: str) -> str:
+        """Resolve friendly names against the current catalog, never a pinned version."""
+        clean = name.strip()
+        ids = self._variant_ids()
+        if clean in ids:
+            return clean
+        normalized = clean.lower()
+        for label, variants in self._model_choices():
+            if normalized == label.lower() or normalized in label.lower().split():
+                return variants[0]
+        # Keep explicit legacy aliases usable for old configurations; the menu
+        # itself is always built solely from the CLI snapshot.
+        legacy = resolve_model(clean)
+        return legacy if legacy in ids else clean
+
     def _model_is_known_unavailable(self, model: str) -> bool:
-        if is_retired_model(model):
-            return True
         result = self._model_health().get("models", {}).get(model)
         return (isinstance(result, dict) and result.get("outcome") != "success"
-                and result.get("category") in {"model", "entitlement"})
+                and result.get("category") in {"model", "entitlement"}
+                and result.get("checked_at", 0) >= self.model_catalog["checked_at"])
 
     async def _refresh_model_health(self, chat_id: int, model: str | None = None) -> None:
         results: dict[str, dict] = {}
         try:
             if model is None:
-                models = tuple(item for item in await self.runner.list_models()
-                               if not is_retired_model(item))
-                results = {item: {"outcome": "error", "category": "model", "checked_at": time.time()}
-                           for item in OFFICIAL_MODEL_IDS if item not in models}
+                models = await self.runner.list_models()
+                self.store.set_model_catalog(models)
+                self.model_catalog = self.store.get_model_catalog()
+                self.catalog_live = True
+                self.catalog_notice = ""
+                self.catalog_attempt_at = time.monotonic()
             else:
                 models = (model,)
                 results = dict(self._model_health().get("models", {}))
@@ -1123,7 +1179,7 @@ class Bridge(CommandHandlers):
         if self.runner.blocked:
             self.queue_reply(chat_id, self._text(chat_id, "⚠️ 新任务已暂停，请先检查服务器状态。", "⚠️ New tasks are paused; check the server first."))
             return
-        if model is not None and (not MODEL_RE.fullmatch(model) or is_retired_model(model)):
+        if model is not None and not MODEL_RE.fullmatch(model):
             self.queue_reply(chat_id, self._text(chat_id, "⚠️ 请先选择有效的具体模型，再检测当前模型。", "⚠️ Select a valid specific model before checking it."))
             return
         if self._restart_pending():
@@ -1905,53 +1961,47 @@ class Bridge(CommandHandlers):
                 LOG.warning("attachment_directory_cleanup_failed id=%s", job.job_id)
 
     def _model_choices(self):
-        """Add newly discovered slugs without rewriting saved user preferences."""
-        catalog: dict[str, list[str]] = {}
-        for label, model, _ in OFFICIAL_MODELS:
-            catalog.setdefault(label.split(" (")[0], []).append(model)
-        for label, variants in catalog.items():
-            if label.startswith("Claude "):
-                variants.sort(key=lambda value: (0 if value.endswith("-medium") else 1,
-                                                 0 if value.endswith("-low") else 1))
-        choices = [(label, tuple(variants)) for label, variants in catalog.items()]
-        known = {model for _, variants in choices for model in variants}
+        """Group only the models returned by the signed-in CLI."""
         groups: dict[str, list[str]] = {}
-        for model, result in self._model_health().get("models", {}).items():
-            if (is_retired_model(model) or model in known or len(model) > 57
-                    or result.get("category") in {"model", "entitlement"}):
-                continue
+        for model in self.model_catalog["models"]:
             match = CATALOG_VARIANT_RE.fullmatch(model)
             group = match.group(1) if match else model
             groups.setdefault(group, []).append(model)
+        choices = []
         for group, variants in groups.items():
-            matching = next((i for i, (_, ids) in enumerate(choices)
-                             if any(x.startswith(group + "-") for x in ids)), None)
-            if matching is not None:
-                label, ids = choices[matching]
-                choices[matching] = (label, (*ids, *variants))
-            else:
-                choices.append((group, tuple(variants)))
+            # Prefer the balanced Claude variant without pinning any version.
+            if group.startswith("claude-"):
+                variants.sort(key=lambda value: 0 if value.endswith("-medium") else 1)
+            choices.append((display_model(group), tuple(variants)))
         return choices
 
     def _variant_ids(self):
         return frozenset(model for _, variants in self._model_choices() for model in variants)
 
+    def _model_callback(self, model: str, *, choosing: bool = False) -> str:
+        prefix = "choose:" if choosing else "model:"
+        if len(prefix + model) <= 64:
+            return prefix + model
+        digest = hashlib.sha256(model.encode("ascii")).hexdigest()[:24]
+        return ("pickid:" if choosing else "modelid:") + digest
+
     def _model_label(self, model: str) -> str:
-        if is_retired_model(model):
-            return f"{model}（已移除，请重新选择）"
         for label, variants in self._model_choices():
             if model in variants:
                 effort = selected_variant_effort(model)
                 return f"{label} · {effort_label(effort, model)}" if effort else label
         return model or "默认（由 agy 决定）"
 
-    def _model_picker(self, user: int) -> tuple[str, dict]:
+    def _model_picker(self, user: int, page: int = 0) -> tuple[str, dict]:
         english = self.store.get_language(user) == "en"
         current = self.store.get_model(user) or self.settings.model or ""
         buttons = []
         notices = []
         health = self._model_health().get("models", {})
-        for label, variants in self._model_choices():
+        choices = self._model_choices()
+        pages = max(1, math.ceil(len(choices) / 10))
+        page = max(0, min(page, pages - 1))
+        for label, variants in choices[page * 10:(page + 1) * 10]:
             usable = [x for x in variants if not self._model_is_known_unavailable(x)]
             if not usable:
                 continue
@@ -1961,17 +2011,27 @@ class Bridge(CommandHandlers):
             icon = ("⚡" if "Flash" in label else "🧠" if "Pro" in label else "✍️" if "Sonnet" in label
                     else "💎" if "Opus" in label else "✨" if "Argon" in label else "🤖")
             buttons.append({"text": ("✓ " if current in variants else "") + ("⚠️ " if failed else icon + " ") + label,
-                            "callback_data": f"model:{target}"})
+                            "callback_data": self._model_callback(target)})
             if failed:
                 notices.append(f"{label}: check failed ({health[target].get('category', 'unknown')})"
                                if english else f"{label}：{model_health_text(health[target])}")
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-        rows.append([{"text": "🔎 检测当前模型", "callback_data": "probe:current"},
-                     {"text": "🔎 检测全部", "callback_data": "probe:all"}])
+        if pages > 1:
+            rows.append([{"text": f"{page + 1}/{pages} ◀", "callback_data": f"selector:models:{(page - 1) % pages}"},
+                         {"text": "▶", "callback_data": f"selector:models:{(page + 1) % pages}"}])
+        rows.append([{"text": "🔄 立即刷新", "callback_data": "selector:refresh"},
+                     {"text": "🔎 检测当前模型", "callback_data": "probe:current"}])
         rows.append([{"text": "↩️ 恢复默认", "callback_data": "model:default"},
                      {"text": "✖️ 关闭", "callback_data": "selector:close"}])
         text = (f"Select a model\nCurrent: {current or 'Default (agy setting)'}" if english
                 else f"选择模型\n当前：{self._model_label(current)}")
+        if not self.catalog_live or self.catalog_notice:
+            text += ("\n⚠️ Cached list; refresh pending (busy or lookup failed)." if english
+                     else "\n⚠️ 当前为缓存列表，等待刷新（任务忙碌或读取失败）。") if choices else (
+                         "\nNo model list yet. Refresh when idle; check agy login/version if it fails." if english
+                         else "\n尚未获取模型列表。空闲时点击立即刷新；失败时检查 agy 登录和版本。")
+        text += ("\nAuto-refreshes on opening (60s cache). List visibility does not guarantee quota." if english
+                 else "\n打开时自动刷新（缓存 60 秒）；列表可见不代表额度充足。")
         stamp = health.get(current, {}).get("checked_at", 0)
         if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0:
             age = max(0, int(time.time() - stamp))
@@ -1999,8 +2059,8 @@ class Bridge(CommandHandlers):
         model = current if model is None else model
         curr = selected_variant_effort(current) or self.store.get_effort(user)
         buttons = []
-        for effort in ("low", "medium", "high", "max"):
-            if effort == "max" and not selected_variant_effort(model):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            if effort in {"xhigh", "max"} and not selected_variant_effort(model):
                 continue
             variant = variant_model_for_effort(model, effort, self._variant_ids())
             if selected_variant_effort(model) and variant is None:
@@ -2008,9 +2068,9 @@ class Bridge(CommandHandlers):
             if variant and self._model_is_known_unavailable(variant):
                 continue
             selected = current == variant if variant else curr == effort and current == model
-            icon = {"low": "⚡", "medium": "⚖️", "high": "🔍", "max": "🧠"}[effort]
+            icon = {"low": "⚡", "medium": "⚖️", "high": "🔍", "xhigh": "🧠", "max": "🧠"}[effort]
             buttons.append({"text": ("✓ " if selected else "") + icon + " " + effort_label(effort, ""),
-                            "callback_data": f"choose:{variant}" if variant else f"effort:{effort}"})
+                            "callback_data": self._model_callback(variant, choosing=True) if variant else f"effort:{effort}"})
         keyboard = {"inline_keyboard": [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [[
             {"text": "⬅️ 返回模型", "callback_data": "selector:models"},
             {"text": "✖️ 关闭", "callback_data": "selector:close"},
@@ -2334,24 +2394,35 @@ class Bridge(CommandHandlers):
                 await self.handle({"message": {"chat": chat, "from": sender, "text": "/history"}})
             return
 
-        if data in {"selector:models", "selector:close"}:
+        if (data in {"selector:models", "selector:close", "selector:refresh"}
+                or re.fullmatch(r"selector:models:[0-9]{1,3}", data)):
             if cq_id and hasattr(self.api, "answer_callback_query"):
                 self._answer_callback(cq_id)
-            if data == "selector:models":
-                text, keyboard = self._model_picker(user)
+            if data != "selector:close":
+                await self._ensure_model_catalog(force=data == "selector:refresh")
+                page = int(data.rsplit(":", 1)[1]) if data.rsplit(":", 1)[1].isdigit() else 0
+                text, keyboard = self._model_picker(user, page)
             else:
                 current = self.store.get_model(user) or self.settings.model or ""
                 text, keyboard = self._text(user, f"已关闭选择\n当前：{self._model_label(current)}", f"Selection closed\nCurrent: {current or 'Default (agy setting)'}"), {"inline_keyboard": []}
             self.queue_selector_edit(chat_id, message, text, keyboard)
             return
 
+        if data.startswith(("modelid:", "pickid:")):
+            choosing_id = data.startswith("pickid:")
+            model_id = next((model for model in self._variant_ids()
+                             if self._model_callback(model, choosing=choosing_id) == data), None)
+            if model_id is None:
+                self._answer_callback(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
+                return
+            data = ("choose:" if choosing_id else "model:") + model_id
+
         if data.startswith(("model:", "choose:")):
             choosing = data.startswith("choose:")
             target = data.split(":", 1)[1].strip()
             reset = target.lower() in {"default", "reset", "auto", "clear"} and not choosing
-            resolved = resolve_model(target)
-            if not reset and (is_retired_model(resolved) or not MODEL_RE.fullmatch(resolved) or
-                              (choosing and resolved not in OFFICIAL_MODEL_IDS)):
+            resolved = target
+            if not reset and (not MODEL_RE.fullmatch(resolved) or resolved not in self._variant_ids()):
                 if cq_id and hasattr(self.api, "answer_callback_query"):
                     self._answer_callback(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
                 return
@@ -2389,10 +2460,11 @@ class Bridge(CommandHandlers):
         if data.startswith("effort:"):
             target = data[7:].strip().lower()
             model = self.store.get_model(user) or self.settings.model or ""
-            if is_retired_model(model):
+            if (selected_variant_effort(model) and self.model_catalog["checked_at"]
+                    and model not in self._variant_ids()):
                 self._answer_callback(cq_id, text="该模型已移除，请重新打开 /model", show_alert=True)
                 return
-            if target in {"low", "medium", "high", "max"}:
+            if target in {"low", "medium", "high", "xhigh", "max"}:
                 variant = variant_model_for_effort(model, target, self._variant_ids())
                 if variant is not None:
                     if self._model_is_known_unavailable(variant):
@@ -2628,9 +2700,6 @@ class Bridge(CommandHandlers):
             return
 
         user_model = self.store.get_model(user) or self.settings.model or ""
-        if is_retired_model(user_model):
-            self.queue_reply(chat_id, self._text(user, "当前保存的模型已移除，请先发送 /model 重新选择；本次没有启动任务。", "The saved model was removed. Select another with /model; the task was not started."))
-            return
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
         effort = self.store.get_effort(user) or ""

@@ -6,7 +6,7 @@ import html
 import re
 import uuid
 from collections import deque
-from settings import MODEL_RE, is_retired_model, resolve_model
+from settings import MODEL_RE
 
 
 class CommandHandlers:
@@ -284,10 +284,16 @@ class CommandHandlers:
         model_health_text = helpers.model_health_text
         parts = text.split(maxsplit=1)
         target = parts[1].strip() if len(parts) > 1 else ""
-        if target.lower() in {"refresh", "check", "probe"}:
-            self._start_model_health_refresh(chat_id)
+        if target.lower() == "refresh":
+            await self._ensure_model_catalog(force=True)
+            picker, keyboard = self._model_picker(user)
+            self.queue_reply(chat_id, picker, reply_markup=keyboard)
+            return
+        if target.lower() in {"check", "probe"}:
+            self._start_model_health_refresh(chat_id, self.store.get_model(user) or self.settings.model or "")
             return
         if not target or target.lower() in {"show", "current", "status", "list", "help"}:
+            await self._ensure_model_catalog()
             picker, keyboard = self._model_picker(user)
             self.queue_reply(chat_id, picker, reply_markup=keyboard)
             return
@@ -297,11 +303,8 @@ class CommandHandlers:
             self.queue_reply(chat_id, self._text(user, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model <模型名或别名>",
                                                "🔄 Reset to the default model selected by agy.\n💡 Use /model <name or alias> to choose another model."))
             return
-        resolved = resolve_model(target)
-        if is_retired_model(resolved):
-            self.queue_reply(chat_id, self._text(user, "该模型已从项目移除，请发送 /model 选择其他模型。",
-                                               "This model was removed from the project. Use /model to choose another."))
-            return
+        await self._ensure_model_catalog()
+        resolved = self._resolve_model(target)
         if not MODEL_RE.fullmatch(resolved):
             self.queue_reply(
                 chat_id,
