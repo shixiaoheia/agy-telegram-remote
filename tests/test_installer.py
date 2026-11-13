@@ -83,8 +83,8 @@ class InstallerTests(unittest.TestCase):
             (drop / "90-agy-managed-proxy.conf").symlink_to(outside)
             script = r'''
 source "$1"
-UNIT="$2/service"; APP="$2/app"; CONFIG="$2/missing"; APP_HOME="$2/home"
-systemctl() { echo invoked > "$2/invoked"; }
+BASE="$2"; UNIT="$BASE/service"; APP="$BASE/app"; CONFIG="$BASE/missing"; APP_HOME="$BASE/home"
+systemctl() { echo invoked > "$BASE/invoked"; }
 echo y | uninstall
 '''
             result = subprocess.run(["bash", "-c", script, "_", str(ROOT / "install.sh"), str(base)],

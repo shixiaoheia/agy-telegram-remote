@@ -615,7 +615,8 @@ uninstall() {
   systemd_dir="$(dirname -- "$UNIT")"
   local proxy_unit="$systemd_dir/agy-telegram-proxy.service"
   local proxy_drop="$systemd_dir/agy-telegram-remote.service.d/90-agy-managed-proxy.conf"
-  local proxy_engine="$(dirname -- "$APP")/agy-telegram-remote-proxy"
+  local proxy_engine
+  proxy_engine="$(dirname -- "$APP")/agy-telegram-remote-proxy"
   local UPDATE_UNIT="$systemd_dir/agy-telegram-update.service"
   [[ ! -L "$proxy_unit" && ! -L "$(dirname -- "$proxy_drop")" && ! -L "$proxy_drop" && ! -L "$proxy_engine" ]] \
     || fail '代理相关路径是符号链接，请人工检查。'
