@@ -189,3 +189,8 @@ Markdown 显示新增 28 项回归，完整测试共 376 项：代码围栏与�
 `tests/test_updater.py` 覆盖主管理员私聊边界、任意参数拦截、任务/等待队列/未恢复结果互斥、重复请求、缺失更新服务、跨重启就绪锁、私有结果读取、固定 main/SHA、成功与健康检查、失败保留/回退、请求过期与防重放、超时进程组清理、脱敏和安全来源路径。安装器原有回退用例继续覆盖配置、入口、基础 unit 和版本记录；新更新 unit 纳入同一事务备份/恢复。
 
 `scripts/test_update_systemd.py` 只允许在明确标记的一次性 GitHub Actions VM 以 root 执行。在两种 CPU 架构使用实际 systemd：受限 bot 发起独立更新服务，更新服务停止 bot 后继续写入完成证据；同时检查内部非交互更新只接受固定 SHA 且拒绝改授权参数。不会访问真实 Google/Telegram，不在用户宿主机安装服务。目标 VPS 的真实 `/update` 与 Telegram 回报仍需部署后验收。
+
+## v2026.11.13 发布验证
+
+功能提交 `11cd6637138feb5526bc88f41dee17e031377a6c` 的[完整 PR 检查](https://github.com/shixiaoheia/agy-telegram-remote/actions/runs/43388694243)通过：569 项离线测试（2 项按环境跳过）、Python 3.10–3.13 常规/私有 umask、ARM64、Debian 12 账号、两种架构的代理与 systemd 回退，以及独立更新器的真实服务交接和固定提交参数校验。发布说明整理后继续检查最终提交与合并结果；目标 VPS 与真实 Google/Telegram 交互未验收。
+
