@@ -1116,7 +1116,13 @@ class Bridge(CommandHandlers):
         menus, self.catalog_menus = self.catalog_menus, {}
         for card, page in menus.values():
             if not self.stop.is_set() and self._is_allowed(card.chat):
-                self.queue_card(card, *self._model_picker(card.chat, page))
+                text, keyboard = self._model_picker(card.chat, page)
+                if card.message_id is None:
+                    self.queue_card(card, text, keyboard)
+                else:
+                    # Old Telegram messages may no longer be editable. Use the
+                    # selector's existing fallback to deliver the refreshed list.
+                    self.queue_selector_edit(card.chat, {"message_id": card.message_id}, text, keyboard)
 
         choices, self.catalog_choices = self.catalog_choices, {}
         for user, (requires_fresh_list, choose) in choices.items():

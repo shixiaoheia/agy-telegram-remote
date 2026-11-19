@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot import Bridge
 from state_store import Store
+from telegram_api import TelegramError
 from tests.common import settings_at
 from tests.test_bot import FakeAPI, FakeRunner, callback_update, update
 
@@ -100,6 +101,12 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ids, frozenset(self.runner.list_models.return_value))
         self.assertNotIn("gemini-3.8-flash-high", ids)
         self.assertIn("自动刷新", self.api.messages[-1][1])
+
+    async def test_refresh_of_uneditable_old_menu_delivers_one_replacement(self):
+        with patch.object(self.api, "edit", side_effect=TelegramError(code=400)):
+            await self.handle(callback_update("selector:refresh", message_id=123))
+        self.assertEqual(self.api.sent_count, 1)
+        self.assertIn("model:gemini-4-carbon-high", str(self.api.sent_messages[0][2]))
 
     async def test_cache_expiry_and_manual_refresh_replace_instead_of_merge(self):
         await self.handle(update("/model"))
