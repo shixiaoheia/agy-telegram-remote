@@ -275,8 +275,12 @@ SENSITIVE_VALUE = re.compile(
 TOKEN_LITERAL = re.compile(r"(?i)\b(?:ghp|github_pat|AIza|sk)_[A-Za-z0-9_-]{8,}\b")
 
 
+def valid_duration(value: object) -> bool:
+    return type(value) in {int, float} and 0 <= value <= 1e12
+
+
 def _duration_text(value: object) -> str:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+    if valid_duration(value):
         return f"（耗时 {value:.1f} 秒）"
     return ""
 

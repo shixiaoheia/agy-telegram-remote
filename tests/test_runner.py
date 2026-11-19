@@ -135,6 +135,11 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(planning, "✅ 🧠 规划步骤完成（耗时 3.1 秒）")
         self.assertEqual(final, "✅ ✍️ 回答生成完毕（耗时 8.7 秒）")
 
+    def test_result_progress_ignores_out_of_range_durations(self):
+        for duration in (10 ** 400, float("inf"), float("nan"), True):
+            self.assertEqual(stream_activity({"event": "result", "result": {"duration_seconds": duration}}),
+                             "✅ ✍️ 回答生成完毕")
+
     def test_permission_not_hidden(self):
         value = self.parse({"status": "SUCCESS", "response": "I tried"}, b"tool soft-denied")
         self.assertEqual(value.outcome, "permission")

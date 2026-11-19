@@ -220,6 +220,19 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
         text, _ = history_summary([{"outcome": "success", "updated_at": math.inf, "delivery": {}}])
         self.assertIn("时间未知", text)
 
+    async def test_invalid_duration_does_not_hide_a_saved_task_in_either_language(self):
+        record = self.store.save(12345, {"job_id": "c" * 12, "duration_seconds": 10 ** 400,
+                                        "outcome": "success", "text": "done"})
+        self.store.save_history(12345, "saved task", record)
+        for language in ("zh", "en"):
+            self.store.set_language(12345, language)
+            await self.bridge.handle(update("/history"))
+            await self.bridge.reply_worker
+            _, text, markup = self.api.messages[-1]
+            self.assertIn("saved task", text)
+            self.assertNotIn(str(record["duration_seconds"]), text)
+            self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "history:" + "c" * 12)
+
     async def test_current_model_probe_merges_only_selected_result_and_preserves_preferences(self):
         self.runner.hold = True
         self.store.set_model(12345, "gemini-3.8-flash-high")

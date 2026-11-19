@@ -273,7 +273,6 @@ class CommandHandlers:
                                                "⚠️ Could not read task history; check the server."))
 
     async def _command_model(self, text, user, chat_id, helpers):
-        has_effort_picker = self._has_model_effort_picker
         model_health_text = helpers.model_health_text
         parts = text.split(maxsplit=1)
         target = parts[1].strip() if len(parts) > 1 else ""
@@ -305,8 +304,9 @@ class CommandHandlers:
                            "⚠️ Invalid model name. Use 2–64 letters, digits, dots, underscores, or hyphens."),
             )
             return
-        if self._model_is_known_unavailable(resolved):
-            state = self._model_health().get("models", {}).get(resolved)
+        health = self._model_health()["models"]
+        if self._model_is_known_unavailable(resolved, health):
+            state = health[resolved]
             self.queue_reply(
                 chat_id,
                 self._text(user, f"⚠️ {resolved} 当前检测为不可用（{model_health_text(state)}）。\n"
@@ -314,10 +314,11 @@ class CommandHandlers:
                            f"⚠️ {resolved} is currently marked unavailable. Run /model refresh to check again or choose an available model."),
             )
             return
-        self.store.set_model(user, resolved, exact=resolved in self._variant_ids())
+        catalog_model = resolved in self._variant_ids()
+        self.store.set_model(user, resolved, exact=catalog_model)
         alias_note = (self._text(user, f"（由别名 '{target}' 解析）", f" (resolved from alias '{target}')")
                       if resolved != target else "")
-        if not has_effort_picker(resolved):
+        if catalog_model and not helpers.selected_variant_effort(resolved):
             self.store.set_effort(user, None)
             self.queue_reply(chat_id, self._text(user, f"✅ 已切换至：{resolved}｜思考强度：模型内置",
                                                f"✅ Switched to {resolved} | Reasoning effort: built into the model"))

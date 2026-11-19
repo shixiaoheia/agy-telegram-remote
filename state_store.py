@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import fcntl
 import json
-import math
 import os
 import re
 import stat
@@ -15,6 +14,7 @@ from typing import Any
 from settings import MODEL_RE, check_no_symlink, resolve_model
 
 HISTORY_ITEMS = 10
+MODEL_HEALTH_OUTCOMES = ("success", "error", "timed_out", "invalid")
 
 
 def _ensure_private_dir(directory: Path, message: str, *, parents: bool = False) -> None:
@@ -25,13 +25,16 @@ def _ensure_private_dir(directory: Path, message: str, *, parents: bool = False)
         raise PermissionError(message)
 
 
-def _valid_timestamp(stamp: object, *, allow_zero: bool = True) -> bool:
-    return (type(stamp) in {int, float} and math.isfinite(stamp)
-            and (0 <= stamp if allow_zero else 0 < stamp) and stamp <= 253402300799)
+def valid_timestamp(stamp: object, *, allow_zero: bool = True) -> bool:
+    # Bound the original number before converting JSON integers to float.
+    return (type(stamp) in {int, float} and 0 <= stamp <= 253402300799
+            and (allow_zero or stamp > 0))
 
 
-def atomic_json(path: Path, value: Any) -> None:
+def atomic_json(path: Path, value: Any, *, maximum: int | None = None) -> None:
     data = json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    if maximum is not None and len(data) > maximum:
+        raise ValueError("Oversized state record")
     fd, temporary = tempfile.mkstemp(prefix=".atomic-", dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
@@ -106,7 +109,7 @@ class Store:
             data = read_json(self.directory / "waiting-queue.json", 18 * max_prompt + 4096)
         except FileNotFoundError:
             return []
-        if not isinstance(data, dict) or type(data.get("saved_at")) not in {int, float}:
+        if not isinstance(data, dict) or not valid_timestamp(data.get("saved_at")):
             raise ValueError("Invalid queue file")
         entries = data.get("entries")
         if not isinstance(entries, list) or len(entries) > 3:
@@ -247,7 +250,7 @@ class Store:
         if not isinstance(value, dict):
             raise ValueError("Invalid model catalog")
         stamp, models = value.get("checked_at"), value.get("models")
-        if not _valid_timestamp(stamp, allow_zero=False):
+        if not valid_timestamp(stamp, allow_zero=False):
             raise ValueError("Invalid model catalog timestamp")
         self._validate_catalog(models)
         return {"checked_at": float(stamp), "models": list(models)}
@@ -273,19 +276,19 @@ class Store:
         if not isinstance(value, dict) or not isinstance(value.get("models"), dict):
             return {"checked_at": 0.0, "models": {}}
         checked_at = value.get("checked_at")
-        if not _valid_timestamp(checked_at):
+        if not valid_timestamp(checked_at):
             return {"checked_at": 0.0, "models": {}}
         models: dict[str, dict] = {}
         for model, result in value["models"].items():
             if (isinstance(model, str) and MODEL_RE.fullmatch(model)
                     and isinstance(result, dict)
-                    and result.get("outcome") in {"success", "error", "timed_out", "invalid"}):
+                    and result.get("outcome") in MODEL_HEALTH_OUTCOMES):
                 category = result.get("category", "unknown")
                 stamp = result.get("checked_at", checked_at)
                 models[model] = {
                     "outcome": result["outcome"],
                     "category": category if isinstance(category, str) and len(category) <= 32 else "unknown",
-                    "checked_at": float(stamp) if _valid_timestamp(stamp) else 0.0,
+                    "checked_at": float(stamp) if valid_timestamp(stamp) else 0.0,
                 }
         return {"checked_at": float(checked_at), "models": models}
 
@@ -294,13 +297,11 @@ class Store:
         for model, result in models.items():
             if not isinstance(model, str) or not MODEL_RE.fullmatch(model):
                 raise ValueError("Invalid model health key")
-            if not isinstance(result, dict) or result.get("outcome") not in {
-                "success", "error", "timed_out", "invalid"
-            }:
+            if not isinstance(result, dict) or result.get("outcome") not in MODEL_HEALTH_OUTCOMES:
                 raise ValueError("Invalid model health result")
             category = result.get("category", "unknown")
             stamp = result.get("checked_at", time.time())
-            if not _valid_timestamp(stamp):
+            if not valid_timestamp(stamp):
                 raise ValueError("Invalid model health timestamp")
             clean[model] = {
                 "outcome": result["outcome"],
@@ -424,7 +425,7 @@ class Store:
         if not isinstance(value, dict) or value.get("user_id") != user:
             raise ValueError("Invalid result record")
         updated = value.get("updated_at")
-        if not isinstance(updated, (int, float)):
+        if not valid_timestamp(updated):
             raise ValueError("Invalid result timestamp")
         if time.time() - updated > self.retention:
             path.unlink(missing_ok=True)
@@ -439,10 +440,7 @@ class Store:
 
     def _write_history(self, user: int, items: list[dict]) -> None:
         value = {"user_id": user, "items": items[:HISTORY_ITEMS]}
-        size = len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
-        if size > self._history_maximum():
-            raise ValueError("Oversized history record")
-        atomic_json(self._path(user, "history"), value)
+        atomic_json(self._path(user, "history"), value, maximum=self._history_maximum())
 
     def save_history(self, user: int, title: str, record: dict) -> None:
         """Keep a small, private, per-user result history for /history."""
@@ -476,7 +474,7 @@ class Store:
         now = time.time()
         valid = [entry for entry in items if isinstance(entry, dict)
                  and entry.get("user_id") == user
-                 and isinstance(entry.get("updated_at"), (int, float))
+                 and valid_timestamp(entry.get("updated_at"))
                  and now - entry["updated_at"] <= self.retention]
         if len(valid) != len(items) or len(valid) > HISTORY_ITEMS:
             self._write_history(user, valid)

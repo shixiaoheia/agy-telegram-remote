@@ -133,6 +133,38 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
         await self.handle(update("/model"))
         self.assertFalse(self.bridge._model_is_known_unavailable("gemini-4-carbon-high"))
 
+    async def test_hidden_families_do_not_take_up_menu_pages(self):
+        models = tuple(f"family-{index}-high" for index in range(21))
+        self.runner.list_models.return_value = models
+        await self.handle(update("/model"))
+        self.store.set_model_health({model: {"outcome": "error", "category": "entitlement"}
+                                     for model in models[:10]})
+        with patch.object(self.store, "get_model_health", wraps=self.store.get_model_health) as read:
+            await self.handle(update("/model"))
+            read.assert_called_once_with()
+
+        def families(markup):
+            return [button["callback_data"] for row in markup["inline_keyboard"] for button in row
+                    if button["callback_data"].startswith("model:family")]
+
+        self.assertEqual(families(self.api.messages[-1][2]), ["model:" + model for model in models[10:20]])
+        await self.handle(callback_update("selector:models:1"))
+        self.assertEqual(families(self.api.edits[-1][2]), ["model:" + models[20]])
+
+    async def test_legacy_effort_cannot_override_a_catalog_model_with_builtin_reasoning(self):
+        model = "future-built-in"
+        self.runner.list_models.return_value = (model,)
+        await self.handle(update("/model " + model))
+        await self.handle(callback_update("effort:high"))
+        self.assertIsNone(self.store.get_effort(12345))
+        self.store.set_effort(12345, "high")
+        with patch.object(self.runner, "run", wraps=self.runner.run) as run:
+            await self.bridge.handle(update("check the task"))
+            await self.bridge.slot.worker
+            self.assertIsNone(run.await_args.kwargs["effort"])
+            self.assertEqual(run.await_args.kwargs["model"], model)
+        self.assertIsNone(self.store.get_effort(12345))
+
     async def test_catalog_validation_and_private_snapshot(self):
         models = ("future-model-high",)
         self.store.set_model_catalog(models)
