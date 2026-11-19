@@ -36,6 +36,9 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
         await self.bridge.handle(event)
         if self.bridge.model_check_task:
             await self.bridge.model_check_task
+            # Awaiting an already-finished lookup does not yield to its done
+            # callback, which enqueues the final menu on the reply worker.
+            await asyncio.sleep(0)
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
 
