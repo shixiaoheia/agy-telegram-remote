@@ -56,9 +56,11 @@ Send a text task, or attach screenshots, logs, or code files. Individual attachm
 | `/usage` | View usage statistics |
 | `/restart` | Restart the service when idle (owner only) |
 
-Up to three text tasks can wait in the queue; attachments cannot be queued. Saved waiting tasks are paused after a restart until their owners confirm. A crash can still lose a queued task. Messages received while the service is offline may be discarded at startup and are not automatically executed.
+When you send more text during your own running text task, choose **Apply correction**, **Queue as a task**, or **Ignore**. Queuing adds the exact message to the end of the queue and shows its position. Up to three text tasks can wait in the queue; attachments cannot be queued. Saved waiting tasks are paused after a restart until their owners confirm. A crash can still lose a queued task. Messages received while the service is offline may be discarded at startup and are not automatically executed.
 
 Language preference is saved per authorized user. Your task text, file names, model replies, and externally supplied error text remain in their original language. Historical records created before this update may contain older Chinese labels. The installer remains in Chinese.
+
+The compact progress card updates when the model first responds or uses a tool. Later steps are grouped into five-second updates. Expand the card to read at your own pace and tap Refresh steps when ready.
 
 Completed task results are sent as new messages, while the original progress card closes with the final status. Notifications follow your Telegram and device settings, including when you leave the chat. Long results remain paginated; saved results can be retrieved without rerunning the task.
 
@@ -95,7 +97,7 @@ Join the [Telegram community](https://t.me/xiaoheidemimi). The project also list
 
 ### Dynamic model menu
 
-`/model` reads `agy models` using the server's signed-in account. The bot ships no fixed model catalog or version blacklist. New models and reasoning variants appear automatically when the CLI returns them. Menus refresh on opening with a 60-second cache; `/model refresh` or **Refresh now** bypasses it. Restarting the service triggers a fresh lookup on the first open.
+`/model` reads `agy models` using the server's signed-in account. The bot ships no fixed model catalog or version blacklist. New models and reasoning variants appear automatically when the CLI returns them. The menu immediately shows the cached list or a loading message on first use. Background refresh updates the same card and leaves commands such as /status responsive. The catalog is cached for 60 seconds; `/model refresh` or **Refresh now** bypasses it. Restarting the service triggers a fresh lookup on the first open.
 
 Listing sends no chat prompts. Visibility does not guarantee quota, regional eligibility, or a successful request. Failed lookups preserve a clearly marked cached snapshot; without a snapshot, no candidate models are invented. Busy tasks defer lookup until the menu is reopened while idle. Failed automatic lookups have a 15-second cooldown. An upstream CLI interface/format change can still require a software update.
 

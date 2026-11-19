@@ -18,6 +18,7 @@ import time
 import unicodedata
 import uuid
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -102,7 +103,6 @@ class ControlCard:
     text: str = ""
     markup: dict = field(default_factory=lambda: {"inline_keyboard": []})
     message_id: int | None = None
-    revision: int = 0
     queued: bool = False
     closed: bool = False
     uncertain: bool = False
@@ -744,6 +744,8 @@ class Bridge(CommandHandlers):
         self.catalog_live = False
         self.catalog_attempt_at = float("-inf")
         self.catalog_notice = ""
+        self.catalog_choices: dict[int, tuple[bool, Callable[[], None]]] = {}
+        self.catalog_menus: dict[tuple[int, int | None], tuple[ControlCard, int]] = {}
         self.reset_confirmations: dict[int, ResetConfirmation] = {}
         self._pending_results: set[tuple] = set()
         self._recent_results: dict[tuple, float] = {}
@@ -1071,8 +1073,10 @@ class Bridge(CommandHandlers):
         except (OSError, ValueError):
             return {"checked_at": 0.0, "models": {}}
 
-    async def _ensure_model_catalog(self, *, force: bool = False) -> None:
+    def _start_catalog_refresh(self, *, force: bool = False) -> asyncio.Task | None:
         """Refresh on menu access, sharing the execution slot with explicit probes."""
+        if self.catalog_notice == "loading":
+            return self.model_check_task
         age = time.monotonic() - self.catalog_attempt_at
         if not force and age < (60 if self.catalog_live else 15):
             return
@@ -1081,26 +1085,81 @@ class Bridge(CommandHandlers):
             self.catalog_notice = "busy"
             return
         self.catalog_attempt_at = time.monotonic()
+        self.catalog_notice = "loading"
         self.model_check_user = self.settings.owner_id
         self.model_check_progress = "正在读取模型目录"
-        async def refresh():
+        task = asyncio.create_task(self._refresh_catalog())
+        self.model_check_task = task
+        task.add_done_callback(self._catalog_finished)
+        return task
+
+    async def _ensure_model_catalog(self, *, force: bool = False) -> None:
+        task = self._start_catalog_refresh(force=force)
+        if task is not None:
+            await asyncio.shield(task)
+
+    async def _refresh_catalog(self) -> None:
+        try:
             models = await self.runner.list_models()
             self.store.set_model_catalog(models)
             self.model_catalog = self.store.get_model_catalog()
-        task = asyncio.create_task(refresh())
-        self.model_check_task = task
-        try:
-            await task
             self.catalog_live = True
-            self.catalog_notice = ""
-        except asyncio.CancelledError:
-            raise
         except Exception as error:
             self.catalog_live = False
-            self.catalog_notice = "failed"
             LOG.warning("model_catalog_failed type=%s", type(error).__name__)
-        finally:
-            self._model_check_finished(task)
+
+    def _catalog_finished(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            self.catalog_live = False
+        self.catalog_notice = "" if self.catalog_live else "failed"
+        self._model_check_finished(task)
+        menus, self.catalog_menus = self.catalog_menus, {}
+        for card, page in menus.values():
+            if not self.stop.is_set() and self._is_allowed(card.chat):
+                self.queue_card(card, *self._model_picker(card.chat, page))
+
+        choices, self.catalog_choices = self.catalog_choices, {}
+        for user, (requires_fresh_list, choose) in choices.items():
+            if self.stop.is_set() or not self._is_allowed(user):
+                continue
+            if not task.cancelled() and (self.catalog_live or not requires_fresh_list):
+                try:
+                    choose()
+                except (OSError, ValueError):
+                    self.queue_reply(user, self._text(user, "模型选择未能保存，请重新打开 /model。",
+                                                     "Could not save the selection. Reopen /model."))
+            else:
+                self.queue_reply(user, self._text(user, "目录刷新未完成，请重新打开 /model 选择模型。",
+                                                 "The refresh did not finish. Reopen /model to choose a model."))
+
+    def _forget_model_menu(self, chat: int, message: dict) -> None:
+        message_id = message.get("message_id")
+        self.catalog_menus.pop((chat, message_id), None)
+        initial = self.catalog_menus.get((chat, None))
+        if initial and initial[0].message_id == message_id:
+            del self.catalog_menus[(chat, None)]
+
+    def _open_model_menu(self, user: int, chat: int, *, message: dict | None = None,
+                         page: int = 0, force: bool = False) -> None:
+        task = self._start_catalog_refresh(force=force)
+        text, keyboard = self._model_picker(user, page)
+        if task is None:
+            if message is None:
+                self.queue_reply(chat, text, reply_markup=keyboard)
+            else:
+                self.queue_selector_edit(chat, message, text, keyboard)
+            return
+        message_id = message.get("message_id") if message else None
+        key = (chat, message_id)
+        # A menu opened by command only learns its Telegram ID after its first send.
+        initial = self.catalog_menus.get((chat, None))
+        if initial and initial[0].message_id == message_id:
+            key = (chat, None)
+        existing = self.catalog_menus.get(key)
+        card = existing[0] if existing else ControlCard(chat, message_id=message_id)
+        self.catalog_menus[key] = (card, page)
+        if not existing or existing[1] != page:
+            self.queue_card(card, text, keyboard)
 
     def _resolve_model(self, name: str) -> str:
         """Resolve friendly names against the current catalog, never a pinned version."""
@@ -1339,6 +1398,22 @@ class Bridge(CommandHandlers):
             return
         self.queue_task = asyncio.create_task(self._start_queued())
 
+    def _enqueue_waiting_task(self, user: int, chat_id: int, text: str) -> tuple[bool, str]:
+        if len(self.waiting_jobs) >= 3:
+            return False, self._text(user, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。", "⚠️ The queue is full (maximum 3). This task was not accepted; resend it later.")
+        if not self.queue_storage_ok:
+            return False, self._text(user, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。", "⚠️ Queue storage is unavailable. This task was not accepted; check server storage.")
+        entry = (user, chat_id, text)
+        try:
+            self.store.save_queue([*self.waiting_jobs, entry])
+        except (OSError, ValueError):
+            return False, self._text(user, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。", "⚠️ Could not save the waiting task. It was not accepted; check server storage.")
+        self.waiting_jobs.append(entry)
+        self._wake_queue()
+        state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
+        en_state = "The queue is paused; the first task's owner must send /queue resume." if self.queue_paused else "It will start after the previous task is cleaned up."
+        return True, self._text(user, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。", f"⏳ Added to the queue at position {len(self.waiting_jobs)}. {en_state} Use /queue cancel to cancel. After a service restart the first task's owner must confirm resumption.")
+
     def _remove_queued(self, predicate) -> int | None:
         old = list(self.waiting_jobs)
         # Do not overwrite a queue file that could not be read at startup.
@@ -1427,17 +1502,16 @@ class Bridge(CommandHandlers):
 
     def queue_card(self, card: ControlCard, text: str, markup: dict | None = None) -> None:
         card.text, card.markup = text, markup if markup is not None else {"inline_keyboard": []}
-        card.revision += 1
         if card.queued:
             return
         if self._enqueue_reply(card):
             card.queued = True
 
     async def _send_card(self, card: ControlCard) -> None:
+        # The worker serializes edits. Queue changes during this send in arrival order.
+        card.queued = False
         if card.uncertain:
-            card.queued = False
             return
-        revision = card.revision
         text, markup = control_html(self.store.redact(card.text)), card.markup
         markup = self._buttons(card.chat, markup)
         try:
@@ -1452,10 +1526,6 @@ class Bridge(CommandHandlers):
             LOG.warning("control_card_delivery_failed code=%s", error.code)
             if card.message_id is None:
                 card.uncertain = True
-        finally:
-            card.queued = False
-            if revision != card.revision:
-                self.queue_card(card, card.text, card.markup)
 
     def queue_reply(self, chat: int, text: str, reply_markup: dict | None = None,
                     html_mode: bool = False, *, result_key: tuple | None = None) -> bool:
@@ -1637,9 +1707,6 @@ class Bridge(CommandHandlers):
                 record["metadata_warning"] = " ".join(warnings)
             job.phase = "sending"
             LOG.info("job_finished id=%s outcome=%s", job.job_id, result.outcome)
-            await _cancel_task(job.progress_task)
-            if job.steered:
-                await self._finish_progress(job, result.outcome)
             delivered = True if job.steered else await self.send_html(
                 job.chat, self._render_result(job.user, record), reply_markup=self._completion_buttons(job),
                 delivery_job=job,
@@ -1651,7 +1718,8 @@ class Bridge(CommandHandlers):
             # A fresh result message can notify users who have left Telegram.
             # Keep progress edits in their original card and close it separately;
             # never replace or replay a result page that was already sent.
-            card_updated = True if job.steered else await self._finish_progress(
+            await _cancel_task(job.progress_task)
+            card_updated = await self._finish_progress(
                 job, result.outcome, final_record["delivery"],
             )
             if not delivered and not card_updated:
@@ -1683,8 +1751,17 @@ class Bridge(CommandHandlers):
             self._release_job(job)
 
     async def _run_task(self, job: Job, prompt: str) -> Result:
+        first_activity = first_response = True
+
         async def progress(activity: str) -> None:
+            nonlocal first_activity, first_response
+            wake = first_activity
+            first_activity = False
+            if first_response and activity == "正在分析并生成回复":
+                wake = True
+                first_response = False
             if activity.startswith("正在调用工具") or "💻" in activity or "🛠️" in activity:
+                wake = wake or not job.tool_started
                 job.tool_started = True
             if activity.startswith(("✅", "⚠️")):
                 if not job.execution_steps or job.execution_steps[-1] != activity:
@@ -1693,6 +1770,9 @@ class Bridge(CommandHandlers):
                 job.activity = "正在继续处理任务"
             else:
                 job.activity = activity
+            if wake and not job.progress_expanded:
+                job.progress_requested.set()
+
         return await self.runner.run(
             prompt, job.cancel, model=job.model or None,
             conversation_id=job.conversation_id or None,
@@ -2020,6 +2100,51 @@ class Bridge(CommandHandlers):
         digest = hashlib.sha256(model.encode("ascii")).hexdigest()[:24]
         return ("pickid:" if choosing else "modelid:") + digest
 
+    def _select_model_button(self, user: int, chat_id: int, message: dict, data: str, cq_id: str) -> None:
+        def unavailable(notice: str) -> None:
+            if cq_id:
+                self._answer_callback(cq_id, text=notice, show_alert=True)
+            else:
+                self.queue_reply(chat_id, self._text(user, notice, english_callback_notice(notice)))
+
+        if data.startswith(("modelid:", "pickid:")):
+            choosing_id = data.startswith("pickid:")
+            model_id = next((model for model in self._variant_ids()
+                             if self._model_callback(model, choosing=choosing_id) == data), None)
+            if model_id is None:
+                unavailable("模型选项已失效，请重新打开 /model")
+                return
+            data = ("choose:" if choosing_id else "model:") + model_id
+
+        choosing = data.startswith("choose:")
+        target = data.split(":", 1)[1].strip()
+        reset = target.lower() in {"default", "reset", "auto", "clear"} and not choosing
+        resolved = target
+        if not reset and (not MODEL_RE.fullmatch(resolved) or resolved not in self._variant_ids()):
+            unavailable("模型选项已失效，请重新打开 /model")
+            return
+        # Family navigation does not persist a choice or depend on the high tier's health.
+        if not reset and not choosing and selected_variant_effort(resolved):
+            self._answer_callback(cq_id)
+            picker, keyboard = self._effort_picker(user, resolved, model=resolved)
+            self.queue_selector_edit(chat_id, message, picker, keyboard)
+            return
+        if not reset and self._model_is_known_unavailable(resolved):
+            unavailable("该选项上次检测不可用，可用 /model refresh 重新检测")
+            return
+        self.store.set_model(user, None if reset else resolved, exact=not reset)
+        self.store.set_effort(user, None)
+        current = self.store.get_model(user) or self.settings.model or ""
+        self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
+        text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
+        if self.store.get_language(user) == "en":
+            text = f"{'Default restored' if reset else 'Model changed'}\nCurrent: {current or 'Default (agy setting)'}\nApplies to future tasks"
+        keyboard = {"inline_keyboard": [[
+            {"text": "🤖 更换模型", "callback_data": "selector:models"},
+            {"text": "✖️ 关闭", "callback_data": "selector:close"},
+        ]]}
+        self.queue_selector_edit(chat_id, message, text, keyboard)
+
     def _model_label(self, model: str) -> str:
         for label, variants in self._model_choices():
             if model in variants:
@@ -2062,7 +2187,10 @@ class Bridge(CommandHandlers):
                      {"text": "✖️ 关闭", "callback_data": "selector:close"}])
         text = (f"Select a model\nCurrent: {current or 'Default (agy setting)'}" if english
                 else f"选择模型\n当前：{self._model_label(current)}")
-        if not self.catalog_live or self.catalog_notice:
+        if self.catalog_notice == "loading":
+            text += ("\nRefreshing the cached model list…" if choices else "\nReading the model list…") if english else (
+                "\n正在刷新缓存的模型列表…" if choices else "\n正在读取模型列表…")
+        elif not self.catalog_live or self.catalog_notice:
             text += ("\n⚠️ Cached list; refresh pending (busy or lookup failed)." if english
                      else "\n⚠️ 当前为缓存列表，等待刷新（任务忙碌或读取失败）。") if choices else (
                          "\nNo model list yet. Refresh when idle; check agy login/version if it fails." if english
@@ -2203,9 +2331,6 @@ class Bridge(CommandHandlers):
                 or job.cancel.is_set() or job.steered or job.steer_task is not None
                 or job.phase in {"saving", "sending"} or not job.original_prompt):
             return False
-        if not text.strip() or "\x00" in text or len(correction_prompt(job, text)) > self.settings.max_prompt:
-            self.queue_reply(user, self._text(user, "⚠️ 补充与原任务合并后过长或格式无效。当前任务未改变，请精简补充内容。", "⚠️ The combined task and addition are too long or invalid. The current task is unchanged; shorten the addition."))
-            return True
         job.pending_correction = text
         job.correction_token = uuid.uuid4().hex[:12]
         job.correction_expires = time.monotonic() + CORRECTION_TTL_SECONDS
@@ -2216,19 +2341,18 @@ class Bridge(CommandHandlers):
         if job.correction_card is None:
             job.correction_card = ControlCard(user)
         prefix = f"correction:{{}}:{job.job_id}:{job.correction_token}"
-        self.queue_card(job.correction_card,
-                         self._text(user, "💬 收到一条待确认补充，当前任务仍在运行。\n"
-                         "点击“作为修正”会先停止并清理当前任务，再按原需求和这段补充执行。\n"
-                         f"补充预览：{self.store.redact(task_title(text))}\n"
-                         "仅最新一条待确认补充有效，5 分钟后失效；不会自动执行。",
-                         "💬 An addition awaits confirmation while the current task continues.\n"
-                         "Apply correction stops and cleans up the current task, then runs the original request with this addition.\n"
-                         f"Preview: {self.store.redact(task_title(text))}\n"
-                         "Only the latest addition is valid. It expires after 5 minutes and will not run automatically."),
-                         {"inline_keyboard": [[
-                             {"text": "✏️ 作为修正", "callback_data": prefix.format("apply")},
-                             {"text": "✖️ 忽略补充", "callback_data": prefix.format("dismiss")},
-                         ]]})
+        buttons = []
+        if len(correction_prompt(job, text)) <= self.settings.max_prompt:
+            buttons.append({"text": "✏️ 作为修正", "callback_data": prefix.format("apply")})
+            hint = self._text(user, "作为修正会停止当前任务，再按合并后的要求执行。", "Apply correction stops the current task and restarts it with the addition.")
+        else:
+            hint = self._text(user, "与原任务合并后过长，可单独排队。", "The combined request is too long for a correction.")
+        buttons.append({"text": "📥 排到下一项", "callback_data": prefix.format("queue")})
+        preview = self.store.redact(task_title(text))
+        self.queue_card(job.correction_card, self._text(user,
+                        f"💬 收到补充：{preview}\n{hint}\n排到下一项会将这段文字作为独立任务加入队尾。\n仅最新一条补充有效，5 分钟后失效。",
+                        f"💬 Addition: {preview}\n{hint}\nQueue as a task adds this text to the end of the queue.\nOnly the latest addition is valid. It expires in 5 minutes."),
+                        {"inline_keyboard": [buttons, [{"text": "✖️ 忽略补充", "callback_data": prefix.format("dismiss")}]]})
         return True
 
     async def handle_callback(self, cq: dict) -> None:
@@ -2342,7 +2466,7 @@ class Bridge(CommandHandlers):
         if data.startswith("correction:"):
             parts = data.split(":")
             job = self.slot
-            valid = (len(parts) == 4 and parts[1] in {"apply", "dismiss"} and job is not None
+            valid = (len(parts) == 4 and parts[1] in {"apply", "queue", "dismiss"} and job is not None
                      and job.user == user and parts[2] == job.job_id and parts[3] == job.correction_token
                      and bool(job.pending_correction) and time.monotonic() < job.correction_expires
                      and not job.cancel.is_set() and not job.steered and job.steer_task is None
@@ -2352,6 +2476,15 @@ class Bridge(CommandHandlers):
                 self._answer_callback(cq_id, text="补充已失效，请确认当前任务后重新发送。", show_alert=True)
                 return
             correction = job.pending_correction
+            if parts[1] == "queue":
+                saved, notice = self._enqueue_waiting_task(user, chat_id, correction)
+                if saved:
+                    self._forget_correction(job, notice)
+                self._answer_callback(cq_id, text=self._text(user, "已加入等待队列", "Task queued") if saved else notice, show_alert=not saved)
+                return
+            if parts[1] == "apply" and len(correction_prompt(job, correction)) > self.settings.max_prompt:
+                self._answer_callback(cq_id, text=self._text(user, "合并后过长，请单独排队。", "The combined request is too long. Queue it separately."), show_alert=True)
+                return
             text = (self._text(user, "⚡ 已提交修正，正在等待清理和交接。", "⚡ Correction submitted; waiting for cleanup and handover.") if parts[1] == "apply" else self._text(user, "已忽略这条补充，当前任务未改变。", "Addition ignored; the current task is unchanged."))
             self._forget_correction(job, text)
             # Reserve the correction through the ordinary /steer path before
@@ -2415,59 +2548,30 @@ class Bridge(CommandHandlers):
 
         if (data in {"selector:models", "selector:close", "selector:refresh"}
                 or re.fullmatch(r"selector:models:[0-9]{1,3}", data)):
+            self.catalog_choices.pop(user, None)
             self._answer_callback(cq_id)
             if data != "selector:close":
-                await self._ensure_model_catalog(force=data == "selector:refresh")
                 page = int(data.rsplit(":", 1)[1]) if data.rsplit(":", 1)[1].isdigit() else 0
-                text, keyboard = self._model_picker(user, page)
-            else:
-                current = self.store.get_model(user) or self.settings.model or ""
-                text, keyboard = self._text(user, f"已关闭选择\n当前：{self._model_label(current)}", f"Selection closed\nCurrent: {current or 'Default (agy setting)'}"), {"inline_keyboard": []}
+                self._open_model_menu(user, chat_id, message=message, page=page, force=data == "selector:refresh")
+                return
+            self._forget_model_menu(chat_id, message)
+            current = self.store.get_model(user) or self.settings.model or ""
+            text, keyboard = self._text(user, f"已关闭选择\n当前：{self._model_label(current)}", f"Selection closed\nCurrent: {current or 'Default (agy setting)'}"), {"inline_keyboard": []}
             self.queue_selector_edit(chat_id, message, text, keyboard)
             return
 
-        if data.startswith(("modelid:", "pickid:")):
-            choosing_id = data.startswith("pickid:")
-            model_id = next((model for model in self._variant_ids()
-                             if self._model_callback(model, choosing=choosing_id) == data), None)
-            if model_id is None:
-                self._answer_callback(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
-                return
-            data = ("choose:" if choosing_id else "model:") + model_id
-
-        if data.startswith(("model:", "choose:")):
-            choosing = data.startswith("choose:")
-            target = data.split(":", 1)[1].strip()
-            reset = target.lower() in {"default", "reset", "auto", "clear"} and not choosing
-            resolved = target
-            if not reset and (not MODEL_RE.fullmatch(resolved) or resolved not in self._variant_ids()):
-                self._answer_callback(cq_id, text="模型选项已失效，请重新打开 /model", show_alert=True)
-                return
-            # Family navigation does not persist a choice or depend on the high tier's health.
-            if not reset and not choosing and selected_variant_effort(resolved):
-                self._answer_callback(cq_id)
-                picker, keyboard = self._effort_picker(user, resolved, model=resolved)
-                self.queue_selector_edit(chat_id, message, picker, keyboard)
-                return
-            if not reset and self._model_is_known_unavailable(resolved):
-                self._answer_callback(
-                    cq_id, text="该选项上次检测不可用，可用 /model refresh 重新检测", show_alert=True)
-                return
-            self.store.set_model(user, None if reset else resolved, exact=not reset)
-            self.store.set_effort(user, None)
-            current = self.store.get_model(user) or self.settings.model or ""
-            self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
-            text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
-            if self.store.get_language(user) == "en":
-                text = f"{'Default restored' if reset else 'Model changed'}\nCurrent: {current or 'Default (agy setting)'}\nApplies to future tasks"
-            keyboard = {"inline_keyboard": [[
-                {"text": "🤖 更换模型", "callback_data": "selector:models"},
-                {"text": "✖️ 关闭", "callback_data": "selector:close"},
-            ]]}
-            self.queue_selector_edit(chat_id, message, text, keyboard)
+        if data.startswith(("model:", "choose:", "modelid:", "pickid:")):
+            self.catalog_choices.pop(user, None)
+            if data != "model:default" and self._start_catalog_refresh() is not None:
+                self.catalog_choices[user] = (True, lambda: self._select_model_button(user, chat_id, message, data, ""))
+                self._answer_callback(cq_id, text=self._text(user, "正在核对模型选项", "Checking this model option"))
+            else:
+                self._forget_model_menu(chat_id, message)
+                self._select_model_button(user, chat_id, message, data, cq_id)
             return
 
         if data.startswith("effort:"):
+            self.catalog_choices.pop(user, None)
             target = data[7:].strip().lower()
             model = self.store.get_model(user) or self.settings.model or ""
             if (selected_variant_effort(model) and self.model_catalog["checked_at"]
@@ -2688,22 +2792,9 @@ class Bridge(CommandHandlers):
                 self.queue_reply(chat_id, self._text(user, "⏳ 当前任务尚未结束。发送 /queue add <文字任务> 可排队，或等待清理完成。", "⏳ The current task has not finished. Use /queue add <text task> to queue a task, or wait for cleanup."))
             elif items:
                 self.queue_reply(chat_id, self._text(user, "⚠️ 附件暂不支持排队，请等待当前任务完成后重新发送。", "⚠️ Attachments cannot be queued. Wait for the current task to finish, then resend them."))
-            elif len(self.waiting_jobs) >= 3:
-                self.queue_reply(chat_id, self._text(user, "⚠️ 等待队列已满（最多 3 个）；本次没有接收，请稍后重发。", "⚠️ The queue is full (maximum 3). This task was not accepted; resend it later."))
-            elif not self.queue_storage_ok:
-                self.queue_reply(chat_id, self._text(user, "⚠️ 等待队列存储不可用，本次没有接收。请检查服务器存储。", "⚠️ Queue storage is unavailable. This task was not accepted; check server storage."))
             else:
-                entry = (user, chat_id, text)
-                try:
-                    self.store.save_queue([*self.waiting_jobs, entry])
-                except (OSError, ValueError):
-                    self.queue_reply(chat_id, self._text(user, "⚠️ 无法保存等待任务，本次没有接收。请检查服务器存储。", "⚠️ Could not save the waiting task. It was not accepted; check server storage."))
-                    return
-                self.waiting_jobs.append(entry)
-                state = "队列已暂停，需由队首发起者发送 /queue resume。" if self.queue_paused else "前一个任务完成清理后开始。"
-                en_state = "The queue is paused; the first task's owner must send /queue resume." if self.queue_paused else "It will start after the previous task is cleaned up."
-                self.queue_reply(chat_id, self._text(user, f"⏳ 已加入等待队列，当前位置 {len(self.waiting_jobs)}。{state} /queue cancel 可取消等待。服务重启后需由队首发起者确认恢复。", f"⏳ Added to the queue at position {len(self.waiting_jobs)}. {en_state} Use /queue cancel to cancel. After a service restart the first task's owner must confirm resumption."))
-                self._wake_queue()
+                _, notice = self._enqueue_waiting_task(user, chat_id, text)
+                self.queue_reply(chat_id, notice)
             return
 
         user_model = self.store.get_model(user) or self.settings.model or ""

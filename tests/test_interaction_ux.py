@@ -146,6 +146,48 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(job.cancel.is_set())
         self.assertEqual(self.runner.calls, 1)
 
+    async def test_queue_button_runs_the_exact_addition_once_after_original_finishes(self):
+        self.store.set_language(12345, "en")
+        old = await self._held_job()
+        addition = "Next task\nkeep this separate"
+        await self._offer(addition)
+        card_id = old.correction_card.message_id
+        buttons = self.api.messages[self.api.message_indices[card_id]][2]["inline_keyboard"]
+        queue = next(b["callback_data"] for row in buttons for b in row if b["text"] == "📥 Queue as a task")
+        await self.bridge.handle(callback_update(queue, user=67890, chat_id=67890))
+        self.assertFalse(self.bridge.waiting_jobs)
+        for cq_id in ("first-tap", "second-tap"):
+            await self.bridge.handle(callback_update(queue, cq_id=cq_id))
+        await self._drain()
+        self.assertEqual(self.store.load_queue(self.settings.max_prompt), [(12345, 12345, addition)])
+        self.assertIn("position 1", self.api.messages[self.api.message_indices[card_id]][1])
+        self.assertFalse(old.cancel.is_set())
+        self.assertEqual(self.runner.calls, 1)
+        self.runner.finish.set()
+        await old.worker
+        await self.bridge.queue_task
+        if self.bridge.slot:
+            await self.bridge.slot.worker
+        self.assertEqual(self.runner.calls, 2)
+        self.assertEqual(self.runner.last_prompt, addition)
+
+    async def test_failed_enqueue_preserves_offer_for_retry_or_dismissal(self):
+        job = await self._held_job()
+        queue = (await self._offer("follow up")).replace(":apply:", ":queue:")
+        with patch.object(self.store, "save_queue", side_effect=OSError("storage unavailable")):
+            await self.bridge.handle(callback_update(queue))
+        self.assertFalse(self.bridge.waiting_jobs)
+        self.assertEqual(job.pending_correction, "follow up")
+        self.bridge.queue_paused = True
+        for i in range(3):
+            await self.bridge.handle(update(f"/queue add task {i}"))
+        await self.bridge.handle(callback_update(queue))
+        self.assertEqual(job.pending_correction, "follow up")
+        self.assertEqual(len(self.store.load_queue(self.settings.max_prompt)), 3)
+        await self.bridge.handle(callback_update(queue.replace(":queue:", ":dismiss:")))
+        self.assertFalse(job.pending_correction)
+        self.assertFalse(job.cancel.is_set())
+
     async def test_expired_supplement_cannot_cancel_or_replace_job(self):
         job = await self._held_job()
         action = await self._offer()
@@ -194,9 +236,11 @@ class InteractionUXTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_combined_correction_does_not_cancel_original(self):
         job = await self._held_job()
-        await self.bridge.handle(update("Z" * self.settings.max_prompt))
+        queue = await self._offer("Z" * self.settings.max_prompt)
+        self.assertIn(":queue:", queue)
+        self.assertNotIn(":apply:", str(self.api.messages[-1][2]))
+        await self.bridge.handle(callback_update(queue.replace(":queue:", ":apply:")))
         self.assertFalse(job.cancel.is_set())
-        self.assertEqual(job.correction_token, "")
         await self.bridge.handle(update("/steer " + "Z" * self.settings.max_prompt))
         self.assertFalse(job.cancel.is_set())
         self.assertEqual(self.runner.calls, 1)
