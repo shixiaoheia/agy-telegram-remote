@@ -181,7 +181,7 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(.05)
         self.assertEqual(self.card(job)[1], shown)
 
-    async def test_completion_drains_requested_edit_before_sending_result(self):
+    async def test_result_is_delivered_before_slow_edit_but_card_closes_after_it(self):
         entered, release = asyncio.Event(), asyncio.Event()
         original = self.api.edit
         async def edit(*args, **kwargs):
@@ -195,7 +195,8 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
             await self.action(job, "expand")
             await asyncio.wait_for(entered.wait(), 2)
             self.runner.finish.set()
-            await asyncio.sleep(.02)
+            await self.until(lambda: any("the result" in msg[1] for msg in self.api.sent_messages))
+            self.assertEqual(self.store.load(12345)["delivery"], "sent")
             self.assertFalse(job.worker.done())
         finally:
             release.set()
@@ -204,6 +205,32 @@ class ProgressReadingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("任务完成", self.card(job)[1])
         self.assertNotIn("📖 阅读中", self.card(job)[1])
         self.assertNotIn("progress:", str(self.card(job)[2]))
+        self.assertEqual(sum("the result" in msg[1] for msg in self.api.sent_messages), 1)
+
+    async def test_first_response_and_tool_wake_compact_card_without_redrawing_each_step(self):
+        with patch("bot.PROGRESS_UPDATE_SECONDS", 60), patch.object(self.runner, "run", wraps=self.runner.run) as run:
+            job = await self.held_job()
+            progress = run.call_args.kwargs["progress"]
+            for activity in ("模型会话已启动", "正在分析并生成回复", "正在调用工具：read_file"):
+                await progress(activity)
+                await self.until(lambda: activity in self.card(job)[1])
+            count = len(self.api.edits)
+            for i in range(10):
+                await progress(f"✅ 🛠️ 工具步骤完成 {i}")
+            self.assertFalse(job.progress_requested.is_set())
+            self.assertEqual(len(self.api.edits), count)
+            await self.expanded(job)
+            self.assertIn("工具步骤完成 9", self.card(job)[1])
+
+    async def test_first_activity_while_reading_waits_for_manual_refresh(self):
+        with patch.object(self.runner, "run", wraps=self.runner.run) as run:
+            job = await self.held_job()
+            await self.expanded(job)
+            await run.call_args.kwargs["progress"]("正在调用工具：read_file")
+            self.assertFalse(job.progress_requested.is_set())
+            self.assertNotIn("read_file", self.card(job)[1])
+            await self.action(job, "refresh")
+            await self.until(lambda: "read_file" in self.card(job)[1])
 
     async def test_cancel_is_responsive_while_reading_and_never_reexecutes(self):
         job = await self.held_job()

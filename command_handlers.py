@@ -273,21 +273,14 @@ class CommandHandlers:
                                                "⚠️ Could not read task history; check the server."))
 
     async def _command_model(self, text, user, chat_id, helpers):
-        model_health_text = helpers.model_health_text
+        self.catalog_choices.pop(user, None)
         parts = text.split(maxsplit=1)
         target = parts[1].strip() if len(parts) > 1 else ""
-        if target.lower() == "refresh":
-            await self._ensure_model_catalog(force=True)
-            picker, keyboard = self._model_picker(user)
-            self.queue_reply(chat_id, picker, reply_markup=keyboard)
-            return
         if target.lower() in {"check", "probe"}:
             self._start_model_health_refresh(chat_id, self.store.get_model(user) or self.settings.model or "")
             return
-        if not target or target.lower() in {"show", "current", "status", "list", "help"}:
-            await self._ensure_model_catalog()
-            picker, keyboard = self._model_picker(user)
-            self.queue_reply(chat_id, picker, reply_markup=keyboard)
+        if target.lower() in {"", "show", "current", "status", "list", "help", "refresh"}:
+            self._open_model_menu(user, chat_id, force=target.lower() == "refresh")
             return
         if target.lower() in {"default", "reset", "auto", "clear"}:
             self.store.set_model(user, None)
@@ -295,7 +288,15 @@ class CommandHandlers:
             self.queue_reply(chat_id, self._text(user, "🔄 已恢复为默认模型（由 agy 决定）。\n💡 如需切换可随时使用 /model <模型名或别名>",
                                                "🔄 Reset to the default model selected by agy.\n💡 Use /model <name or alias> to choose another model."))
             return
-        await self._ensure_model_catalog()
+        if self._start_catalog_refresh() is not None:
+            # Typed model IDs may be used even if the CLI catalog is unavailable.
+            self.catalog_choices[user] = (False, lambda: self._select_named_model(target, user, chat_id, helpers))
+            self.queue_reply(chat_id, self._text(user, "正在读取模型目录…", "Reading the model list…"))
+            return
+        self._select_named_model(target, user, chat_id, helpers)
+
+    def _select_named_model(self, target, user, chat_id, helpers):
+        model_health_text = helpers.model_health_text
         resolved = self._resolve_model(target)
         if not MODEL_RE.fullmatch(resolved):
             self.queue_reply(

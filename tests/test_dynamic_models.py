@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from bot import Bridge
 from state_store import Store
+from telegram_api import TelegramError
 from tests.common import settings_at
 from tests.test_bot import FakeAPI, FakeRunner, callback_update, update
 
@@ -23,6 +24,9 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
         self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
 
     async def asyncTearDown(self):
+        if self.bridge.model_check_task:
+            self.bridge.model_check_task.cancel()
+            await asyncio.gather(self.bridge.model_check_task, return_exceptions=True)
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
         self.store.close()
@@ -30,8 +34,66 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
 
     async def handle(self, event):
         await self.bridge.handle(event)
+        if self.bridge.model_check_task:
+            await self.bridge.model_check_task
+            # Awaiting an already-finished lookup does not yield to its done
+            # callback, which enqueues the final menu on the reply worker.
+            await asyncio.sleep(0)
         if self.bridge.reply_worker:
             await self.bridge.reply_worker
+
+    def hold_lookup(self, models):
+        release = asyncio.Event()
+
+        async def list_models():
+            await release.wait()
+            return models
+
+        self.runner.list_models.side_effect = list_models
+        return release
+
+    async def test_slow_first_open_keeps_status_responsive_and_refreshes_same_card_once(self):
+        release = self.hold_lookup(("fresh-model",))
+        await asyncio.wait_for(self.bridge.handle(update("/model")), 1)
+        await self.bridge.reply_worker
+        self.assertIn("正在读取模型列表", self.api.messages[0][1])
+        await self.bridge.handle(callback_update("selector:refresh"))
+        await self.bridge.handle(update("/model refresh"))
+        await self.bridge.handle(update("/status"))
+        await self.bridge.reply_worker
+        self.assertIn("status:details", str(self.api.messages[-1][2]))
+        self.runner.list_models.assert_awaited_once()
+        task = self.bridge.model_check_task
+        release.set()
+        await task
+        await self.bridge.reply_worker
+        self.assertEqual(self.api.sent_count, 2)
+        self.assertIn("model:fresh-model", str(self.api.messages[0][2]))
+        self.assertNotIn("正在读取模型列表", self.api.messages[0][1])
+
+    async def test_cached_selection_rechecked_on_refresh_and_close_supersedes_it(self):
+        await self.handle(update("/model"))
+        for action in ("removed", "valid", "closed"):
+            with self.subTest(action=action):
+                self.store.set_model(12345, None)
+                release = self.hold_lookup(("new-model-high",))
+                await self.bridge.handle(callback_update("selector:refresh"))
+                await self.bridge.reply_worker
+                self.assertIn("正在刷新缓存", self.api.messages[0][1])
+                target = "gemini-4-carbon-high" if action == "removed" else "new-model-high"
+                self.assertIn(target, str(self.api.messages[0][2]))
+                await self.bridge.handle(callback_update("choose:" + target))
+                self.assertIsNone(self.store.get_model(12345))
+                if action == "closed":
+                    await self.bridge.handle(callback_update("selector:close"))
+                task = self.bridge.model_check_task
+                release.set()
+                await task
+                await self.bridge.reply_worker
+                self.assertEqual(self.store.get_model(12345), target if action == "valid" else None)
+                if action == "closed":
+                    self.assertIn("已关闭选择", self.api.messages[0][1])
+                    self.assertFalse(self.api.messages[0][2]["inline_keyboard"])
 
     async def test_first_open_fetches_current_account_without_chat_probe(self):
         self.assertEqual(self.bridge._model_choices(), [])
@@ -42,6 +104,12 @@ class DynamicModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ids, frozenset(self.runner.list_models.return_value))
         self.assertNotIn("gemini-3.8-flash-high", ids)
         self.assertIn("自动刷新", self.api.messages[-1][1])
+
+    async def test_refresh_of_uneditable_old_menu_delivers_one_replacement(self):
+        with patch.object(self.api, "edit", side_effect=TelegramError(code=400)):
+            await self.handle(callback_update("selector:refresh", message_id=123))
+        self.assertEqual(self.api.sent_count, 1)
+        self.assertIn("model:gemini-4-carbon-high", str(self.api.sent_messages[0][2]))
 
     async def test_cache_expiry_and_manual_refresh_replace_instead_of_merge(self):
         await self.handle(update("/model"))
