@@ -202,6 +202,21 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.set_model_health({"bad;model": {"outcome": "success"}})
 
+    def test_invalid_model_health_fields_are_isolated(self):
+        path = self.directory / "model-health.json"
+        models = {"bad-outcome": {"outcome": []},
+                  "bad-time": {"outcome": "error", "checked_at": 10 ** 400},
+                  "good-model": {"outcome": "success"}}
+        atomic_json(path, {"checked_at": 123, "models": models})
+        health = self.store.get_model_health()["models"]
+        self.assertNotIn("bad-outcome", health)
+        self.assertEqual(health["bad-time"]["checked_at"], 0)
+        self.assertEqual(health["good-model"]["checked_at"], 123)
+        atomic_json(path, {"checked_at": 10 ** 400, "models": models})
+        self.assertEqual(self.store.get_model_health(), {"checked_at": 0.0, "models": {}})
+        with self.assertRaises(ValueError):
+            self.store.set_model_health({"bad-time": models["bad-time"]})
+
     def test_dynamic_whitelist_management(self):
         self.assertEqual(self.store.get_extra_whitelist(), [])
         self.assertFalse(self.store.add_whitelist(12345))

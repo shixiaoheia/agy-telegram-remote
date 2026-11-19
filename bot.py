@@ -22,13 +22,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from agy_runner import Result, Runner
+from agy_runner import Result, Runner, valid_duration
 from command_handlers import CommandHandlers
 from i18n import (EN_CATEGORY_HELP, EN_DETAILS, EN_OUTCOMES, EN_OUTCOME_HELP, bot_commands, callback_language,
                   english_activity, english_attachment, english_callback_notice, english_detail, localize_markup)
 from proxy_manager import ProxyError, check_bot_proxy_environment
 from settings import ConfigError, MODEL_RE, resolve_model, Settings
-from state_store import Store, atomic_json
+from state_store import Store, atomic_json, valid_timestamp
 from updater import SERVICE as UPDATE_SERVICE, TERMINAL as UPDATE_TERMINAL, read_status as read_update_status, status_text as update_status_text, systemctl as update_systemctl
 from telegram_api import TelegramAPI, TelegramError, chunks_utf16
 from telegram_formatting import (clean_model_reply, control_html, html_chunks,
@@ -191,7 +191,7 @@ def task_title(text: str, fallback: str = "未命名任务") -> str:
 
 
 def record_time_label(stamp: object, now: float | None = None) -> str:
-    if type(stamp) not in {int, float} or not 0 < stamp <= 253402300799 or not math.isfinite(stamp):
+    if not valid_timestamp(stamp, allow_zero=False):
         return "时间未知"
     try:
         value = datetime.fromtimestamp(stamp)
@@ -234,14 +234,14 @@ def history_summary(records: list[dict], language: str = "zh") -> tuple[str, dic
     keyboard: list[list[dict[str, str]]] = []
     for index, record in enumerate(records, 1):
         duration = record.get("duration_seconds")
-        has_duration = type(duration) in {int, float} and math.isfinite(duration) and duration > 0
+        has_duration = valid_duration(duration) and duration > 0
         raw_delivery = str(record.get("delivery") or "")
         if english:
             title = ui_excerpt(record.get("title"), 80, "Untitled task")
             outcome = EN_OUTCOMES.get(str(record.get("outcome", "error")), "Review the result")
             stamp = record.get("updated_at")
             when = "Unknown time"
-            if type(stamp) in {int, float} and math.isfinite(stamp) and 0 <= stamp <= 253402300799:
+            if valid_timestamp(stamp):
                 try:
                     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp))
                 except (OSError, ValueError, OverflowError):
@@ -286,11 +286,6 @@ def history_summary(records: list[dict], language: str = "zh") -> tuple[str, dic
     return "\n".join(lines), {"inline_keyboard": keyboard} if keyboard else None
 
 
-def supports_effort(model: str) -> bool:
-    """Only future/custom models may receive the separate CLI --effort flag."""
-    return not model or not CATALOG_VARIANT_RE.fullmatch(model)
-
-
 def variant_model_for_effort(model: str, effort: str,
                             model_ids=frozenset()) -> str | None:
     """Return a concrete catalog slug, never an unsupported reasoning suffix."""
@@ -306,14 +301,8 @@ def selected_variant_effort(model: str) -> str | None:
     return match.group(2) if match else None
 
 
-def has_effort_picker(model: str) -> bool:
-    return bool(selected_variant_effort(model)) or supports_effort(model)
-
-
 def effort_label(effort: str | None, model: str) -> str:
     chosen = selected_variant_effort(model) or effort
-    if not supports_effort(model) and not chosen:
-        return "模型内置"
     return {"low": "极速", "medium": "均衡", "high": "深度", "xhigh": "超高", "max": "最高"}.get(chosen or "", "默认")
 
 
@@ -338,7 +327,7 @@ def describe(record: dict) -> str:
     model = record.get("model", "")
     model_tag = f"｜{model}" if model else ""
     duration = record.get("duration_seconds")
-    duration_tag = f"｜⏱️ {duration}s" if isinstance(duration, (int, float)) and duration > 0 else ""
+    duration_tag = f"｜⏱️ {duration}s" if valid_duration(duration) and duration > 0 else ""
 
     parts = [f"{title}{model_tag}{duration_tag}"]
 
@@ -348,7 +337,7 @@ def describe(record: dict) -> str:
         parts.append("ℹ️ 说明\n" + str(record["detail"]))
 
     stats = []
-    if isinstance(duration, (int, float)) and duration > 0:
+    if duration_tag:
         stats.append(f"• ⏱️ 执行耗时：{duration}s")
     if model:
         stats.append(f"• 🏷️ 选用模型：{model}")
@@ -510,7 +499,7 @@ def result_footer(record: dict, language: str = "zh") -> str:
     duration = record.get("duration_seconds")
     elapsed = (
         f"{duration:g}s"
-        if type(duration) in {int, float} and 0 <= duration <= 1e12 and math.isfinite(duration)
+        if valid_duration(duration)
         else ("Not provided" if english else "未提供")
     )
 
@@ -1128,8 +1117,10 @@ class Bridge(CommandHandlers):
         legacy = resolve_model(clean)
         return legacy if legacy in ids else clean
 
-    def _model_is_known_unavailable(self, model: str) -> bool:
-        result = self._model_health().get("models", {}).get(model)
+    def _model_is_known_unavailable(self, model: str, health: dict | None = None) -> bool:
+        if health is None:
+            health = self._model_health()["models"]
+        result = health.get(model)
         return (isinstance(result, dict) and result.get("outcome") != "success"
                 and result.get("category") in {"model", "entitlement"}
                 and result.get("checked_at", 0) >= self.model_catalog["checked_at"])
@@ -2016,11 +2007,11 @@ class Bridge(CommandHandlers):
         return choices
 
     def _variant_ids(self):
-        return frozenset(model for _, variants in self._model_choices() for model in variants)
+        return frozenset(self.model_catalog["models"])
 
-    def _has_model_effort_picker(self, model: str) -> bool:
-        # For catalog entries, offer only variants actually returned by agy.
-        return bool(selected_variant_effort(model)) if model in self._variant_ids() else has_effort_picker(model)
+    def _allows_separate_effort(self, model: str) -> bool:
+        # Catalog entries use the reasoning profile built into their model ID.
+        return not selected_variant_effort(model) and model not in self.model_catalog["models"]
 
     def _model_callback(self, model: str, *, choosing: bool = False) -> str:
         prefix = "choose:" if choosing else "model:"
@@ -2043,12 +2034,14 @@ class Bridge(CommandHandlers):
         notices = []
         health = self._model_health().get("models", {})
         choices = self._model_choices()
-        pages = max(1, math.ceil(len(choices) / 10))
+        visible = []
+        for label, variants in choices:
+            usable = [model for model in variants if not self._model_is_known_unavailable(model, health)]
+            if usable:
+                visible.append((label, variants, usable))
+        pages = max(1, math.ceil(len(visible) / 10))
         page = max(0, min(page, pages - 1))
-        for label, variants in choices[page * 10:(page + 1) * 10]:
-            usable = [x for x in variants if not self._model_is_known_unavailable(x)]
-            if not usable:
-                continue
+        for label, variants, usable in visible[page * 10:(page + 1) * 10]:
             verified = [x for x in usable if health.get(x, {}).get("outcome") == "success"]
             target = (verified or usable)[0]
             failed = health.get(target, {}).get("outcome") not in {None, "success"}
@@ -2077,19 +2070,18 @@ class Bridge(CommandHandlers):
         text += ("\nAuto-refreshes on opening (60s cache). List visibility does not guarantee quota." if english
                  else "\n打开时自动刷新（缓存 60 秒）；列表可见不代表额度充足。")
         stamp = health.get(current, {}).get("checked_at", 0)
-        if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0:
+        if not valid_timestamp(stamp, allow_zero=False):
+            checked = "Not checked" if english else "未检测"
+        elif english:
+            try:
+                checked = time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(stamp))
+            except (OSError, OverflowError, ValueError):
+                checked = "Unknown"
+        else:
             age = max(0, int(time.time() - stamp))
             checked = ("刚刚" if age < 60 else f"{age // 60} 分钟前" if age < 3600
                        else f"{age // 3600} 小时前" if age < 86400 else record_time_label(stamp))
-        else:
-            checked = "未检测"
         if english:
-            try:
-                checked = (time.strftime("%Y-%m-%d %H:%M:%S %z", time.localtime(stamp))
-                           if type(stamp) in {int, float} and math.isfinite(stamp) and stamp > 0
-                           else "Not checked")
-            except (OSError, OverflowError, ValueError):
-                checked = "Unknown"
             text += f"\nLast checked: {checked}\nChecks consume model quota and do not change your selection."
         else:
             text += f"\n当前模型上次检测：{checked}\n检测会消耗模型额度，不更改选定模型。"
@@ -2103,13 +2095,16 @@ class Bridge(CommandHandlers):
         model = current if model is None else model
         curr = selected_variant_effort(current) or self.store.get_effort(user)
         buttons = []
+        variant_effort = selected_variant_effort(model)
+        ids = self._variant_ids()
+        health = self._model_health()["models"] if variant_effort else {}
         for effort in ("low", "medium", "high", "xhigh", "max"):
-            if effort in {"xhigh", "max"} and not selected_variant_effort(model):
+            if effort in {"xhigh", "max"} and not variant_effort:
                 continue
-            variant = variant_model_for_effort(model, effort, self._variant_ids())
-            if selected_variant_effort(model) and variant is None:
+            variant = variant_model_for_effort(model, effort, ids)
+            if variant_effort and variant is None:
                 continue
-            if variant and self._model_is_known_unavailable(variant):
+            if variant and self._model_is_known_unavailable(variant, health):
                 continue
             selected = current == variant if variant else curr == effort and current == model
             icon = {"low": "⚡", "medium": "⚖️", "high": "🔍", "xhigh": "🧠", "max": "🧠"}[effort]
@@ -2462,10 +2457,6 @@ class Bridge(CommandHandlers):
             self.store.set_effort(user, None)
             current = self.store.get_model(user) or self.settings.model or ""
             self._answer_callback(cq_id, text="已恢复默认" if reset else "模型已切换")
-            if not reset and supports_effort(resolved) and resolved not in self._variant_ids():
-                picker, keyboard = self._effort_picker(user, resolved)
-                self.queue_selector_edit(chat_id, message, picker, keyboard)
-                return
             text = f"{'已恢复默认' if reset else '已切换模型'}\n当前：{self._model_label(current)}\n后续任务生效"
             if self.store.get_language(user) == "en":
                 text = f"{'Default restored' if reset else 'Model changed'}\nCurrent: {current or 'Default (agy setting)'}\nApplies to future tasks"
@@ -2502,7 +2493,7 @@ class Bridge(CommandHandlers):
                 if selected_variant_effort(model):
                     self._answer_callback(cq_id, text="该模型暂不提供这一思考档位", show_alert=True)
                     return
-            if not supports_effort(model):
+            if not self._allows_separate_effort(model):
                 self.store.set_effort(user, None)
                 collapsed = f"✅ 已切换至：{model}｜思考强度：模型内置"
                 if self.store.get_language(user) == "en":
@@ -2719,7 +2710,7 @@ class Bridge(CommandHandlers):
         conv = self.store.get_conversation(user)
         conv_id = conv.get("conversation_id", "") if conv else ""
         effort = self.store.get_effort(user) or ""
-        if not supports_effort(user_model):
+        if effort and not self._allows_separate_effort(user_model):
             # Repair preferences saved by older versions before invoking agy.
             effort = ""
             self.store.set_effort(user, None)
