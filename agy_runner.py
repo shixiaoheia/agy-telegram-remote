@@ -355,7 +355,7 @@ async def read_stream_events(stream: asyncio.StreamReader, limit: int,
                              progress: Callable[[str], Awaitable[None]]) -> Capture:
     """Bound stdout while consuming line-delimited events for safe progress text."""
     kept = bytearray()
-    pending = bytearray()
+    pending: bytearray | None = bytearray()
     total = 0
     while True:
         chunk = await stream.read(65536)
@@ -366,11 +366,17 @@ async def read_stream_events(stream: asyncio.StreamReader, limit: int,
             kept.extend(chunk[:limit - len(kept)])
         if total > limit:
             overflow.set()
-        pending.extend(chunk)
-        while b"\n" in pending:
-            raw, _, tail = pending.partition(b"\n")
-            pending = bytearray(tail)
-            if len(raw) > 65536:
+        parts = chunk.split(b"\n")
+        for index, part in enumerate(parts):
+            if pending is not None:
+                if len(pending) + len(part) > 65536:
+                    pending = None  # Discard the entire long line, including later fragments.
+                else:
+                    pending.extend(part)
+            if index == len(parts) - 1:
+                break
+            raw, pending = pending, bytearray()
+            if not raw:
                 continue
             try:
                 activity = stream_activity(json.loads(raw.decode("utf-8")))
@@ -382,13 +388,17 @@ async def read_stream_events(stream: asyncio.StreamReader, limit: int,
                 except Exception:
                     # Telegram status delivery must never affect the task process.
                     pass
-        if len(pending) > 65536:
-            pending.clear()
     return Capture(bytes(kept), total)
 
 
 def live_group(pgid: int) -> bool:
     """Linux: ignore zombies; a live child matters even after its parent exited."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # A group exists. Inspect visible members conservatively below.
     observed = False
     unreadable = False
     for entry in Path("/proc").iterdir():

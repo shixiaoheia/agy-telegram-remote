@@ -466,8 +466,10 @@ def html_chunks(text: str, units: int = 3400) -> list[str]:
             if token.startswith("</") and name.group(1) in {"pre", "blockquote"}:
                 boundary = (len(current), used, list(stack))
             continue
-        value = html.unescape(token)
-        size = utf16_units(value)
+        if len(token) == 1:
+            size = 2 if ord(token) > 0xFFFF else 1
+        else:
+            size = utf16_units(html.unescape(token))
         if used and used + size > units:
             if boundary and boundary[1] >= units // 2:
                 cut, consumed, previous = boundary

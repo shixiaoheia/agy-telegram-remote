@@ -98,6 +98,50 @@ class QueueRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.bridge.waiting_jobs), [other])
         self.bridge.slot = None
 
+    async def test_status_opens_queue_in_place_and_failed_cancel_can_be_retried(self):
+        self.store.set_language(12345, "en")
+        self.bridge.slot = Job(12345, 12345)
+        self.bridge.waiting_jobs.extend([(12345, 12345, "first"), (67890, 67890, "private"), (12345, 12345, "last")])
+        await self.bridge.handle(update("/status"))
+        await self.bridge.reply_worker
+        self.assertIn("📋 My queue", str(self.api.messages[0][2]))
+        await self.bridge.handle(callback_update("queue:view"))
+        await self.bridge.reply_worker
+        self.assertNotIn("private", self.api.messages[0][1])
+        self.assertIn("3. last", self.api.messages[0][1])
+        cancel = self.api.messages[0][2]["inline_keyboard"][0][0]["callback_data"]
+        with patch.object(self.store, "save_queue", side_effect=OSError("full")):
+            await self.bridge.handle(callback_update(cancel))
+        self.assertEqual(len(self.bridge.waiting_jobs), 3)
+        await self.bridge.handle(callback_update(cancel))
+        await self.bridge.reply_worker
+        self.assertIn("2. last", self.api.messages[0][1])
+        self.assertNotIn("1. first", self.api.messages[0][1])
+        self.assertEqual(self.api.sent_count, 1)
+        await self.bridge.handle(callback_update(cancel))
+        self.assertEqual(len(self.bridge.waiting_jobs), 2)
+        self.assertIn("🔄 Refresh queue", str(self.api.messages[0][2]))
+
+    async def test_resume_button_binds_to_one_recovered_head_and_owner(self):
+        self.store.save_queue([(12345, 12345, "first"), (12345, 12345, "second")])
+        self.bridge = Bridge(self.settings, self.api, self.store, self.runner)
+        await self.bridge.handle(update("/queue"))
+        await self.bridge.reply_worker
+        keyboard = self.api.messages[0][2]["inline_keyboard"]
+        resume = next(b["callback_data"] for row in keyboard for b in row if b["callback_data"].startswith("queue:resume:"))
+        await self.bridge.handle(callback_update(resume, user=67890, chat_id=67890))
+        self.assertTrue(self.bridge.queue_paused)
+        self.runner.hold = True
+        await self.bridge.handle(callback_update(resume))
+        await asyncio.wait_for(self.runner.started.wait(), 1)
+        self.assertTrue(self.bridge.queue_paused)
+        await self.bridge.handle(callback_update(resume))
+        self.runner.finish.set()
+        await self.bridge.slot.worker
+        self.assertTrue(self.bridge.queue_paused)
+        self.assertEqual(self.runner.calls, 1)
+        self.assertEqual(self.store.load_queue(self.settings.max_prompt), [(12345, 12345, "second")])
+
     async def test_result_recovers_after_restart_without_rerun(self):
         self.runner.hold = True
         self.runner.result = Result('success', text='recovery payload')

@@ -946,11 +946,42 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initialize_registers_telegram_command_menu(self):
         await self.bridge.initialize()
+        await asyncio.gather(*self.bridge.callback_tasks)
         command_call = next(payload for method, payload in self.api.calls if method == "setMyCommands")
         self.assertIn({"command": "cancel", "description": "取消正在执行的任务"}, command_call["commands"])
         self.assertIn({"command": "steer", "description": "停止当前任务并按修正重做"}, command_call["commands"])
         self.assertIn({"command": "start", "description": "欢迎页与快速开始"}, command_call["commands"])
         self.assertIn({"command": "history", "description": "查看最近 10 条任务"}, command_call["commands"])
+
+    async def test_slow_menu_registration_does_not_hold_up_new_messages(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def delayed_menu(commands):
+            entered.set()
+            await release.wait()
+
+        with patch.object(self.api, "set_commands", side_effect=delayed_menu):
+            try:
+                await asyncio.wait_for(self.bridge.initialize(), 1)
+                await asyncio.wait_for(entered.wait(), 1)
+                await self.bridge.consume_updates([update("/status", update_id=10)])
+                await self.bridge.reply_worker
+                self.assertIn("status:details", str(self.api.sent_messages[-1][2]))
+            finally:
+                release.set()
+                await asyncio.gather(*self.bridge.callback_tasks)
+
+    async def test_task_admission_only_checks_submitters_results(self):
+        self.store.save(67890, {"outcome": "success"})
+        self.runner.hold = True
+        with patch.object(self.store, "maintain", wraps=self.store.maintain) as sweep, \
+                patch.object(self.store, "load", wraps=self.store.load) as read_last, \
+                patch.object(self.store, "history", wraps=self.store.history) as read_history:
+            await self.bridge.handle(update("new task"))
+            await asyncio.wait_for(self.runner.started.wait(), 1)
+            sweep.assert_not_called()
+            read_last.assert_called_once_with(12345)
+            read_history.assert_called_once_with(12345)
 
     async def test_callback_query_switches_model_and_answers(self):
         await self.handle(callback_update("choose:claude-opus-5-5-medium", cq_id="cq_opus"))

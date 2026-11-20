@@ -6,13 +6,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 try:
     from .common import settings_at
 except ImportError:
     from common import settings_at
 from agy_runner import (Runner, build_command, child_environment, classify,
-                        live_group, parse_result, parse_stream_result, read_bounded,
+                        live_group, parse_result, parse_stream_result, read_bounded, read_stream_events,
                         stream_activity)
 
 class ParserTests(unittest.TestCase):
@@ -197,6 +198,20 @@ class ParserTests(unittest.TestCase):
         self.assertIn("HTTPS_PROXY", env)
 
 class CaptureTests(unittest.IsolatedAsyncioTestCase):
+    def test_absent_process_group_skips_proc_scan(self):
+        with patch("agy_runner.os.killpg", side_effect=ProcessLookupError), \
+                patch.object(Path, "iterdir", side_effect=AssertionError("unexpected process scan")):
+            self.assertFalse(live_group(12345))
+
+    async def test_progress_discards_whole_oversized_line_and_resumes_at_next_event(self):
+        chunks = [b"x" * 65536, b"y" * 100, b'{"event":"init"}\n{"event":"in', b'it"}\n']
+        reader = asyncio.StreamReader()
+        with patch.object(reader, "read", new=AsyncMock(side_effect=[*chunks, b""])):
+            progress = AsyncMock()
+            result = await read_stream_events(reader, 100000, asyncio.Event(), progress)
+        self.assertEqual(result.data, b"".join(chunks))
+        progress.assert_awaited_once_with("模型会话已启动")
+
     async def test_prefix_bounded_and_overflow_marked(self):
         stream = asyncio.StreamReader()
         stream.feed_data(b"x" * 4096)

@@ -88,6 +88,7 @@ _BUTTONS = {
     "🔄 立即刷新": "🔄 Refresh now",
     "🧠 确认新建": "🧠 Confirm new conversation", "↩️ 保留当前对话": "↩️ Keep conversation",
     "📥 排到下一项": "📥 Queue as a task",
+    "📋 我的队列": "📋 My queue", "🔄 刷新队列": "🔄 Refresh queue", "▶️ 恢复队首": "▶️ Resume first task",
     "✏️ 作为修正": "✏️ Apply correction", "✖️ 忽略补充": "✖️ Ignore",
     "🤖 更换模型": "🤖 Change model", "编辑": "Edit", "规划": "Plan", "跟随默认": "Default",
 }
