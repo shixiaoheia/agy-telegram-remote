@@ -25,6 +25,7 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
         local_proxy.start()
         self.addCleanup(local_proxy.stop)
         self.responses = []
+        self.method_responses = {}
         self.requests = []
         self.connections = []
         self.file_body = b"fixture"
@@ -36,8 +37,9 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
             def do_POST(self):
                 body = self.rfile.read(int(self.headers["Content-Length"]))
                 outer.connections.append(self.client_address[1])
-                outer.requests.append((self.path.rsplit("/", 1)[-1], json.loads(body)))
-                status, value = outer.responses.pop(0)
+                method = self.path.rsplit("/", 1)[-1]
+                outer.requests.append((method, json.loads(body)))
+                status, value = outer.method_responses.get(method, outer.responses).pop(0)
                 raw = value if isinstance(value, bytes) else json.dumps(value).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
@@ -229,18 +231,18 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
             config.agy.chmod(0o700)
             store = Store(config.state_dir, config.allowed, config.max_reply, 7, config.token)
             bridge = Bridge(config, self.api, store, Runner(config, terminate_grace=0.1))
-            self.responses.extend([
-                (200, {"ok": True, "result": {"id": 10, "is_bot": True}}),
-                (200, {"ok": True, "result": True}),
-                (200, {"ok": True, "result": {"url": ""}}),
-                (200, {"ok": True, "result": []}),
-                (200, {"ok": True, "result": {"message_id": 1}}),
-                # The result replaces the progress bubble; this edit fails.
-                (502, b"temporary gateway error"),
-                # Final card explains delivery failure and offers retrieval buttons.
-                (200, {"ok": True, "result": True}),
-                (200, {"ok": True, "result": {"message_id": 2}}),
-            ])
+            self.method_responses = {
+                "getMe": [(200, {"ok": True, "result": {"id": 10, "is_bot": True}})],
+                "getWebhookInfo": [(200, {"ok": True, "result": {"url": ""}})],
+                "getUpdates": [(200, {"ok": True, "result": []})],
+                "setMyCommands": [(200, {"ok": True, "result": True})],
+                "sendMessage": [
+                    (200, {"ok": True, "result": {"message_id": 1}}),  # Task accepted.
+                    (502, b"temporary gateway error"),                 # New result message fails.
+                    (200, {"ok": True, "result": {"message_id": 2}}),  # Manual /last retrieval.
+                ],
+                "editMessageText": [(200, {"ok": True, "result": True})],
+            }
             await bridge.initialize()
             def event(text, uid):
                 return {"update_id": uid, "message": {
@@ -256,6 +258,8 @@ class TelegramHTTPTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(marker.read_text(), "run\n")
             self.assertIn("offline pipeline OK", self.requests[-1][1]["text"])
             self.assertEqual(store.offset(), 3)
+            await asyncio.gather(*bridge.callback_tasks)
+            self.assertTrue(all(not replies for replies in self.method_responses.values()))
             store.close()
 
     async def test_incomplete_http_response_sanitized(self):

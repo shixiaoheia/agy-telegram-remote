@@ -162,7 +162,7 @@ pid=$(systemctl show agy-telegram-remote -p MainPID --value)
 | `/new` 或 `/reset` | 清空当前对话记忆，开始新会话 |
 | `/status` | 查看任务概览，点击详情或刷新；`/status details` 查看完整信息 |
 | `/cancel` | 取消当前任务 |
-| `/queue` | 查看自己的等待任务，并通过按钮逐项取消 |
+| `/queue` | 查看自己的等待任务和位置，可原地刷新、逐项取消或确认恢复队首。状态页的「我的队列」也可打开 |
 | `/queue add <任务内容>` | 添加一个纯文字等待任务 |
 | `/queue cancel` | 取消自己的全部等待任务 |
 | `/queue resume` | 在队首启动失败或服务重启后，确认恢复自己的队首任务 |

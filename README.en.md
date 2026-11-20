@@ -48,7 +48,7 @@ Send a text task, or attach screenshots, logs, or code files. Individual attachm
 | `/mode` | Select execution mode |
 | `/status` | Check the current task |
 | `/cancel` | Cancel the current task |
-| `/queue` | View waiting tasks; use `/queue add <task>` to queue text |
+| `/queue` | View positions, refresh, cancel an item or resume your paused first task. Also accessible from **My queue** in `/status`. |
 | `/queue cancel`, `/queue resume` | Cancel or resume your waiting tasks |
 | `/steer <correction>` | Stop and restart the current text task with a correction |
 | `/history`, `/last` | Retrieve saved results without rerunning them |

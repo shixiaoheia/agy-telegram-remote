@@ -143,48 +143,67 @@ class CommandHandlers:
         self.queue_reply(chat_id, summary, reply_markup=keyboard, html_mode=details)
 
     async def _command_queue(self, text, user, chat_id, helpers):
-        if text.split(maxsplit=1)[1:] == ["cancel"]:
+        action = text.split(maxsplit=1)[1:]
+        if action == ["cancel"]:
             removed = self._remove_queued(lambda item: item[0] == user)
             self.queue_reply(chat_id, self._text(user,
                              f"🛑 已移除你的 {removed} 个等待任务；正在执行的任务不受影响。" if removed is not None
                              else "⚠️ 无法保存取消操作，请检查服务器存储。",
-                             f"🛑 Removed {removed} of your waiting tasks; the running task is unchanged." if removed is not None
+                             f"🛑 Removed {removed} waiting tasks. Running tasks are unaffected." if removed is not None
                              else "⚠️ Could not save the cancellation; check server storage."))
-        elif text.split(maxsplit=1)[1:] == ["resume"]:
-            if self.waiting_jobs and self.waiting_jobs[0][0] == user:
-                if not self.queue_storage_ok:
-                    try:
-                        self.store.save_queue(list(self.waiting_jobs))
-                    except (OSError, ValueError):
-                        self.queue_reply(chat_id, self._text(user, "⚠️ 队列仍无法保存，请先修复服务器存储。",
-                                                           "⚠️ The queue still cannot be saved; fix server storage first."))
-                        return
-                    self.queue_storage_ok = True
-                self.queue_paused = False
-                self.queue_reply(chat_id, self._text(user, "正在尝试启动你的等待任务。", "Attempting to start your waiting task."))
-                self._wake_queue()
-            else:
-                self.queue_reply(chat_id, self._text(user, "只有队首任务的发起者可以恢复等待队列。",
-                                                   "Only the owner of the first waiting task can resume the queue."))
+        elif action == ["resume"]:
+            _, notice = self._resume_queue(user)
+            self.queue_reply(chat_id, notice)
         else:
-            self.queue_buttons = {key: value for key, value in self.queue_buttons.items() if value[0] != user}
-            entries = [(i, item) for i, item in enumerate(self.waiting_jobs, 1) if item[0] == user]
-            lines, buttons = [], []
-            for position, item in entries:
-                title = self.store.redact(" ".join(item[2].split()))[:60]
-                lines.append(f"{position}. {title}")
-                token = uuid.uuid4().hex[:12]
-                self.queue_buttons[token] = (user, item)
-                buttons.append([{"text": f"🛑 取消第 {position} 项", "callback_data": f"queue:cancel:{token}"}])
-            zh = ("⏳ 你的等待任务：\n" + "\n".join(lines) if lines
-                                       else "ℹ️ 你没有等待中的任务。")
-            zh += ("\n⚠️ 队列已暂停，队首发起者检查后可恢复。" if self.queue_paused else "")
-            zh += "\n/queue add <文字任务> 加入队列；/queue cancel 取消全部；/queue resume 恢复队首。重启后等待确认。"
-            en = ("⏳ Your waiting tasks:\n" + "\n".join(lines) if lines else "ℹ️ You have no waiting tasks.")
-            en += ("\n⚠️ The queue is paused; the first task's owner can review and resume it." if self.queue_paused else "")
-            en += "\n/queue add <text> to add; /queue cancel to cancel yours; /queue resume to resume. Confirmation is required after restart."
-            self.queue_reply(chat_id, self._text(user, zh, en),
-                             reply_markup={"inline_keyboard": buttons} if buttons else None)
+            summary, keyboard = self._queue_card(user)
+            self.queue_reply(chat_id, summary, reply_markup=keyboard)
+
+    def _resume_queue(self, user):
+        if not self.waiting_jobs or self.waiting_jobs[0][0] != user:
+            return False, self._text(user, "只有队首任务的发起者可以恢复等待队列。",
+                                     "Only the owner of the first waiting task can resume the queue.")
+        if not self.queue_storage_ok:
+            try:
+                self.store.save_queue(list(self.waiting_jobs))
+            except (OSError, ValueError):
+                return False, self._text(user, "⚠️ 队列仍无法保存，请先修复服务器存储。",
+                                         "⚠️ The queue still cannot be saved; fix server storage first.")
+            self.queue_storage_ok = True
+        self.queue_paused = False
+        self._wake_queue()
+        return True, self._text(user, "正在尝试启动你的等待任务。", "Attempting to start your waiting task.")
+
+    def _queue_card(self, user):
+        # Keep buttons tied to the same entry when positions change or a card is refreshed.
+        self.queue_buttons = {key: entry for key, entry in self.queue_buttons.items()
+                              if any(item is entry for item in self.waiting_jobs)}
+        tokens = {id(entry): key for key, entry in self.queue_buttons.items()}
+        lines, rows = [], []
+        for position, entry in enumerate(self.waiting_jobs, 1):
+            if entry[0] != user:
+                continue
+            key = tokens.get(id(entry))
+            if key is None:
+                key = uuid.uuid4().hex[:12]
+                self.queue_buttons[key] = entry
+            title = self.store.redact(" ".join(entry[2].split()))[:60]
+            lines.append(f"{position}. {title}")
+            buttons = [{"text": f"🛑 取消第 {position} 项", "callback_data": f"queue:cancel:{key}"}]
+            if position == 1 and self.queue_paused:
+                buttons.append({"text": "▶️ 恢复队首", "callback_data": f"queue:resume:{key}"})
+            rows.append(buttons)
+        if lines:
+            title = self._text(user, "⏳ 你的等待任务：", "⏳ Your waiting tasks:")
+            summary = title + "\n" + "\n".join(lines)
+        else:
+            summary = self._text(user, "ℹ️ 你没有等待中的任务。", "ℹ️ You have no waiting tasks.")
+        if not self.queue_storage_ok:
+            summary = self._text(user, "⚠️ 等待队列存储异常，请检查服务器。", "⚠️ Queue storage is unavailable. Check the server.") + "\n" + summary
+        elif self.queue_paused and self.waiting_jobs:
+            summary += self._text(user, "\n队列已暂停，队首发起者可确认恢复。", "\nPaused. The first task's owner can confirm resumption.")
+        summary += self._text(user, "\n/queue add <文字任务> 可加入队列。", "\nUse /queue add <text> to add a task.")
+        rows.append([{"text": "🔄 刷新队列", "callback_data": "queue:view"}])
+        return summary, {"inline_keyboard": rows}
 
     async def _command_cancel(self, text, user, chat_id, helpers):
         job = self.slot

@@ -766,7 +766,7 @@ class Bridge(CommandHandlers):
         self.queue_task: asyncio.Task | None = None
         self.queue_paused = bool(self.waiting_jobs) or not self.queue_storage_ok
         self.recovered_entries = {id(item) for item in self.waiting_jobs}
-        self.queue_buttons: dict[str, tuple[int, tuple[int, int, str]]] = {}
+        self.queue_buttons: dict[str, tuple[int, int, str]] = {}
         # At most one bounded result per authorized user; never sent before saving.
         self.unsaved_results: dict[int, dict] = {}
         self.unreadable_recovery: set[int] = set()
@@ -834,13 +834,15 @@ class Bridge(CommandHandlers):
         task.add_done_callback(lambda _: self.command_menu_tasks.pop(user, None))
 
     def _status_card(self, user: int, details: bool = False) -> tuple[str, dict]:
-        if self.store.get_language(user) == "en":
-            return self._status_card_en(user, details)
         keyboard = {"inline_keyboard": [[
             {"text": "⬅️ 返回概览" if details else "📋 详细信息",
              "callback_data": "status:summary" if details else "status:details"},
             {"text": "🔄 刷新状态", "callback_data": "status:details" if details else "status:summary"},
         ]]}
+        if any(entry[0] == user for entry in self.waiting_jobs):
+            keyboard["inline_keyboard"].append([{"text": "📋 我的队列", "callback_data": "queue:view"}])
+        if self.store.get_language(user) == "en":
+            return self._status_card_en(user, details, localize_markup(keyboard, "en"))
         if details:
             return control_html(self.store.redact(self._status_details(user))), keyboard
         lines = ["📋 当前状态"]
@@ -865,7 +867,7 @@ class Bridge(CommandHandlers):
             lines.append("正在接收你的相册" if self.pending_album["user"] == user else "工作目录正被其他用户占用")
         elif job is not None:
             lines.append("你当前没有任务；工作目录正被其他白名单用户占用。")
-        elif not self.runner.blocked:
+        elif not self.runner.blocked and not self.waiting_jobs:
             lines.append("你当前没有任务，可以直接发送需求。")
         queued = sum(1 for item in self.waiting_jobs if item[0] == user)
         if queued:
@@ -875,12 +877,7 @@ class Bridge(CommandHandlers):
         lines.append("路径、权限和启动时间可点“详细信息”查看。")
         return self.store.redact("\n".join(lines)), keyboard
 
-    def _status_card_en(self, user: int, details: bool) -> tuple[str, dict]:
-        keyboard = {"inline_keyboard": [[
-            {"text": "⬅️ Overview" if details else "📋 Details",
-             "callback_data": "status:summary" if details else "status:details"},
-            {"text": "🔄 Refresh", "callback_data": "status:details" if details else "status:summary"},
-        ]]}
+    def _status_card_en(self, user: int, details: bool, keyboard: dict) -> tuple[str, dict]:
         current = self.store.get_model(user) or self.settings.model or "Default (agy setting)"
         job = self.slot
         lines = ["📋 Current status"]
@@ -908,7 +905,7 @@ class Bridge(CommandHandlers):
                          else "The workspace is in use by another user")
         elif job is not None:
             lines.append("You have no active task; the workspace is in use by another user.")
-        elif not self.runner.blocked:
+        elif not self.runner.blocked and not self.waiting_jobs:
             lines.append("You have no active task. Send a message to begin.")
         queued = sum(1 for item in self.waiting_jobs if item[0] == user)
         if queued:
@@ -2512,16 +2509,31 @@ class Bridge(CommandHandlers):
                 self._answer_callback(cq_id, text="该任务已结束或不可取消")
             return
 
-        if data.startswith("queue:cancel:"):
-            key = data.removeprefix("queue:cancel:")
+        if data == "queue:view":
+            self._answer_callback(cq_id)
+            self.queue_selector_edit(chat_id, message, *self._queue_card(user))
+            return
+
+        if data.startswith(("queue:cancel:", "queue:resume:")):
+            _, action, key = data.split(":", 2)
             entry = self.queue_buttons.get(key)
-            if not entry or entry[0] != user or not any(item is entry[1] for item in self.waiting_jobs):
+            if entry is None or entry[0] != user or not any(item is entry for item in self.waiting_jobs):
                 self._answer_callback(cq_id, text="这条等待任务已失效。")
                 return
-            self.queue_buttons.pop(key, None)
-            removed = self._remove_queued(lambda item: item is entry[1])
-            self._answer_callback(cq_id, text="已取消等待任务" if removed else "保存失败，请检查存储")
-            self.queue_reply(chat_id, self._text(user, "🛑 已取消这条等待任务。", "🛑 Waiting task cancelled.") if removed else self._text(user, "⚠️ 无法保存取消操作，请检查服务器存储。", "⚠️ Could not save the cancellation; check server storage."))
+            if action == "resume":
+                if not self.queue_paused or self.waiting_jobs[0] is not entry:
+                    self._answer_callback(cq_id, text="这条等待任务已失效。")
+                    return
+                ok, notice = self._resume_queue(user)
+            else:
+                ok = bool(self._remove_queued(lambda item: item is entry))
+                notice = self._text(user, "🛑 已取消这条等待任务。", "🛑 Waiting task cancelled.") if ok else self._text(
+                    user, "⚠️ 无法保存取消操作，请检查服务器存储。", "⚠️ Could not save the cancellation; check server storage.")
+            self._answer_callback(cq_id, text=notice, show_alert=not ok)
+            if ok:
+                self.queue_buttons.pop(key, None)
+                summary, keyboard = self._queue_card(user)
+                self.queue_selector_edit(chat_id, message, notice + "\n\n" + summary, keyboard)
             return
 
         if data.startswith("history:"):
@@ -2820,7 +2832,10 @@ class Bridge(CommandHandlers):
                   has_attachment=bool(items))
         self.slot = job  # reserve before first await
         try:
-            self.store.maintain()
+            # Validate the submitting user's saved results before starting work.
+            # Startup recovery and periodic maintenance sweep the full store.
+            self.store.load(user)
+            self.store.history(user)
             self.store.save(user, {
                 "job_id": job.job_id, "outcome": "running", "delivery": "pending",
                 "title": job.history_title,
@@ -2928,14 +2943,16 @@ class Bridge(CommandHandlers):
                 LOG.info("telegram_update_received age_seconds=%.2f", max(0.0, time.time() - stamp))
             await self.handle(update)
 
-    async def initialize(self) -> None:
-        me = await self.api.call("getMe")
-        if not isinstance(me, dict) or me.get("is_bot") is not True:
-            raise TelegramError()
+    async def _register_default_commands(self) -> None:
         try:
             await self.api.set_commands(bot_commands("zh"))
         except (TelegramError, AttributeError):
             LOG.warning("telegram_command_menu_unavailable")
+
+    async def initialize(self) -> None:
+        me = await self.api.call("getMe")
+        if not isinstance(me, dict) or me.get("is_bot") is not True:
+            raise TelegramError()
         webhook = await self.api.call("getWebhookInfo")
         if not isinstance(webhook, dict) or webhook.get("url"):
             raise RuntimeError("An active webhook must be removed explicitly before polling")
@@ -2956,6 +2973,7 @@ class Bridge(CommandHandlers):
             self.offset = max(self.offset, item["update_id"] + 1)
         self.store.save_offset(self.offset)
         self.store.recover_interrupted()
+        self._last_maintenance = time.monotonic()
         if self.ready_file is not None:
             atomic_json(self.ready_file, {
                 "pid": os.getpid(),
@@ -2963,6 +2981,9 @@ class Bridge(CommandHandlers):
                 "polling_ready": False,
                 "started_at": self._started_at,
             })
+        menu = asyncio.create_task(self._register_default_commands())
+        self.callback_tasks.add(menu)
+        menu.add_done_callback(self.callback_tasks.discard)
         LOG.info("INITIALIZED pid=%s", os.getpid())
 
     async def initialize_with_retry(self) -> None:
